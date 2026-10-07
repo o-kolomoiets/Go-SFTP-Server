@@ -151,4 +151,4 @@
 | Дата | Что сделано | Где |
 |---|---|---|
 | 2026-10-07 | Roadmap | [o-kolomoiets/Go-SFTP-Server#1](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/1) |
-| 2026-10-07 | M0: расчистка, скелет, CI, гигиена, документы, ADR | [o-kolomoiets/Go-SFTP-Server#1](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/1) |
+| 2026-10-07 | M0: расчистка, скелет, CI, гигиена, документы, ADR; CI зелёный (12/12) | [o-kolomoiets/Go-SFTP-Server#2](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/2) |
