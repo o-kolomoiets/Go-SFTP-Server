@@ -1,0 +1,33 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Security problems must be reported privately (see SECURITY.md), not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Commands, client used (e.g. OpenSSH sftp 9.6, WinSCP 6.x) and a minimal config.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: gosftpd version
+      description: Output of `gosftpd version`
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log or audit output
+      render: text

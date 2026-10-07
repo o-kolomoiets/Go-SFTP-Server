@@ -1,0 +1,68 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - intrange
+    - misspell
+    - modernize
+    - nilerr
+    - noctx
+    - nolintlint
+    - perfsprint
+    - prealloc
+    - revive
+    - sloglint
+    - testifylint
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+  settings:
+    gosec:
+      excludes:
+        - G304 # variable file paths are inherent to an SFTP server; confinement comes from os.Root
+    sloglint:
+      kv-only: true
+      static-msg: true
+      key-naming-case: snake
+      context: scope
+    errorlint:
+      errorf: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec, unparam, prealloc]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/o-kolomoiets/go-sftp-server
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
