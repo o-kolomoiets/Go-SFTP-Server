@@ -1,32 +1,48 @@
-# Go-SFTP-Server
-A a minimal, secure, and easy-to-use SFTP (SSH File Transfer Protocol) server written in Go. It has been designed to
-provide reliable file transfer capabilities over any reliable data stream. The server is configured to listen on port
-55555 and supports basic file operations, including listing, uploading, and downloading files.
+# gosftpd
 
+[![CI](https://github.com/o-kolomoiets/go-sftp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/o-kolomoiets/go-sftp-server/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Key Features:
-- SFTP Protocol Support: Implements a subset of the SFTP protocol for secure file transfers.
-- Directory Whitelist: Configurable directory whitelist to restrict client access only to specified directories. The 
-  server does not allow access to folders at a higher level under any circumstances.
-- File Upload & Download: Supports uploading and downloading files with conflict resolution. If an uploaded file already
-  exists, the new file is renamed to prevent overwriting.
-- Logging: Logs all actions performed by the server for auditing and debugging purposes.
+> **Status: pre-alpha. It does not serve files yet.** The project was restarted
+> from scratch in October 2026; the current code is only the foundation
+> (build, CI, `gosftpd version`). Do not use it for anything real yet.
 
-## Configuration:
-The server configuration is handled via a JSON file that specifies the directories accessible by the server. This
-ensures a secure and controlled environment for file operations.
+gosftpd aims to be a single static binary that turns any directory into a
+secure SFTP drop-box:
 
-## Security:
-Security is a primary concern for Go-SFTP-Server. The server only supports SFTP for secure file transfers and follows
-secure coding practices to mitigate potential security risks.
+- public-key login only by default;
+- every mount is confined with Go's `os.Root`: no escapes via `..`, absolute
+  paths or symlinks;
+- uploads never silently overwrite an existing file (rename, reject, overwrite
+  or keep versions, per mount);
+- every action is written to a JSON audit log;
+- no root, no database, no web UI.
 
-## Usage:
-The project provides a simple and intuitive command-line interface for managing the server. It's designed to be easy to
-use, even for those without a deep understanding of SFTP or Go.
+What it will deliberately **not** do: shell or exec access, port forwarding,
+legacy SCP, FTP/WebDAV, a web interface, object-storage backends. See
+[docs/adr/0002-non-goals.md](docs/adr/0002-non-goals.md).
 
-## Contribution:
-Contributions are welcome! Please read the contribution guidelines before making a pull request.
+## Plan
 
-## Disclaimer: 
-Creating a secure SFTP server from scratch is a non-trivial task. Go-SFTP-Server is a demonstration project and should 
-be thoroughly reviewed and tested before any production use.
+The full plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md)
+(in Russian); progress is tracked in [TASKS.md](TASKS.md). The first usable
+release is the M1 milestone: `gosftpd serve --dir ./share` working with the
+OpenSSH `sftp` and `scp` clients.
+
+## Building
+
+Requires Go 1.26.5 or newer.
+
+```sh
+go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest
+gosftpd version
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: see [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache License 2.0](LICENSE). Versions of this repository before the 2026
+restart were published under GPL-3.0.

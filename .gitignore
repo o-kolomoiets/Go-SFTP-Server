@@ -1,13 +1,32 @@
+# Binaries
+/gosftpd
+/bin/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
+# Test and coverage output (testdata/fuzz must stay tracked)
 *.test
-
 *.out
+/coverage/
 
+# Release and generated artifacts
+/dist/
+/out/
+
+# Local configuration, host keys and data
+config.local.toml
+/gosftpd.toml
+/share/
+*_key
+*.pem
+
+# Go workspace
 go.work
+go.work.sum
 
+# Editors
 .idea/
+.vscode/
