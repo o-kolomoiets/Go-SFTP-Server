@@ -8,8 +8,8 @@
 
 | Milestone | Версия | Статус | Готово |
 |---|---|---|---|
-| M0 Фундамент | — | 🔄 | 15 / 21 |
-| M1 Вертикальный срез | v0.1.0-alpha | ⬜ | 0 / 19 |
+| M0 Фундамент | — | 🔄 | 16 / 21 |
+| M1 Вертикальный срез | v0.1.0-alpha | 🔄 | 17 / 19 |
 | M2 MVP | v0.2.0 | ⬜ | 0 / 9 |
 | M3 Hardening | v0.3.0 | ⬜ | 0 / 11 |
 | M3b Windows | — | ⬜ | 0 / 3 |
@@ -38,9 +38,9 @@
 | M0-15 | Трекер задач | ✅ | Этот файл вместо GitHub milestones и issues; переносить в issues, когда появятся контрибьюторы |
 | M0-16 | `CODE_OF_CONDUCT.md` (Contributor Covenant 3.0) | ⬜ 👤 | Нужен контакт для жалоб (email): владелец сообщает, текст добавлю |
 | M0-17 | Переименовать репозиторий в `go-sftp-server` | ⬜ 👤 | Settings → General → Repository name. Не обязательно: GitHub не различает регистр в URL |
-| M0-18 | Включить private vulnerability reporting, secret scanning + push protection, CodeQL default setup | ⬜ 👤 | Settings → Security (Code security and analysis). Без PVR ссылка из `SECURITY.md` не работает |
+| M0-18 | Включить private vulnerability reporting, secret scanning + push protection, CodeQL default setup | 🔄 👤 | Secret Protection, push protection и Dependabot alerts/security updates включены. Осталось: проверить private vulnerability reporting, включить CodeQL (Default) |
 | M0-19 | Ruleset на `main`: PR обязателен (approvals: 0), required check `ci-ok`, code scanning, linear history, без force-push | ⬜ 👤 | Settings → Rules → Rulesets; после мержа PR, когда `ci-ok` пройдёт хотя бы раз |
-| M0-20 | DoD: `go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest` работает | ⬜ | Проверить после мержа в `main` |
+| M0-20 | DoD: `go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest` работает | ✅ | Проверено 2026-10-07 на чистом GOBIN |
 | M0-21 | DoD: страница Community Standards закрыта полностью | ⬜ | После M0-16 |
 
 ## M1: Вертикальный срез (v0.1.0-alpha)
@@ -49,25 +49,25 @@
 
 | ID | Задача | Статус | Где / заметка |
 |---|---|---|---|
-| M1-01 | Spike: handshake + subsystem `sftp` + `exit-status` в in-process тесте; зависимости x/crypto v0.57.0, pkg/sftp v1.13.11 | ⬜ | Первым шагом |
-| M1-02 | `internal/hostkey`: генерация ed25519 (`O_EXCL`, 0600), загрузка с проверкой прав, RSA только SHA-2, fingerprint и known_hosts | ⬜ | |
-| M1-03 | `internal/server`: `ServerConfig` (профиль `modern`, `MaxAuthTries 6`, `ServerVersion`, `AuthLogCallback`) | ⬜ | §7.6 |
-| M1-04 | Accept-цикл: deadline на handshake 30 с, `recover`, учёт соединений, backoff | ⬜ | |
-| M1-05 | Каналы: только `session` (≤ 4 на соединение), subsystem через `ssh.Unmarshal`, остальное `Reply(false)` | ⬜ | |
-| M1-06 | `RequestServer` + `exit-status` (0 при `nil`/`io.EOF`, иначе 1) | ⬜ | T1 |
-| M1-07 | Graceful shutdown (SIGINT/SIGTERM, `shutdown_timeout`), SIGHUP игнорируется | ⬜ | |
-| M1-08 | `ServeConn` для тестов, `testutil.AsyncConn` | ⬜ | |
-| M1-09 | `internal/auth`: `--authorized-keys`, allowlist опций, чистый lookup, личность только из `Permissions`, `--user` | ⬜ | §6.5 |
-| M1-10 | `internal/vfs`: mount table из `--dir [NAME=]PATH`, `os.OpenRoot`, синтетический корень, `resolve()` | ⬜ | §6.1, §7.4 |
-| M1-11 | Операции VFS: open (`O_NONBLOCK`, только регулярные), write (без `O_APPEND`), stat/lstat, листинг, mkdir, remove, rename no-clobber, symlink/link → unsupported, setstat | ⬜ | |
-| M1-12 | Политика конфликтов `rename\|reject\|overwrite`: `O_EXCL`-резервирование, remap `r.Filepath`, posix-rename, очистка оборванных; resume отклоняется | ⬜ | §6.2 |
-| M1-13 | `internal/sftpd`: `SetSFTPExtensions` один раз, маппинг ошибок (`sftpStatus`), лимит 64 handles, счёт байтов, `TransferError` | ⬜ | §7.4 п.8 |
-| M1-14 | `internal/audit`: JSON через slog, sink с перехватом ошибок записи (fail-closed), события §6.4 | ⬜ | D20 |
-| M1-15 | CLI `serve` (флаги M1), `hostkey show`, вывод при первом запуске | ⬜ | §6.7 |
-| M1-16 | Интеграционные тесты: ST-1…5, 7, 9…11, 50 параллельных загрузок, goleak | ⬜ | §8.1 |
-| M1-17 | Interop: `test/interop/run.sh` + `basic.batch` (`sftp -b`, `scp`), job в CI, добавить в `ci-ok` | ⬜ | |
-| M1-18 | `docs/adr/0003-sftp-library.md` | ⬜ | |
-| M1-19 | Проверка DoD M1, тег `v0.1.0-alpha` | ⬜ | |
+| M1-01 | Spike: handshake + subsystem `sftp` + `exit-status` в in-process тесте; зависимости x/crypto v0.57.0, pkg/sftp v1.13.11 | ✅ | Сделано в составе M1: тест `TestExitStatus` |
+| M1-02 | `internal/hostkey`: генерация ed25519 (`O_EXCL`, 0600), загрузка с проверкой прав, RSA только SHA-2, fingerprint и known_hosts | ✅ | `internal/hostkey` |
+| M1-03 | `internal/server`: `ServerConfig` (профиль `modern`, `MaxAuthTries 6`, `ServerVersion`, `AuthLogCallback`) | ✅ | `internal/server`, профиль `modern` |
+| M1-04 | Accept-цикл: deadline на handshake 30 с, `recover`, учёт соединений, backoff | ✅ |  |
+| M1-05 | Каналы: только `session` (≤ 4 на соединение), subsystem через `ssh.Unmarshal`, остальное `Reply(false)` | ✅ | direct-tcpip, exec, shell, другие subsystem отклоняются (тесты) |
+| M1-06 | `RequestServer` + `exit-status` (0 при `nil`/`io.EOF`, иначе 1) | ✅ | T1 закрыт: `scp` завершается с 0 (interop) |
+| M1-07 | Graceful shutdown (SIGINT/SIGTERM, `shutdown_timeout`), SIGHUP игнорируется | ✅ | Проверено в interop: SIGHUP не останавливает, SIGTERM → exit 0 |
+| M1-08 | `ServeConn` для тестов, `testutil.AsyncConn` | 🔄 | `ServeConn` есть; `testutil.AsyncConn` перенесён в M3 (нужен для synctest-тестов таймаутов) |
+| M1-09 | `internal/auth`: `--authorized-keys`, allowlist опций, чистый lookup, личность только из `Permissions`, `--user` | ✅ | `internal/auth`; `from=` → `source-address`, `expiry-time=`, `cert-authority`/`verify-required` отклоняются |
+| M1-10 | `internal/vfs`: mount table из `--dir [NAME=]PATH`, `os.OpenRoot`, синтетический корень, `resolve()` | ✅ | `internal/vfs` |
+| M1-11 | Операции VFS: open (`O_NONBLOCK`, только регулярные), write (без `O_APPEND`), stat/lstat, листинг, mkdir, remove, rename no-clobber, symlink/link → unsupported, setstat | ✅ | Rename без перезаписи: `renameat2(RENAME_NOREPLACE)` на Linux, иначе `Link`+`Remove` |
+| M1-12 | Политика конфликтов `rename\|reject\|overwrite`: `O_EXCL`-резервирование, remap `r.Filepath`, posix-rename, очистка оборванных; resume отклоняется | ✅ | 50 параллельных загрузок → 50 файлов, оригинал цел |
+| M1-13 | `internal/sftpd`: `SetSFTPExtensions` один раз, маппинг ошибок (`sftpStatus`), лимит 64 handles, счёт байтов, `TransferError` | ✅ | `internal/sftpd` |
+| M1-14 | `internal/audit`: JSON через slog, sink с перехватом ошибок записи (fail-closed), события §6.4 | ✅ | `internal/audit` |
+| M1-15 | CLI `serve` (флаги M1), `hostkey show`, вывод при первом запуске | ✅ | `gosftpd serve`, `gosftpd hostkey show` |
+| M1-16 | Интеграционные тесты: ST-1…5, 7, 9…11, 50 параллельных загрузок, goleak | ✅ | ST-1…5, 7, 9…11 + fail-closed аудит; goleak, `-race`; покрытие `internal/vfs` 81% |
+| M1-17 | Interop: `test/interop/run.sh` + `basic.batch` (`sftp -b`, `scp`), job в CI, добавить в `ci-ok` | ✅ | `test/interop/run.sh` (26 проверок, OpenSSH 9.6p1), job `interop` в CI |
+| M1-18 | `docs/adr/0003-sftp-library.md` | ✅ |  |
+| M1-19 | Проверка DoD M1, тег `v0.1.0-alpha` | ⬜ 👤 | DoD выполнен, кроме проверки на OpenSSH 10.x (перенесено в M2-06). После мержа владелец ставит тег `v0.1.0-alpha` |
 
 ## M2: MVP (v0.2.0)
 
@@ -152,3 +152,4 @@
 |---|---|---|
 | 2026-10-07 | Roadmap | [o-kolomoiets/Go-SFTP-Server#1](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/1) |
 | 2026-10-07 | M0: расчистка, скелет, CI, гигиена, документы, ADR; CI зелёный (12/12) | [o-kolomoiets/Go-SFTP-Server#2](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/2) |
+| 2026-10-07 | M1: `gosftpd serve` — SSH/SFTP, ключи, изоляция `os.Root`, политика конфликтов, аудит, interop с OpenSSH | ветка `claude/accessible-repositories-cy9usl`, ждёт PR |

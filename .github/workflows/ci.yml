@@ -74,6 +74,19 @@ jobs:
           go-version-file: go.mod
       - run: go build ./... && go vet ./...
 
+  interop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          check-latest: true
+      - name: OpenSSH sftp, scp and ssh against gosftpd
+        run: test/interop/run.sh
+
   vuln:
     runs-on: ubuntu-24.04
     steps:
@@ -86,7 +99,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, vuln]
+    needs: [lint, test, min-go, interop, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed

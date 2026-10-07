@@ -10,6 +10,16 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Added
 
+- `gosftpd serve`: serves one or more directories over SFTP with public-key
+  authentication from an `authorized_keys` file; every mount is confined with
+  `os.Root`; shell, exec, forwarding, symlink and hard-link creation are
+  refused.
+- Upload conflict policy `--on-conflict rename|reject|overwrite` (default
+  `rename`: the upload goes to `name (1).ext` and the original is untouched).
+- JSON audit log (`--audit-output`), fail-closed when it cannot be written.
+- Host key generation on first start; `gosftpd hostkey show`.
+- Graceful shutdown on SIGINT/SIGTERM; SIGHUP is ignored.
+- Interop tests with OpenSSH `sftp`, `scp` and `ssh` in CI.
 - `gosftpd version [--json]`.
 - CI: lint, tests on Linux/macOS/Windows with Go 1.26 and 1.27, minimum Go
   version build, govulncheck; Dependabot.

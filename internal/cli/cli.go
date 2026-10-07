@@ -37,8 +37,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 	fmt.Fprintln(stderr, "Error:", err)
-	if errors.As(err, new(usageError)) {
+	switch {
+	case errors.As(err, new(usageError)):
 		fmt.Fprintf(stderr, "Run '%s --help' for usage.\n", root.CommandPath())
+		return exitUsage
+	case errors.As(err, new(configError)):
 		return exitUsage
 	}
 	return exitFailure
@@ -58,7 +61,7 @@ func newRootCmd() *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usageError{err}
 	})
-	root.AddCommand(newVersionCmd())
+	root.AddCommand(newVersionCmd(), newServeCmd(), newHostkeyCmd())
 	return root
 }
 
@@ -67,6 +70,12 @@ type usageError struct{ err error }
 
 func (e usageError) Error() string { return e.err.Error() }
 func (e usageError) Unwrap() error { return e.err }
+
+// configError marks invalid configuration (bad keys, paths, permissions).
+type configError struct{ err error }
+
+func (e configError) Error() string { return e.err.Error() }
+func (e configError) Unwrap() error { return e.err }
 
 // noArgs rejects positional arguments, including unknown subcommands.
 func noArgs(cmd *cobra.Command, args []string) error {
