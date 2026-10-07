@@ -8,7 +8,7 @@
 
 | Milestone | Версия | Статус | Готово |
 |---|---|---|---|
-| M0 Фундамент | — | 🔄 | 16 / 21 |
+| M0 Фундамент | — | 🔄 | 17 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | 🔄 | 17 / 19 |
 | M2 MVP | v0.2.0 | ⬜ | 0 / 9 |
 | M3 Hardening | v0.3.0 | ⬜ | 0 / 11 |
@@ -38,7 +38,7 @@
 | M0-15 | Трекер задач | ✅ | Этот файл вместо GitHub milestones и issues; переносить в issues, когда появятся контрибьюторы |
 | M0-16 | `CODE_OF_CONDUCT.md` (Contributor Covenant 3.0) | ⬜ 👤 | Нужен контакт для жалоб (email): владелец сообщает, текст добавлю |
 | M0-17 | Переименовать репозиторий в `go-sftp-server` | ⬜ 👤 | Settings → General → Repository name. Не обязательно: GitHub не различает регистр в URL |
-| M0-18 | Включить private vulnerability reporting, secret scanning + push protection, CodeQL default setup | 🔄 👤 | PVR включён (проверено через API), Secret Protection, push protection, Dependabot alerts и security updates включены. CodeQL владелец включает 2026-10-07: проверить по check runs в PR |
+| M0-18 | Включить private vulnerability reporting, secret scanning + push protection, CodeQL default setup | ✅ | PVR (проверено через API), Secret Protection, push protection, Dependabot alerts и security updates, CodeQL (проверка `Analyze (go)` в PR #3) |
 | M0-19 | Ruleset на `main`: PR обязателен (approvals: 0), required check `ci-ok`, code scanning, linear history, без force-push | 🔄 👤 | Ruleset создан, но по API на 2026-10-07 `main` не защищён: проверить, что Enforcement status = Active |
 | M0-20 | DoD: `go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest` работает | ✅ | Проверено 2026-10-07 на чистом GOBIN |
 | M0-21 | DoD: страница Community Standards закрыта полностью | ⬜ | После M0-16 |

@@ -31,9 +31,9 @@ func osError(err error) error {
 		return nil
 	}
 	var kind error
-	// ENOTEMPTY first: the syscall package also reports it as fs.ErrExist.
+	// "Not empty" first: the syscall package also reports it as fs.ErrExist.
 	switch {
-	case errors.Is(err, syscall.ENOTEMPTY):
+	case isNotEmpty(err):
 		kind = ErrNotEmpty
 	case errors.Is(err, fs.ErrNotExist):
 		kind = fs.ErrNotExist
