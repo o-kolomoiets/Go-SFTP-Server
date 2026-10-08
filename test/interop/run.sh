@@ -250,6 +250,8 @@ fi
 
 # --- rclone (sftp backend, no shell) ---------------------------------------
 if command -v "$RCLONE" >/dev/null 2>&1; then
+	# rclone reads every RCLONE_* variable as a flag.
+	for v in $(compgen -e | grep '^RCLONE_' || true); do unset "$v"; done
 	mkdir -p "$WORK/local/rc"
 	printf 'first\n' >"$WORK/local/rc/a.txt"
 	cp "$WORK/local/upload.bin" "$WORK/local/rc/big.bin"
@@ -262,7 +264,11 @@ if command -v "$RCLONE" >/dev/null 2>&1; then
 	else
 		fail "rclone copy (upload): $(tail -3 "$C/rclone.err")"
 	fi
-	ls "$C/inbox/rc" | grep -q partial && fail "rclone: temporary files left: $(ls "$C/inbox/rc")" || pass "rclone: no temporary files left"
+	if [ -d "$C/inbox/rc" ] && ! ls "$C/inbox/rc" | grep -q partial; then
+		pass "rclone: no temporary files left"
+	else
+		fail "rclone: temporary files left or nothing copied: $(ls "$C/inbox/rc" 2>&1)"
+	fi
 	# DoD M2: with full access and on_conflict=rename, a changed file must not
 	# delete or change the original.
 	printf 'second version\n' >"$WORK/local/rc/a.txt"

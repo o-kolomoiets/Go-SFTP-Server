@@ -85,9 +85,10 @@ jobs:
           - openssh: V_10_6_P1 # built from source
     runs-on: ubuntu-24.04
     env:
-      PARAMIKO_VERSION: 5.0.0
-      RCLONE_VERSION: v1.75.0
-      RCLONE_SHA256: aa2804e08f48250e71009c727124b6341cd0288465804a9a09d14663cabafbaa
+      # Not RCLONE_*: rclone reads those as flags.
+      CLIENT_PARAMIKO_VERSION: 5.0.0
+      CLIENT_RCLONE_VERSION: v1.75.0
+      CLIENT_RCLONE_SHA256: aa2804e08f48250e71009c727124b6341cd0288465804a9a09d14663cabafbaa
     steps:
       - uses: actions/checkout@v7
         with:
@@ -116,10 +117,10 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q lftp
           python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install -q "paramiko==$PARAMIKO_VERSION"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "paramiko==$CLIENT_PARAMIKO_VERSION"
           curl -fsSLo "$RUNNER_TEMP/rclone.zip" \
-            "https://github.com/rclone/rclone/releases/download/$RCLONE_VERSION/rclone-$RCLONE_VERSION-linux-amd64.zip"
-          echo "$RCLONE_SHA256  $RUNNER_TEMP/rclone.zip" | sha256sum -c -
+            "https://github.com/rclone/rclone/releases/download/$CLIENT_RCLONE_VERSION/rclone-$CLIENT_RCLONE_VERSION-linux-amd64.zip"
+          echo "$CLIENT_RCLONE_SHA256  $RUNNER_TEMP/rclone.zip" | sha256sum -c -
           unzip -q -j "$RUNNER_TEMP/rclone.zip" "*/rclone" -d "$RUNNER_TEMP/bin"
           {
             echo "PYTHON=$RUNNER_TEMP/venv/bin/python"
