@@ -23,13 +23,30 @@ func fixture(t *testing.T, policy ConflictPolicy, extra ...MountSpec) (*Session,
 	base := t.TempDir()
 	mustWrite(t, filepath.Join(base, "outside", "secret.txt"), "secret")
 	mustWrite(t, filepath.Join(base, "share", "a.txt"), "original")
-	specs := append([]MountSpec{{Name: "share", Path: filepath.Join(base, "share")}}, extra...)
-	tbl, err := Open(specs, Options{OnConflict: policy, Flatten: true})
+	specs := append([]MountSpec{spec("share", filepath.Join(base, "share"), policy)}, extra...)
+	tbl, err := Open(specs, Options{Flatten: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { tbl.Close() })
-	return tbl.Session("alice"), base
+	return session(t, tbl, "alice", tbl.FullAccess()), base
+}
+
+// spec returns a mount spec with default options and the given policy.
+func spec(name, path string, policy ConflictPolicy) MountSpec {
+	o := DefaultMountOptions()
+	o.OnConflict = policy
+	return MountSpec{Name: name, Path: path, Options: o}
+}
+
+func session(t *testing.T, tbl *Table, user string, grants []Grant) *Session {
+	t.Helper()
+	s, errs := tbl.Session(user, grants)
+	if len(errs) > 0 {
+		t.Fatalf("Session: %v", errs)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
 }
 
 func mustWrite(t *testing.T, path, data string) {
@@ -82,13 +99,14 @@ func TestResolve(t *testing.T) {
 		}
 	}
 	tbl, err := Open([]MountSpec{
-		{Name: "one", Path: filepath.Join(base, "one")},
-		{Name: "two", Path: filepath.Join(base, "two")},
+		spec("one", filepath.Join(base, "one"), ConflictRename),
+		spec("two", filepath.Join(base, "two"), ConflictRename),
 	}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tbl.Close()
+	s := session(t, tbl, "alice", tbl.FullAccess())
 
 	tests := []struct {
 		in      string
@@ -110,7 +128,7 @@ func TestResolve(t *testing.T) {
 		{in: "/one/" + strings.Repeat("d/", maxDepth+1), wantErr: ErrInvalidPath},
 	}
 	for _, tt := range tests {
-		m, rel, err := tbl.resolve(tt.in)
+		v, rel, err := s.resolve(tt.in)
 		if tt.wantErr != nil {
 			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("resolve(%q) error = %v, want %v", tt.in, err, tt.wantErr)
@@ -122,8 +140,8 @@ func TestResolve(t *testing.T) {
 			continue
 		}
 		name := ""
-		if m != nil {
-			name = m.name
+		if v != nil {
+			name = v.m.name
 		}
 		if name != tt.mount || rel != tt.rel {
 			t.Errorf("resolve(%q) = (%q, %q), want (%q, %q)", tt.in, name, rel, tt.mount, tt.rel)
@@ -139,12 +157,19 @@ func TestOpenValidation(t *testing.T) {
 	if err := os.Mkdir(inner, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	badOpts := DefaultMountOptions()
+	badOpts.RenameTemplate = "{stem}{ext}"
 	for _, specs := range [][]MountSpec{
-		{{Name: "bad/name", Path: base}},
-		{{Name: "a", Path: "relative"}},
-		{{Name: "a", Path: base}, {Name: "A", Path: inner}},
-		{{Name: "a", Path: base}, {Name: "b", Path: inner}},
-		{{Name: "a", Path: filepath.Join(base, "missing")}},
+		{spec("bad/name", base, ConflictRename)},
+		{spec("NUL", base, ConflictRename)},
+		{spec("a", "relative", ConflictRename)},
+		{spec("a", base, ConflictRename), spec("A", inner, ConflictRename)},
+		{spec("a", base, ConflictRename), spec("b", inner, ConflictRename)},
+		{spec("a", base, ConflictRename), spec("h", filepath.Join(base, UserPlaceholder), ConflictRename)},
+		{spec("h", filepath.Join(base, UserPlaceholder, "x"), ConflictRename)},
+		{spec("a", filepath.Join(base, "missing"), ConflictRename)},
+		{spec("a", base, "version")},
+		{{Name: "a", Path: base, Options: badOpts}},
 	} {
 		if tbl, err := Open(specs, Options{}); err == nil {
 			tbl.Close()
@@ -448,12 +473,14 @@ func TestReadOnlyMount(t *testing.T) {
 
 	base := t.TempDir()
 	mustWrite(t, filepath.Join(base, "a.txt"), "x")
-	tbl, err := Open([]MountSpec{{Name: "ro", Path: base, ReadOnly: true}}, Options{Flatten: true})
+	ro := spec("ro", base, ConflictRename)
+	ro.ReadOnly = true
+	tbl, err := Open([]MountSpec{ro}, Options{Flatten: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tbl.Close()
-	s := tbl.Session("alice")
+	s := session(t, tbl, "alice", tbl.FullAccess())
 
 	if _, err := s.OpenWrite("new.txt", put); !errors.Is(err, ErrDenied) {
 		t.Errorf("OpenWrite: %v", err)
@@ -482,15 +509,14 @@ func TestVirtualRoot(t *testing.T) {
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	tbl, err := Open([]MountSpec{
-		{Name: "share", Path: filepath.Join(base, "share")},
-		{Name: "docs", Path: other, ReadOnly: true},
-	}, Options{Flatten: true})
+	docs := spec("docs", other, ConflictRename)
+	docs.ReadOnly = true
+	tbl, err := Open([]MountSpec{spec("share", filepath.Join(base, "share"), ConflictRename), docs}, Options{Flatten: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tbl.Close()
-	s := tbl.Session("alice")
+	s := session(t, tbl, "alice", tbl.FullAccess())
 
 	l, err := s.ReadDir("/")
 	if err != nil {
@@ -566,14 +592,14 @@ func TestSplitExtAndCandidate(t *testing.T) {
 		"README":         "README (1)",
 		"a (1).txt":      "a (1) (1).txt",
 	} {
-		stem, ext := splitExt(in)
-		if got := candidate(stem, "(1)", ext); got != want {
+		stem, ext := splitExt(in, DefaultCompoundExtensions)
+		if got := candidate(DefaultRenameTemplate, stem, "1", ext); got != want {
 			t.Errorf("candidate(%q) = %q, want %q", in, got, want)
 		}
 	}
 	long := strings.Repeat("я", 200) + ".txt"
-	stem, ext := splitExt(long)
-	got := candidate(stem, "(1)", ext)
+	stem, ext := splitExt(long, DefaultCompoundExtensions)
+	got := candidate(DefaultRenameTemplate, stem, "1", ext)
 	if len(got) > maxNameLen || !strings.HasSuffix(got, " (1).txt") || !utf8Valid(got) {
 		t.Errorf("long candidate = %d bytes, %q", len(got), got[len(got)-12:])
 	}

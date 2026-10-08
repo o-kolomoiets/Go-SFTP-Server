@@ -1,0 +1,9 @@
+
+[users.partner-acme]
+authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl partner@laptop",
+  "from=\"10.0.0.0/8\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl partner@laptop",
+]
+allow_from = ["192.0.2.0/24"]
+expires = 2026-10-11T12:00:00Z
+access = { inbox = "upload", "My Docs" = "read", public = "list,read" }

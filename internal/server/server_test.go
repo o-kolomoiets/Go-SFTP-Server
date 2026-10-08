@@ -103,8 +103,10 @@ func start(t *testing.T, policy vfs.ConflictPolicy, readOnly bool) *env {
 		t.Fatal(err)
 	}
 
-	mounts, err := vfs.Open([]vfs.MountSpec{{Name: "share", Path: e.share, ReadOnly: readOnly}},
-		vfs.Options{OnConflict: policy, Flatten: true})
+	opts := vfs.DefaultMountOptions()
+	opts.OnConflict = policy
+	mounts, err := vfs.Open([]vfs.MountSpec{{Name: "share", Path: e.share, ReadOnly: readOnly, Options: opts}},
+		vfs.Options{Flatten: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +485,7 @@ func TestSilentClientTimesOut(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
-	mounts, err := vfs.Open([]vfs.MountSpec{{Name: "s", Path: base}}, vfs.Options{Flatten: true})
+	mounts, err := vfs.Open([]vfs.MountSpec{{Name: "s", Path: base, Options: vfs.DefaultMountOptions()}}, vfs.Options{Flatten: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,4 +525,169 @@ func TestAuditFailClosed(t *testing.T) {
 	if got, err := readRemote(t, c, "/first.txt"); err != nil || got != "x" {
 		t.Errorf("reads should keep working: %q, %v", got, err)
 	}
+}
+
+// TestUsersAndPermissions runs the DoD M2 scenario with three users: reader
+// (read), partner (upload) and alice (full, plus a personal home).
+func TestUsersAndPermissions(t *testing.T) {
+	base := t.TempDir()
+	share := filepath.Join(base, "share")
+	if err := os.Mkdir(share, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(share, "a.txt"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeOpts := vfs.DefaultMountOptions()
+	mounts, err := vfs.Open([]vfs.MountSpec{
+		{Name: "share", Path: share, Options: vfs.DefaultMountOptions()},
+		{Name: "home", Path: filepath.Join(base, "home", vfs.UserPlaceholder), Create: true, Options: homeOpts},
+	}, vfs.Options{Flatten: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mounts.Close() })
+
+	keys := map[string]ssh.Signer{"reader": signer(t), "partner": signer(t), "alice": signer(t), "mallory": signer(t)}
+	grants := map[string][]vfs.Grant{
+		"reader":  {{Mount: "share", Perm: vfs.PermList | vfs.PermRead}},
+		"partner": {{Mount: "share", Perm: vfs.PermList | vfs.PermWrite | vfs.PermMkdir}},
+		"alice":   {{Mount: "share", Perm: vfs.PermAll}, {Mount: "home", Perm: vfs.PermAll}},
+		"mallory": {{Mount: "home", Perm: vfs.PermAll}},
+	}
+	var users []auth.User
+	for name, k := range keys {
+		ks, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(k.PublicKey()), name)
+		users = append(users, auth.User{Name: name, Keys: ks})
+	}
+	// Mallory's home was replaced with a symlink to Alice's.
+	if err := os.MkdirAll(filepath.Join(base, "home", "alice"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("alice", filepath.Join(base, "home", "mallory")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	auditLog := &syncBuffer{}
+	hk := signer(t)
+	srv, err := New(Config{
+		HostKeys: []ssh.Signer{hk},
+		Auth:     auth.NewUsers(users),
+		Mounts:   mounts,
+		Grants:   func(u string) []vfs.Grant { return grants[u] },
+		Audit:    audit.New(auditLog, slog.New(slog.DiscardHandler)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+	// Cleanups run last-in first-out: clients close before the server stops.
+	t.Cleanup(func() {
+		cancel()
+		<-served
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scancel()
+		if err := srv.Shutdown(sctx); err != nil {
+			t.Errorf("Shutdown() = %v", err)
+		}
+	})
+
+	connect := func(user string) *sftp.Client {
+		t.Helper()
+		conn, err := ssh.Dial("tcp", ln.Addr().String(), &ssh.ClientConfig{
+			User:            user,
+			Auth:            []ssh.AuthMethod{ssh.PublicKeys(keys[user])},
+			HostKeyCallback: ssh.FixedHostKey(hk.PublicKey()),
+			Timeout:         10 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", user, err)
+		}
+		c, err := sftp.NewClient(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close(); conn.Close() })
+		return c
+	}
+
+	// reader: one mount, flattened; can read, cannot write.
+	r := connect("reader")
+	if got, err := readRemote(t, r, "/a.txt"); err != nil || got != "original" {
+		t.Errorf("reader read = %q, %v", got, err)
+	}
+	if _, err := r.Create("/new.txt"); statusCode(err) != 3 {
+		t.Errorf("reader create: %v", err)
+	}
+
+	// partner: can upload, a conflict gets a new name, cannot read or delete.
+	p := connect("partner")
+	writeRemote(t, p, "/a.txt", "partner's")
+	if got := readFile(t, filepath.Join(share, "a.txt")); got != "original" {
+		t.Errorf("original changed to %q", got)
+	}
+	if got := readFile(t, filepath.Join(share, "a (1).txt")); got != "partner's" {
+		t.Errorf("copy = %q", got)
+	}
+	if _, err := readRemote(t, p, "/a.txt"); statusCode(err) != 3 {
+		t.Errorf("partner read: %v", err)
+	}
+	if err := p.Remove("/a.txt"); statusCode(err) != 3 {
+		t.Errorf("partner remove: %v", err)
+	}
+
+	// alice: two mounts under /, her own home.
+	a := connect("alice")
+	entries, err := a.ReadDir("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "home,share" {
+		t.Errorf("alice sees %v", names)
+	}
+	writeRemote(t, a, "/home/notes.txt", "alice's notes")
+	if got := readFile(t, filepath.Join(base, "home", "alice", "notes.txt")); got != "alice's notes" {
+		t.Errorf("home file = %q", got)
+	}
+
+	// mallory: the replaced home is unavailable and audited.
+	m := connect("mallory")
+	if _, err := m.Stat("/notes.txt"); err == nil {
+		t.Error("mallory reached alice's home")
+	}
+	if entries, err := m.ReadDir("/"); err != nil || len(entries) != 0 {
+		t.Errorf("mallory root = %v, %v", entries, err)
+	}
+	waitFor(t, func() bool { return strings.Contains(auditLog.String(), `"reason":"home_not_dir"`) })
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

@@ -27,19 +27,20 @@ func (t *Table) rootInfo() fs.FileInfo {
 	return dirInfo{name: "/", perm: 0o555, modTime: t.started}
 }
 
-// mountInfo describes a mount root as clients see it.
-func (t *Table) mountInfo(m *Mount) (fs.FileInfo, error) {
-	fi, err := m.root.Stat(".")
+// mountInfo describes a mount root as the session sees it: writable if the
+// user may change anything in it.
+func (s *Session) mountInfo(v *view) (fs.FileInfo, error) {
+	fi, err := v.root.Stat(".")
 	if err != nil {
 		return nil, osError(err)
 	}
-	name := m.name
-	if t.flatten {
+	name := v.m.name
+	if s.flatten {
 		name = "/"
 	}
-	perm := fs.FileMode(0o755)
-	if m.readOnly {
-		perm = 0o555
+	perm := fs.FileMode(0o555)
+	if v.perm&permModify != 0 {
+		perm = 0o755
 	}
 	return dirInfo{name: name, perm: perm, modTime: fi.ModTime()}, nil
 }

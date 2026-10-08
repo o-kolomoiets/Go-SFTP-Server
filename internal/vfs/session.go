@@ -8,33 +8,198 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // errNoAtomicRename means the platform cannot rename without replacing.
 var errNoAtomicRename = errors.New("atomic no-replace rename unavailable")
 
+// Grant gives a user permissions on a mount.
+type Grant struct {
+	Mount string
+	Perm  Perm
+}
+
+// view is one mount as a session sees it.
+type view struct {
+	m    *Mount
+	root *os.Root // m.root, or the user's directory for a home mount
+	perm Perm
+}
+
+func (v *view) opts() *MountOptions { return &v.m.opts }
+
+// createdKey identifies a file this session created.
+type createdKey struct {
+	v   *view
+	rel string
+}
+
 // Session is one client's view of the table. It is safe for concurrent use.
 type Session struct {
-	t    *Table
-	user string
+	t       *Table
+	user    string
+	views   []*view // sorted by mount name
+	byName  map[string]*view
+	flatten bool
+	owned   []*os.Root // home roots, closed with the session
 
 	mu      sync.Mutex
 	writers map[string][]*WriteHandle // open uploads by final virtual path
+	created map[createdKey]struct{}   // regular files this session created
 }
 
-// Session starts a client session.
-func (t *Table) Session(user string) *Session {
-	return &Session{t: t, user: user, writers: make(map[string][]*WriteHandle)}
+// Session starts a session for user with the given grants. Mounts that
+// cannot be opened for this user (a home directory that is missing or not a
+// real directory) are left out; the returned errors say why, for the audit
+// log. Grants for unknown mounts are reported the same way.
+func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
+	s := &Session{
+		t:       t,
+		user:    user,
+		byName:  make(map[string]*view, len(grants)),
+		writers: make(map[string][]*WriteHandle),
+		created: make(map[createdKey]struct{}),
+	}
+	var errs []error
+	for _, g := range grants {
+		m := t.byName[g.Mount]
+		if m == nil {
+			errs = append(errs, &MountError{Mount: g.Mount, Err: fs.ErrNotExist})
+			continue
+		}
+		if s.byName[m.name] != nil {
+			continue
+		}
+		perm := g.Perm
+		if m.readOnly {
+			perm &= PermReadOnly
+		}
+		root := m.root
+		if m.home {
+			r, err := m.openHome(user)
+			if err != nil {
+				errs = append(errs, &MountError{Mount: m.name, Err: err})
+				continue
+			}
+			root = r
+			s.owned = append(s.owned, r)
+		}
+		v := &view{m: m, root: root, perm: perm}
+		s.views = append(s.views, v)
+		s.byName[m.name] = v
+	}
+	slices.SortFunc(s.views, func(a, b *view) int { return strings.Compare(a.m.name, b.m.name) })
+	s.flatten = t.flatten && len(s.views) == 1
+	return s, errs
+}
+
+// FullAccess grants every mount of t with all permissions (zero-config mode;
+// read-only mounts still allow only list and read).
+func (t *Table) FullAccess() []Grant {
+	gs := make([]Grant, 0, len(t.mounts))
+	for _, m := range t.mounts {
+		gs = append(gs, Grant{Mount: m.name, Perm: PermAll})
+	}
+	return gs
+}
+
+// MountError explains why a mount is not available in a session.
+type MountError struct {
+	Mount string
+	Err   error
+}
+
+func (e *MountError) Error() string { return fmt.Sprintf("mount %q: %v", e.Mount, e.Err) }
+func (e *MountError) Unwrap() error { return e.Err }
+
+// Close releases the session's home directories. Open handles must be
+// closed first.
+func (s *Session) Close() error {
+	errs := make([]error, 0, len(s.owned))
+	for _, r := range s.owned {
+		errs = append(errs, r.Close())
+	}
+	s.owned = nil
+	return errors.Join(errs...)
 }
 
 // User returns the session's user name.
 func (s *Session) User() string { return s.user }
 
+// Mounts returns the names of the mounts this session can see.
+func (s *Session) Mounts() []string {
+	names := make([]string, len(s.views))
+	for i, v := range s.views {
+		names[i] = v.m.name
+	}
+	return names
+}
+
 // RealPath canonicalizes a client path without touching the filesystem.
 func (s *Session) RealPath(vp string) string { return path.Clean("/" + vp) }
+
+// resolve maps a client path to a view and a path relative to its root.
+// v == nil means the synthetic root "/" (only when not flattened); rel == "."
+// means the mount root itself.
+func (s *Session) resolve(vp string) (v *view, rel string, err error) {
+	if len(vp) > maxPathLen || strings.IndexByte(vp, 0) >= 0 || !utf8.ValidString(vp) {
+		return nil, "", ErrInvalidPath
+	}
+	p := path.Clean("/" + vp)
+
+	var rest string
+	switch {
+	case s.flatten:
+		v, rest = s.views[0], p[1:]
+	case p == "/":
+		return nil, "", nil
+	default:
+		var name string
+		name, rest, _ = strings.Cut(p[1:], "/")
+		if v = s.byName[name]; v == nil {
+			return nil, "", fs.ErrNotExist
+		}
+	}
+	if rest == "" {
+		return v, ".", nil
+	}
+	if strings.Count(rest, "/") >= maxDepth || !fs.ValidPath(rest) {
+		return nil, "", ErrInvalidPath
+	}
+	if runtime.GOOS == "windows" {
+		for c := range strings.SplitSeq(rest, "/") {
+			if strings.HasSuffix(c, ".") || strings.HasSuffix(c, " ") {
+				return nil, "", ErrInvalidPath
+			}
+		}
+	}
+	local, err := filepath.Localize(rest)
+	if err != nil {
+		return nil, "", ErrInvalidPath
+	}
+	return v, local, nil
+}
+
+// topLevel reports whether vp names an entry directly in the synthetic root.
+func (s *Session) topLevel(vp string) bool {
+	return !s.flatten && path.Dir(path.Clean("/"+vp)) == "/"
+}
+
+// virtual returns the canonical client path of rel inside v.
+func (s *Session) virtual(v *view, rel string) string {
+	rel = filepath.ToSlash(rel)
+	if s.flatten {
+		return path.Clean("/" + rel)
+	}
+	return path.Clean("/" + v.m.name + "/" + rel)
+}
 
 // Stat follows symlinks that stay inside the mount.
 func (s *Session) Stat(vp string) (fs.FileInfo, error) { return s.stat(vp, false) }
@@ -43,34 +208,36 @@ func (s *Session) Stat(vp string) (fs.FileInfo, error) { return s.stat(vp, false
 func (s *Session) Lstat(vp string) (fs.FileInfo, error) { return s.stat(vp, true) }
 
 func (s *Session) stat(vp string, lstat bool) (fs.FileInfo, error) {
-	m, rel, err := s.t.resolve(vp)
+	v, rel, err := s.resolve(vp)
 	switch {
 	case err != nil:
 		return nil, err
-	case m == nil:
+	case v == nil:
 		return s.t.rootInfo(), nil
 	case rel == ".":
-		return s.t.mountInfo(m)
+		return s.mountInfo(v)
+	case !v.perm.Has(PermList):
+		return nil, ErrDenied
 	}
 	var fi fs.FileInfo
 	if lstat {
-		fi, err = m.root.Lstat(rel)
+		fi, err = v.root.Lstat(rel)
 	} else {
-		fi, err = m.root.Stat(rel)
+		fi, err = v.root.Stat(rel)
 	}
 	return fi, osError(err)
 }
 
 // ReadDir lists a directory. The caller must Close the Lister.
 func (s *Session) ReadDir(vp string) (Lister, error) {
-	m, rel, err := s.t.resolve(vp)
+	v, rel, err := s.resolve(vp)
 	if err != nil {
 		return nil, err
 	}
-	if m == nil {
-		infos := make([]fs.FileInfo, 0, len(s.t.mounts))
-		for _, m := range s.t.mounts {
-			fi, err := s.t.mountInfo(m)
+	if v == nil {
+		infos := make([]fs.FileInfo, 0, len(s.views))
+		for _, v := range s.views {
+			fi, err := s.mountInfo(v)
 			if err != nil {
 				continue
 			}
@@ -78,7 +245,10 @@ func (s *Session) ReadDir(vp string) (Lister, error) {
 		}
 		return sliceLister(infos), nil
 	}
-	f, err := m.root.Open(rel)
+	if !v.perm.Has(PermList) {
+		return nil, ErrDenied
+	}
+	f, err := v.root.Open(rel)
 	if err != nil {
 		return nil, osError(err)
 	}
@@ -96,14 +266,16 @@ func (s *Session) ReadDir(vp string) (Lister, error) {
 
 // OpenRead opens a regular file for reading.
 func (s *Session) OpenRead(vp string) (*os.File, error) {
-	m, rel, err := s.t.resolve(vp)
-	if err != nil {
+	v, rel, err := s.resolve(vp)
+	switch {
+	case err != nil:
 		return nil, err
-	}
-	if m == nil || rel == "." {
+	case v == nil, rel == ".":
 		return nil, ErrIsDir
+	case !v.perm.Has(PermRead):
+		return nil, ErrDenied
 	}
-	f, err := m.root.OpenFile(rel, os.O_RDONLY|oNonblock, 0)
+	f, err := v.root.OpenFile(rel, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
 		return nil, osError(err)
 	}
@@ -128,58 +300,71 @@ func requireRegular(f *os.File) error {
 }
 
 // writable resolves vp for a modification of an entry inside a mount.
-func (s *Session) writable(vp string) (*Mount, string, error) {
-	m, rel, err := s.t.resolve(vp)
+func (s *Session) writable(vp string) (*view, string, error) {
+	v, rel, err := s.resolve(vp)
 	switch {
-	case errors.Is(err, fs.ErrNotExist) && s.t.topLevel(vp):
+	case errors.Is(err, fs.ErrNotExist) && s.topLevel(vp):
 		return nil, "", ErrDenied // creating entries in the virtual root
 	case err != nil:
 		return nil, "", err
-	case m == nil, rel == ".", m.readOnly:
+	case v == nil, rel == ".", v.m.readOnly:
 		return nil, "", ErrDenied
 	}
-	return m, rel, nil
+	return v, rel, nil
 }
 
 // Mkdir creates a directory.
 func (s *Session) Mkdir(vp string) error {
-	m, rel, err := s.writable(vp)
+	v, rel, err := s.writable(vp)
 	if err != nil {
 		return err
 	}
-	return osError(m.root.Mkdir(rel, dirPerm))
+	if !v.perm.Has(PermMkdir) {
+		return ErrDenied
+	}
+	return osError(v.root.Mkdir(rel, v.opts().dirPerm()))
 }
 
 // Remove deletes a file (not a directory).
 func (s *Session) Remove(vp string) error {
-	m, rel, err := s.writable(vp)
+	v, rel, err := s.writable(vp)
 	if err != nil {
 		return err
 	}
-	fi, err := m.root.Lstat(rel)
+	if !v.perm.Has(PermDelete) {
+		return ErrDenied
+	}
+	fi, err := v.root.Lstat(rel)
 	if err != nil {
 		return osError(err)
 	}
 	if fi.IsDir() {
 		return ErrIsDir
 	}
-	return osError(m.root.Remove(rel))
+	if err := v.root.Remove(rel); err != nil {
+		return osError(err)
+	}
+	s.forget(v, rel)
+	return nil
 }
 
 // Rmdir deletes an empty directory.
 func (s *Session) Rmdir(vp string) error {
-	m, rel, err := s.writable(vp)
+	v, rel, err := s.writable(vp)
 	if err != nil {
 		return err
 	}
-	fi, err := m.root.Lstat(rel)
+	if !v.perm.Has(PermRmdir) {
+		return ErrDenied
+	}
+	fi, err := v.root.Lstat(rel)
 	if err != nil {
 		return osError(err)
 	}
 	if !fi.IsDir() {
 		return ErrNotDir
 	}
-	return osError(m.root.Remove(rel))
+	return osError(v.root.Remove(rel))
 }
 
 // Attrs are the attributes a client may set.
@@ -190,16 +375,21 @@ type Attrs struct {
 	HasTimes     bool
 }
 
-// Setstat applies attributes. Permissions and ownership are not settable and
-// are ignored. A size change is allowed only on a file this session has open
-// for writing (OpenSSH scp truncates that way), never on arbitrary files.
+// Setstat applies attributes (ROADMAP §6.3). Permissions and ownership are
+// not settable and are ignored.
+//
+// A size change is allowed only on a file this session has open for writing
+// (OpenSSH scp truncates that way; the right to change it was checked when
+// the file was opened), never on arbitrary files. Times follow the mount's
+// setstat_mode and need the setstat permission, except on files this
+// session created: uploaders set the mtime of what they just wrote.
 func (s *Session) Setstat(vp string, a Attrs) error {
-	m, rel, err := s.writable(vp)
+	v, rel, err := s.writable(vp)
 	if err != nil {
 		return err
 	}
 	if a.HasSize {
-		h := s.openWriter(s.t.virtual(m, rel))
+		h := s.openWriter(s.virtual(v, rel))
 		if h == nil || a.Size < 0 {
 			return ErrDenied
 		}
@@ -207,57 +397,83 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 			return err
 		}
 	}
-	if a.HasTimes {
-		return osError(m.root.Chtimes(rel, a.Atime, a.Mtime))
+	if !a.HasTimes {
+		return nil
 	}
-	return nil
+	switch v.opts().SetstatMode {
+	case SetstatIgnore:
+		return nil
+	case SetstatDeny:
+		return ErrDenied
+	case SetstatTimes:
+	}
+	if !v.perm.Has(PermSetstat) && !s.isCreated(v, rel) {
+		return ErrDenied
+	}
+	return osError(v.root.Chtimes(rel, a.Atime, a.Mtime))
 }
 
 // Rename moves src to dst. With posix set (posix-rename@openssh.com) an
-// existing target is handled by the conflict policy; otherwise (SFTP v3
-// RENAME) an existing target is an error. It returns the final client path.
+// existing target is handled by the mount's conflict policy; otherwise (SFTP
+// v3 RENAME) an existing target is an error. It returns the final client
+// path.
+//
+// Renaming needs the rename permission, or only write for a regular file
+// this session created (temporary upload names such as WinSCP's .filepart).
+// Replacing an existing target always needs overwrite.
 func (s *Session) Rename(src, dst string, posix bool) (string, error) {
-	sm, srel, err := s.writable(src)
+	sv, srel, err := s.writable(src)
 	if err != nil {
 		return "", err
 	}
-	dm, drel, err := s.writable(dst)
+	dv, drel, err := s.writable(dst)
 	if err != nil {
 		return "", err
 	}
-	if sm != dm {
+	if sv != dv {
 		return "", ErrUnsupported // across mounts
 	}
-	if _, err := sm.root.Lstat(srel); err != nil {
+	fi, err := sv.root.Lstat(srel)
+	if err != nil {
 		return "", osError(err)
 	}
+	own := fi.Mode().IsRegular() && s.isCreated(sv, srel)
+	if !sv.perm.Has(PermRename) && (!own || !sv.perm.Has(PermWrite)) {
+		return "", ErrDenied
+	}
 
-	err = noClobberRename(sm.root, srel, drel)
+	err = noClobberRename(sv.root, srel, drel)
 	switch {
 	case err == nil:
-		return s.t.virtual(sm, drel), nil
+		s.moveCreated(sv, srel, drel, own)
+		return s.virtual(sv, drel), nil
 	case !errors.Is(err, fs.ErrExist):
 		return "", osError(err)
 	case !posix:
 		return "", ErrExists
 	}
 
-	switch s.t.policy {
+	switch sv.opts().OnConflict {
 	case ConflictOverwrite:
-		if err := sm.root.Rename(srel, drel); err != nil {
+		if !sv.perm.Has(PermOverwrite) {
+			return "", ErrDenied
+		}
+		if err := sv.root.Rename(srel, drel); err != nil {
 			return "", osError(err)
 		}
-		return s.t.virtual(sm, drel), nil
+		s.moveCreated(sv, srel, drel, own)
+		return s.virtual(sv, drel), nil
 	case ConflictReject:
 		return "", ErrConflict
 	case ConflictRename: // move the source next to the target under a free name
-		final, err := freeName(drel, func(cand string) error { return noClobberRename(sm.root, srel, cand) })
+		final, err := sv.opts().freeName(drel, func(cand string) error { return noClobberRename(sv.root, srel, cand) })
 		if err != nil {
 			return "", err
 		}
-		return s.t.virtual(sm, final), nil
+		s.moveCreated(sv, srel, final, own)
+		return s.virtual(sv, final), nil
 	}
-	return "", fmt.Errorf("unknown conflict policy %q", s.t.policy)
+	return "", fmt.Errorf("unknown conflict policy %q", sv.opts().OnConflict)
 }
 
 // noClobberRename renames src to dst and fails with fs.ErrExist if dst exists.
@@ -306,9 +522,12 @@ func (s *Session) register(h *WriteHandle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writers[h.virtual] = append(s.writers[h.virtual], h)
+	if h.reserved {
+		s.created[createdKey{h.v, h.rel}] = struct{}{}
+	}
 }
 
-func (s *Session) unregister(h *WriteHandle) {
+func (s *Session) unregister(h *WriteHandle, removed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	hs := slices.DeleteFunc(s.writers[h.virtual], func(x *WriteHandle) bool { return x == h })
@@ -316,6 +535,9 @@ func (s *Session) unregister(h *WriteHandle) {
 		delete(s.writers, h.virtual)
 	} else {
 		s.writers[h.virtual] = hs
+	}
+	if removed {
+		delete(s.created, createdKey{h.v, h.rel})
 	}
 }
 
@@ -326,4 +548,27 @@ func (s *Session) openWriter(vp string) *WriteHandle {
 		return hs[len(hs)-1]
 	}
 	return nil
+}
+
+func (s *Session) isCreated(v *view, rel string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.created[createdKey{v, rel}]
+	return ok
+}
+
+func (s *Session) moveCreated(v *view, from, to string, own bool) {
+	if !own {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.created, createdKey{v, from})
+	s.created[createdKey{v, to}] = struct{}{}
+}
+
+func (s *Session) forget(v *view, rel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.created, createdKey{v, rel})
 }

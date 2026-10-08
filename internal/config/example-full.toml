@@ -1,0 +1,65 @@
+# gosftpd configuration reference (`gosftpd config example --full`), schema v1.
+# Every key with its default value. Unknown keys are an error.
+# This is a reference, not a working config: the paths below must exist
+# (or set create = true). Check with: gosftpd config validate --check-fs
+config_version = 1
+
+# Extra files with [users.NAME] tables only, relative to this file.
+include = ["users.d/*.toml"]
+
+[server]
+listen = [":2022"]                      # IPv4 and IPv6 (dual stack)
+host_keys = ["/var/lib/gosftpd/ssh_host_ed25519_key"]
+host_key_auto_generate = true           # create a missing key as ed25519 (0600)
+handshake_timeout = "30s"
+shutdown_timeout = "30s"                # keep below systemd TimeoutStopSec / Docker stop_grace_period
+
+[limits]
+max_sessions_per_conn = 4
+max_open_handles = 64                   # per SFTP session
+max_auth_tries = 6
+
+[defaults]                              # inherited by every mount
+on_conflict = "rename"                  # rename | reject | overwrite
+rename_template = "{stem} ({n}){ext}"   # must contain {n}
+max_rename_attempts = 100               # then {n} becomes a UTC timestamp
+compound_extensions = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]
+flatten = true                          # a user's only mount is served as /
+setstat_mode = "times"                  # times | ignore | deny
+umask = "0027"                          # octal string: files 0640, directories 0750
+require_mountpoint = false              # true: refuse to start unless the path is a mount point
+
+[mounts.public]
+path = "/srv/sftp/public"
+read_only = true
+
+[mounts.inbox]
+path = "/srv/sftp/inbox"
+create = true
+on_conflict = "rename"
+
+[mounts.home]
+path = "/srv/sftp/home/{user}"          # one directory per user, created as 0750
+create = true
+
+# Permissions: read (list, read), upload (list, write, mkdir),
+# readwrite (list, read, write, overwrite, rename, mkdir, setstat), full,
+# or a list of flags such as "list,write".
+[users.alice]
+authorized_keys = ["<paste alice's public key>"]
+authorized_keys_file = "/etc/gosftpd/keys/alice.pub"
+allow_from = ["10.0.0.0/8", "192.168.0.0/16"]
+access = { public = "read", inbox = "upload", home = "full" }
+
+[users.partner-acme]
+authorized_keys = ["<paste the partner's public key>"]
+expires = 2026-12-31T23:59:59Z
+disabled = false
+access = { inbox = "list,write" }
+
+[log]
+level = "info"                          # debug | info | warn | error
+format = "text"                         # text | json
+
+[audit]
+output = "/var/log/gosftpd/audit.jsonl" # or "stdout"

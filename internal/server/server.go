@@ -31,8 +31,8 @@ import (
 const (
 	DefaultHandshakeTimeout = 30 * time.Second
 	DefaultMaxSessions      = 4
+	DefaultMaxAuthTries     = 6
 	serverVersion           = "SSH-2.0-gosftpd"
-	maxAuthTries            = 6
 	maxClientVersionLen     = 128
 )
 
@@ -51,12 +51,16 @@ type Config struct {
 	HostKeys []ssh.Signer
 	Auth     *auth.Authenticator
 	Mounts   *vfs.Table
-	Audit    *audit.Logger
-	Log      *slog.Logger
+	// Grants returns the mounts an authenticated user may access; nil
+	// grants every mount with all permissions (zero-config).
+	Grants func(user string) []vfs.Grant
+	Audit  *audit.Logger
+	Log    *slog.Logger
 
 	HandshakeTimeout   time.Duration // default DefaultHandshakeTimeout
 	MaxSessionsPerConn int           // default DefaultMaxSessions
 	MaxOpenHandles     int           // per SFTP session, default sftpd.DefaultMaxHandles
+	MaxAuthTries       int           // default DefaultMaxAuthTries
 }
 
 // Server serves SFTP over SSH.
@@ -89,12 +93,19 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxSessionsPerConn <= 0 {
 		cfg.MaxSessionsPerConn = DefaultMaxSessions
 	}
+	if cfg.MaxAuthTries <= 0 {
+		cfg.MaxAuthTries = DefaultMaxAuthTries
+	}
+	if cfg.Grants == nil {
+		mounts := cfg.Mounts
+		cfg.Grants = func(string) []vfs.Grant { return mounts.FullAccess() }
+	}
 
 	sc := &ssh.ServerConfig{
 		Config:                  ssh.Config{KeyExchanges: kexAlgos, Ciphers: ciphers, MACs: macs},
 		PublicKeyCallback:       cfg.Auth.PublicKey,
 		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
-		MaxAuthTries:            maxAuthTries,
+		MaxAuthTries:            cfg.MaxAuthTries,
 		ServerVersion:           serverVersion,
 	}
 	for _, k := range cfg.HostKeys {
@@ -306,7 +317,24 @@ func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *s
 	start := time.Now()
 	al.Event("session.start")
 
-	h := sftpd.New(s.cfg.Mounts.Session(user), al, log, s.cfg.MaxOpenHandles)
+	vs, unavailable := s.cfg.Mounts.Session(user, s.cfg.Grants(user))
+	for _, err := range unavailable {
+		reason := "mount_unavailable"
+		switch {
+		case errors.Is(err, vfs.ErrHomeNotDir):
+			reason = "home_not_dir"
+		case errors.Is(err, vfs.ErrHomeMissing):
+			reason = "home_missing"
+		}
+		mount := ""
+		if me, ok := errors.AsType[*vfs.MountError](err); ok {
+			mount = me.Mount
+		}
+		log.Warn("mount unavailable for this session", "mount", mount, "err", err)
+		al.Event("fs.denied", slog.String("mount", mount), slog.String("reason", reason), slog.String("result", "denied"))
+	}
+
+	h := sftpd.New(vs, al, log, s.cfg.MaxOpenHandles)
 	rs := sftp.NewRequestServer(ch, h.Handlers(), sftp.WithStartDirectory("/"))
 	err := rs.Serve()
 
@@ -320,5 +348,6 @@ func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *s
 	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{code}))
 	_ = rs.Close()
 	_ = ch.Close()
+	_ = vs.Close()
 	al.Event("session.end", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.Int("exit_status", int(code)))
 }
