@@ -6,16 +6,19 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -629,7 +632,7 @@ func TestExampleFullCoversEveryKey(t *testing.T) {
 				walk(f.Type)
 				continue
 			}
-			if !strings.Contains(full, tag+" =") && !strings.Contains(full, "["+tag) {
+			if !strings.Contains(full, tag+" =") && !strings.Contains(full, "["+tag) && !strings.Contains(full, "."+tag+"]") {
 				t.Errorf("example-full.toml does not show %q", tag)
 			}
 			ft := f.Type
@@ -809,6 +812,96 @@ on_error = "fail-open"
 	}
 }
 
+func TestValidateM3aKeys(t *testing.T) {
+	t.Parallel()
+
+	c, _ := load(t, `
+config_version = 1
+[server]
+host_keys = ["k"]
+crypto_policy = "legacy"
+idle_timeout = "500ms"
+keepalive_interval = "2h"
+[limits]
+max_connections = 0
+max_connections_per_ip = -1
+max_preauth_connections = 20000
+[auth]
+methods = ["publickey", "keyboard-interactive"]
+[auth.ban]
+after_failures = 1000
+within = "0s"
+duration = "1000h"
+exempt = ["example.org"]
+[mounts.m]
+path = "{dir}/m"
+[users.alice]
+password_hash = "secret"
+access = { m = "read" }
+`)
+	_, err := c.Validate()
+	for _, want := range []string{
+		"server.crypto_policy", "server.idle_timeout", "server.keepalive_interval",
+		"limits.max_connections:", "limits.max_connections_per_ip", "limits.max_preauth_connections",
+		`auth.methods: unknown method "keyboard-interactive"`, "auth.ban.after_failures", "auth.ban.within",
+		"auth.ban.duration", "auth.ban.exempt", "users.alice.password_hash: not an argon2id or bcrypt hash",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("errors do not mention %q: %v", want, err)
+		}
+	}
+
+	hash, err := auth.HashPassword([]byte("pw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const base = `
+config_version = 1
+[server]
+host_keys = ["k"]
+idle_timeout = "0s"
+keepalive_interval = "0s"
+crypto_policy = "compat"
+[mounts.m]
+path = "{dir}/m"
+[users.bob]
+password_hash = "%s"
+access = { m = "read" }
+`
+	// Without "password" in auth.methods the hash is ignored with a warning.
+	c, _ = load(t, fmt.Sprintf(base, hash))
+	warns := mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "password_hash: ignored") }) {
+		t.Errorf("warnings = %q", warns)
+	}
+	if a, _, err := c.Authenticator(); err != nil || a.Len() != 0 {
+		t.Errorf("Authenticator() = %v, %v", a, err)
+	}
+	if b := c.Bans(); b == nil || b.Duration() != auth.DefaultBanDuration {
+		t.Errorf("default bans = %+v", b)
+	}
+
+	c, _ = load(t, fmt.Sprintf(base, hash)+"[auth]\nmethods = [\"publickey\", \"password\"]\n[auth.ban]\nafter_failures = 0\n")
+	warns = mustValidate(t, c)
+	if slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "users.bob") }) {
+		t.Errorf("warnings about a user with a password: %q", warns)
+	}
+	if _, warns, err := c.Authenticator(); err != nil || len(warns) != 0 {
+		t.Errorf("Authenticator() warnings %q, err %v", warns, err)
+	}
+	if c.Bans() != nil {
+		t.Error("after_failures = 0 did not turn bans off")
+	}
+
+	// Zero-config has no password users.
+	zero := Default()
+	zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: "k"}
+	zero.Auth.Methods = []string{"password"}
+	if _, err := zero.Validate(); err == nil || !strings.Contains(err.Error(), "auth.methods") {
+		t.Errorf("zero-config with passwords: %v", err)
+	}
+}
+
 // TestConfigurationDocCoversEveryKey keeps docs/configuration.md complete.
 func TestConfigurationDocCoversEveryKey(t *testing.T) {
 	t.Parallel()
@@ -817,15 +910,15 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var walk func(reflect.Type)
-	walk = func(typ reflect.Type) {
+	var walk func(typ reflect.Type, table string)
+	walk = func(typ reflect.Type, parent string) {
 		for f := range typ.Fields() {
 			tag, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
 			switch {
 			case tag == "-":
 				continue
 			case f.Anonymous:
-				walk(f.Type)
+				walk(f.Type, parent)
 				continue
 			}
 			ft := f.Type
@@ -833,16 +926,20 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 				ft = ft.Elem()
 			}
 			table := ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]()
+			name := tag
+			if table && parent != "" && f.Type.Kind() != reflect.Map {
+				name = parent + "." + tag
+			}
 			switch {
-			case table && !strings.Contains(string(doc), "`["+tag):
-				t.Errorf("docs/configuration.md has no section for [%s]", tag)
+			case table && !strings.Contains(string(doc), "`["+name):
+				t.Errorf("docs/configuration.md has no section for [%s]", name)
 			case !table && !strings.Contains(string(doc), "`"+tag+"`"):
 				t.Errorf("docs/configuration.md does not describe `%s`", tag)
 			}
 			if table {
-				walk(ft)
+				walk(ft, name)
 			}
 		}
 	}
-	walk(reflect.TypeFor[Config]())
+	walk(reflect.TypeFor[Config](), "")
 }

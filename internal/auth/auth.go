@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -24,7 +25,14 @@ import (
 // Permission extension keys set on successful authentication.
 const (
 	ExtUser        = "gosftpd-user"
+	ExtMethod      = "gosftpd-method"
 	ExtFingerprint = "pubkey-fp"
+)
+
+// Authentication methods.
+const (
+	MethodPublicKey = "publickey"
+	MethodPassword  = "password"
 )
 
 // maxUserLen bounds user names accepted from clients in zero-config mode.
@@ -41,6 +49,7 @@ func ValidUserName(name string) bool { return userNameRE.MatchString(name) }
 type User struct {
 	Name      string
 	Keys      []Key
+	Password  PasswordHash   // nil: no password login
 	AllowFrom []netip.Prefix // empty: any address
 	Expires   time.Time      // zero: never
 	Disabled  bool
@@ -48,6 +57,7 @@ type User struct {
 
 type account struct {
 	keys      map[string]Key
+	password  PasswordHash
 	allowFrom []netip.Prefix
 	expires   time.Time
 	disabled  bool
@@ -71,12 +81,19 @@ type Authenticator struct {
 	users map[string]*account
 	any   *account // zero-config: accepts every valid user name
 	now   func() time.Time
+	// hashing bounds concurrent password verifications, and so the memory
+	// they take before authentication.
+	hashing chan struct{}
+}
+
+func newAuthenticator(n int) *Authenticator {
+	return &Authenticator{users: make(map[string]*account, n), now: time.Now, hashing: make(chan struct{}, runtime.NumCPU())}
 }
 
 // New returns a zero-config Authenticator for keys. If user is not empty,
 // only that SSH user name is accepted; otherwise any valid name is.
 func New(user string, keys []Key) *Authenticator {
-	a := &Authenticator{users: map[string]*account{}, now: time.Now}
+	a := newAuthenticator(1)
 	if user != "" {
 		a.users[user] = newAccount(keys)
 	} else {
@@ -87,9 +104,10 @@ func New(user string, keys []Key) *Authenticator {
 
 // NewUsers returns an Authenticator for configured users.
 func NewUsers(users []User) *Authenticator {
-	a := &Authenticator{users: make(map[string]*account, len(users)), now: time.Now}
+	a := newAuthenticator(len(users))
 	for _, u := range users {
 		acc := newAccount(u.Keys)
+		acc.password = u.Password
 		acc.allowFrom = u.AllowFrom
 		acc.expires = u.Expires
 		acc.disabled = u.Disabled
@@ -131,22 +149,14 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 		keys = acc.keys
 	}
 	k, ok := keys[string(key.Marshal())]
-	switch {
-	case acc == nil, !ok, acc.disabled:
-		return nil, errDenied
-	case !acc.expires.IsZero() && a.now().After(acc.expires):
-		return nil, errDenied
-	case !k.expires.IsZero() && a.now().After(k.expires):
-		return nil, errDenied
-	case !addrAllowed(acc.allowFrom, conn.RemoteAddr()):
+	if !ok || !a.allowed(acc, conn) {
 		return nil, errDenied
 	}
-	perms := &ssh.Permissions{
-		Extensions: map[string]string{
-			ExtUser:        name,
-			ExtFingerprint: ssh.FingerprintSHA256(key),
-		},
+	if !k.expires.IsZero() && a.now().After(k.expires) {
+		return nil, errDenied
 	}
+	perms := newPermissions(name, MethodPublicKey)
+	perms.Extensions[ExtFingerprint] = ssh.FingerprintSHA256(key)
 	if k.noTouchRequire {
 		perms.Extensions["no-touch-required"] = ""
 	}
@@ -155,6 +165,43 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 		perms.CriticalOptions = map[string]string{"source-address": k.sourceAddress}
 	}
 	return perms, nil
+}
+
+// Password is an ssh.ServerConfig.PasswordCallback. Unknown users and users
+// without a password verify a dummy hash, so that every failure takes about
+// as long as a wrong password.
+func (a *Authenticator) Password(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+	if len(password) == 0 || len(password) > MaxPasswordLen {
+		return nil, errDenied
+	}
+	name := conn.User()
+	acc := a.lookup(name)
+	h := dummyHash()
+	if acc != nil && acc.password != nil {
+		h = acc.password
+	}
+	a.hashing <- struct{}{}
+	ok := h.verify(password)
+	<-a.hashing
+	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
+		return nil, errDenied
+	}
+	return newPermissions(name, MethodPassword), nil
+}
+
+// allowed checks the account-wide conditions of a login.
+func (a *Authenticator) allowed(acc *account, conn ssh.ConnMetadata) bool {
+	switch {
+	case acc == nil, acc.disabled:
+		return false
+	case !acc.expires.IsZero() && a.now().After(acc.expires):
+		return false
+	}
+	return addrAllowed(acc.allowFrom, conn.RemoteAddr())
+}
+
+func newPermissions(user, method string) *ssh.Permissions {
+	return &ssh.Permissions{Extensions: map[string]string{ExtUser: user, ExtMethod: method}}
 }
 
 // UserFrom returns the authenticated user recorded in perms.

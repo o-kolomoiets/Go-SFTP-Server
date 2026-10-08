@@ -4,7 +4,8 @@
 
 Usage: paramiko_check.py PORT KNOWN_HOSTS KEYDIR INBOX LOCAL_FILE
 KEYDIR holds id_reader, id_partner and id_admin; INBOX is the host path of
-the "inbox" mount (partner: upload preset, on_conflict=rename).
+the "inbox" mount (partner: upload preset, on_conflict=rename). The
+environment variable COURIER_PASSWORD is the password of the user courier.
 """
 
 import io
@@ -89,5 +90,26 @@ except IOError:
     check(True, "upload refused for the read preset")
 sftp.close()
 ssh.close()
+
+# courier: password login (COURIER_PASSWORD), uploads only.
+client = paramiko.SSHClient()
+client.load_host_keys(known_hosts)
+client.set_missing_host_key_policy(paramiko.RejectPolicy())
+client.connect("127.0.0.1", port=int(port), username="courier", password=os.environ["COURIER_PASSWORD"],
+               allow_agent=False, look_for_keys=False, timeout=10)
+sftp = client.open_sftp()
+sftp.putfo(io.BytesIO(b"by password\n"), "paramiko-courier.txt")
+check(open(os.path.join(inbox, "paramiko-courier.txt"), "rb").read() == b"by password\n", "password login and upload")
+sftp.close()
+client.close()
+try:
+    client = paramiko.SSHClient()
+    client.load_host_keys(known_hosts)
+    client.connect("127.0.0.1", port=int(port), username="courier", password="wrong",
+                   allow_agent=False, look_for_keys=False, timeout=10)
+    client.close()
+    check(False, "wrong password accepted")
+except paramiko.AuthenticationException:
+    check(True, "wrong password refused")
 
 sys.exit(1 if failed else 0)

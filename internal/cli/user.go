@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -28,21 +30,22 @@ func newUserCmd() *cobra.Command {
 		Args:  noArgs,
 		RunE:  showHelp,
 	}
-	cmd.AddCommand(newUserAddCmd(), newUserListCmd())
+	cmd.AddCommand(newUserAddCmd(), newUserListCmd(), newHashPasswordCmd())
 	return cmd
 }
 
 type userAddOptions struct {
-	keys      []string
-	access    []string
-	expires   string
-	allowFrom []string
+	keys         []string
+	passwordHash string
+	access       []string
+	expires      string
+	allowFrom    []string
 }
 
 func newUserAddCmd() *cobra.Command {
 	var o userAddOptions
 	cmd := &cobra.Command{
-		Use:   "add NAME --key FILE|KEY --access MOUNT=PERMISSIONS...",
+		Use:   "add NAME --key FILE|KEY|--password-hash HASH --access MOUNT=PERMISSIONS...",
 		Short: "Print a [users.NAME] block to add to the configuration",
 		Long: `Print a [users.NAME] block to add to the configuration file (or to a file in
 users.d/ if the configuration includes it). Nothing is written to disk.
@@ -68,6 +71,7 @@ Permissions are a preset (read, upload, readwrite, full) or a list of flags
 	}
 	f := cmd.Flags()
 	f.StringArrayVar(&o.keys, "key", nil, "public key, or a file with public keys (repeatable)")
+	f.StringVar(&o.passwordHash, "password-hash", "", "password hash from 'gosftpd user hash-password'")
 	f.StringArrayVar(&o.access, "access", nil, "MOUNT=PERMISSIONS (repeatable)")
 	f.StringVar(&o.expires, "expires", "", "account expiry: a duration from now (72h) or a date (2026-12-31, RFC 3339)")
 	f.StringArrayVar(&o.allowFrom, "allow-from", nil, "allowed client address or CIDR block (repeatable)")
@@ -79,8 +83,13 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 	if !auth.ValidUserName(name) {
 		return "", fmt.Errorf("invalid user name %q: use lowercase letters, digits, '.', '_' and '-' (max 32)", name)
 	}
-	if len(o.keys) == 0 {
-		return "", errors.New("at least one --key is required")
+	if len(o.keys) == 0 && o.passwordHash == "" {
+		return "", errors.New("at least one --key or a --password-hash is required")
+	}
+	if o.passwordHash != "" {
+		if _, err := auth.ParsePasswordHash(o.passwordHash); err != nil {
+			return "", fmt.Errorf("--password-hash: %w", err)
+		}
 	}
 	if len(o.access) == 0 {
 		return "", errors.New("at least one --access MOUNT=PERMISSIONS is required")
@@ -119,7 +128,12 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n[users.%s]\n", tomlKey(name))
-	fmt.Fprintf(&b, "authorized_keys = %s\n", tomlStrings(keys))
+	if len(keys) > 0 {
+		fmt.Fprintf(&b, "authorized_keys = %s\n", tomlStrings(keys))
+	}
+	if o.passwordHash != "" {
+		fmt.Fprintf(&b, "password_hash = %s\n", tomlString(o.passwordHash))
+	}
 	if len(o.allowFrom) > 0 {
 		fmt.Fprintf(&b, "allow_from = %s\n", tomlStrings(o.allowFrom))
 	}
@@ -245,4 +259,69 @@ func newUserListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&file, "config", "", "configuration file (default: the one serve would use)")
 	return cmd
+}
+
+func newHashPasswordCmd() *cobra.Command {
+	var fromStdin bool
+	cmd := &cobra.Command{
+		Use:   "hash-password [--stdin]",
+		Short: "Print the hash of a password for password_hash",
+		Long: `Read a password and print its argon2id hash, for password_hash in a
+[users.NAME] table or for user add --password-hash. On a terminal the
+password is asked twice without echo; with --stdin the first line of
+standard input is used.
+
+Password logins also need auth.methods = ["publickey", "password"].`,
+		Example: `  gosftpd user hash-password
+  printf '%s\n' "$PASSWORD" | gosftpd user hash-password --stdin`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			pw, err := readPassword(cmd.InOrStdin(), cmd.ErrOrStderr(), fromStdin)
+			if err != nil {
+				return usageError{err}
+			}
+			h, err := auth.HashPassword(pw)
+			if err != nil {
+				return usageError{err}
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), h)
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the password from the first line of standard input")
+	return cmd
+}
+
+// readPassword reads the first line of in, or asks twice on a terminal.
+func readPassword(in io.Reader, prompt io.Writer, fromStdin bool) ([]byte, error) {
+	if fromStdin {
+		line, err := bufio.NewReader(io.LimitReader(in, auth.MaxPasswordLen+2)).ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		line = bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+		return line, nil
+	}
+	f, ok := in.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return nil, errors.New("standard input is not a terminal; pass --stdin to read the password from it")
+	}
+	ask := func(label string) ([]byte, error) {
+		fmt.Fprint(prompt, label)
+		pw, err := term.ReadPassword(int(f.Fd()))
+		fmt.Fprintln(prompt)
+		return pw, err
+	}
+	pw, err := ask("Password: ")
+	if err != nil {
+		return nil, err
+	}
+	again, err := ask("Repeat password: ")
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(pw, again) {
+		return nil, errors.New("the passwords do not match")
+	}
+	return pw, nil
 }

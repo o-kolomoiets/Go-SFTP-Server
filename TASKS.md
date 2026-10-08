@@ -11,7 +11,7 @@
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
 | M2 MVP | v0.2.0 | 🔄 | 17 / 18 |
-| M3 Hardening | v0.3.0 | ⬜ | 0 / 12 |
+| M3 Hardening | v0.3.0 | 🔄 | 5 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
@@ -97,20 +97,22 @@
 
 ## M3: Hardening (v0.3.0)
 
-| ID | Блок | Статус |
-|---|---|---|
-| M3-01 | Лимиты соединений, idle timeout, keepalive | ⬜ |
-| M3-02 | Ban-таблица | ⬜ |
-| M3-03 | Пароли opt-in (argon2id), `user hash-password` | ⬜ |
-| M3-04 | `max_file_size`, `min_free_space` | ⬜ |
-| M3-05 | `atomic_uploads`, janitor | ⬜ |
-| M3-06 | `on_conflict = "version"` | ⬜ |
-| M3-07 | Профиль `compat` и тест профилей криптографии | ⬜ |
-| M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ⬜ |
-| M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ |
-| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | ⬜ |
-| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ⬜ |
-| M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ⬜ |
+Три PR: M3a — сеть и вход (01–03, 07, 10, 12), M3b — диск и загрузки (04–06), M3c — fuzzing, CI, документы и релиз (08, 09, 11).
+
+| ID | Блок | Статус | Детали |
+|---|---|---|---|
+| M3-01 | Лимиты соединений, idle timeout, keepalive | ✅ | `max_connections`, `max_connections_per_ip` (IPv6 по /64), `max_preauth_connections` проверяются сразу после accept; `conn.reject` не чаще 10/с; `idle_timeout` считает только SFTP-трафик; keepalive: 3 пропуска закрывают соединение; TCP keepalive на listener; тест 1000 «молчащих» соединений |
+| M3-02 | Ban-таблица | ✅ | Скользящее окно по соединениям (не по ключам), LRU по 65 536 записей для неудач и банов, `exempt` по адресу; `auth.ban`, `conn.reject reason=banned`; тест на 1 млн источников |
+| M3-03 | Пароли opt-in (argon2id), `user hash-password` | ✅ | `auth.methods`, `password_hash` (argon2id; bcrypt 10–14 для импорта; пределы m ≤ 64 MiB, t ≤ 10, p ≤ 8), dummy-хэш, семафор `NumCPU`, тест медиан времени; `user add --password-hash`; interop: OpenSSH (SSH_ASKPASS) и paramiko |
+| M3-04 | `max_file_size`, `min_free_space` | ⬜ | |
+| M3-05 | `atomic_uploads`, janitor | ⬜ | |
+| M3-06 | `on_conflict = "version"` | ⬜ | |
+| M3-07 | Профиль `compat` и тест профилей криптографии | ✅ | `server.crypto_policy`; тест: каждое имя есть в `SupportedAlgorithms`, нет в `InsecureAlgorithms` и в списке «никогда»; клиент только с compat-алгоритмами входит лишь при `compat` |
+| M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ⬜ | |
+| M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ | |
+| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | 🔄 | `--allow-root` сделан (M3a); WinSCP и `limits@openssh.com` — в M3c |
+| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ⬜ | |
+| M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ✅ | `internal/testutil.AsyncConn`; idle и keepalive проверяются в `testing/synctest` на `net.Pipe` |
 
 ## M3b: Windows (можно после v1.0)
 

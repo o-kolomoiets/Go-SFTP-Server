@@ -138,6 +138,7 @@ func TestUserAddErrors(t *testing.T) {
 		{"user", "add", "alice", "--key", `command="sh" ` + key, "--access", "a=read"},
 		{"user", "add", "alice", "--key", key, "--access", "a=read", "--expires", "-1h"},
 		{"user", "add", "alice", "--key", key, "--access", "a=read", "--allow-from", "example.org"},
+		{"user", "add", "alice", "--password-hash", "plaintext", "--access", "a=read"},
 		{"user", "add"},
 	} {
 		if code, _, errOut := execute(t, args...); code != exitUsage {
@@ -484,7 +485,7 @@ func TestServeMinimalExample(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var stdout, stderr lockedBuffer
 	done := make(chan int, 1)
-	go func() { done <- run(ctx, []string{"serve", "--config", path}, &stdout, &stderr) }()
+	go func() { done <- run(ctx, []string{"serve", "--config", path, "--allow-root"}, &stdout, &stderr) }()
 
 	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+)`)
 	var addr string

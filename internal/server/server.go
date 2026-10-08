@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -27,23 +28,18 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
-// Defaults.
+// Defaults (ROADMAP §7.5).
 const (
-	DefaultHandshakeTimeout = 30 * time.Second
-	DefaultMaxSessions      = 4
-	DefaultMaxAuthTries     = 6
-	serverVersion           = "SSH-2.0-gosftpd"
-	maxClientVersionLen     = 128
-)
-
-// Modern algorithm profile (ROADMAP §7.6): no SHA-1, CBC or DSA.
-var (
-	kexAlgos = []string{ssh.KeyExchangeMLKEM768X25519, ssh.KeyExchangeCurve25519}
-	ciphers  = []string{
-		ssh.CipherChaCha20Poly1305, ssh.CipherAES256GCM, ssh.CipherAES128GCM,
-		ssh.CipherAES256CTR, ssh.CipherAES128CTR,
-	}
-	macs = []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM}
+	DefaultHandshakeTimeout  = 30 * time.Second
+	DefaultIdleTimeout       = 15 * time.Minute
+	DefaultKeepaliveInterval = 30 * time.Second
+	DefaultMaxConnections    = 256
+	DefaultMaxPerSource      = 16
+	DefaultMaxPreauth        = 64
+	DefaultMaxSessions       = 4
+	DefaultMaxAuthTries      = 6
+	serverVersion            = "SSH-2.0-gosftpd"
+	maxClientVersionLen      = 128
 )
 
 // Config configures a Server.
@@ -57,16 +53,32 @@ type Config struct {
 	Audit  *audit.Logger
 	Log    *slog.Logger
 
-	HandshakeTimeout   time.Duration // default DefaultHandshakeTimeout
-	MaxSessionsPerConn int           // default DefaultMaxSessions
-	MaxOpenHandles     int           // per SFTP session, default sftpd.DefaultMaxHandles
-	MaxAuthTries       int           // default DefaultMaxAuthTries
+	// Password enables password logins (auth.methods includes "password").
+	Password bool
+	// Bans refuses sources that keep failing to log in; nil disables bans.
+	Bans *auth.BanTable
+	// CryptoPolicy is PolicyModern (default) or PolicyCompat.
+	CryptoPolicy string
+
+	// Zero values take the defaults. A negative IdleTimeout or
+	// KeepaliveInterval disables it.
+	HandshakeTimeout      time.Duration
+	IdleTimeout           time.Duration
+	KeepaliveInterval     time.Duration
+	MaxConnections        int
+	MaxConnectionsPerIP   int // per IPv4 address or IPv6 /64
+	MaxPreauthConnections int
+	MaxSessionsPerConn    int
+	MaxOpenHandles        int // per SFTP session, default sftpd.DefaultMaxHandles
+	MaxAuthTries          int
 }
 
 // Server serves SFTP over SSH.
 type Server struct {
-	cfg    Config
-	sshCfg *ssh.ServerConfig
+	cfg     Config
+	sshCfg  *ssh.ServerConfig
+	limits  *limiter
+	rejects rejectLog
 
 	wg    sync.WaitGroup
 	mu    sync.Mutex
@@ -87,14 +99,17 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	if cfg.HandshakeTimeout <= 0 {
-		cfg.HandshakeTimeout = DefaultHandshakeTimeout
-	}
-	if cfg.MaxSessionsPerConn <= 0 {
-		cfg.MaxSessionsPerConn = DefaultMaxSessions
-	}
-	if cfg.MaxAuthTries <= 0 {
-		cfg.MaxAuthTries = DefaultMaxAuthTries
+	setDefault(&cfg.HandshakeTimeout, DefaultHandshakeTimeout)
+	setDefault(&cfg.IdleTimeout, DefaultIdleTimeout)
+	setDefault(&cfg.KeepaliveInterval, DefaultKeepaliveInterval)
+	setDefault(&cfg.MaxConnections, DefaultMaxConnections)
+	setDefault(&cfg.MaxConnectionsPerIP, DefaultMaxPerSource)
+	setDefault(&cfg.MaxPreauthConnections, DefaultMaxPreauth)
+	setDefault(&cfg.MaxSessionsPerConn, DefaultMaxSessions)
+	setDefault(&cfg.MaxAuthTries, DefaultMaxAuthTries)
+	algos, err := policy(cfg.CryptoPolicy)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.Grants == nil {
 		mounts := cfg.Mounts
@@ -102,16 +117,33 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	sc := &ssh.ServerConfig{
-		Config:                  ssh.Config{KeyExchanges: kexAlgos, Ciphers: ciphers, MACs: macs},
+		Config:                  ssh.Config{KeyExchanges: algos.kex, Ciphers: algos.ciphers, MACs: algos.macs},
 		PublicKeyCallback:       cfg.Auth.PublicKey,
 		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
 		MaxAuthTries:            cfg.MaxAuthTries,
 		ServerVersion:           serverVersion,
 	}
+	if cfg.Password {
+		sc.PasswordCallback = cfg.Auth.Password
+	}
 	for _, k := range cfg.HostKeys {
 		sc.AddHostKey(k)
 	}
-	return &Server{cfg: cfg, sshCfg: sc, conns: make(map[net.Conn]struct{})}, nil
+	return &Server{
+		cfg:    cfg,
+		sshCfg: sc,
+		limits: newLimiter(cfg.MaxConnections, cfg.MaxConnectionsPerIP, cfg.MaxPreauthConnections),
+		conns:  make(map[net.Conn]struct{}),
+	}, nil
+}
+
+func setDefault[T int | time.Duration](v *T, def T) {
+	switch {
+	case *v == 0:
+		*v = def
+	case *v < 0:
+		*v = 0
+	}
 }
 
 // Serve accepts connections on ln until ctx is canceled or ln fails. It
@@ -140,8 +172,53 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			continue
 		}
 		backoff = 0
-		s.wg.Go(func() { s.ServeConn(c) })
+		if adm := s.admit(c); adm != nil {
+			s.wg.Go(func() { s.serveConn(c, adm) })
+		}
 	}
+}
+
+// admit applies bans and connection limits to a new connection. It closes
+// a refused connection, before the SSH handshake, and returns nil.
+func (s *Server) admit(c net.Conn) *admission {
+	ip, isIP := auth.SourceAddr(c.RemoteAddr())
+	var src netip.Prefix
+	if isIP {
+		src = auth.SourceKey(ip)
+	}
+	var (
+		reason string
+		adm    *admission
+	)
+	switch {
+	case !s.cfg.Audit.Healthy():
+		reason = rejectAudit
+	case isIP && s.cfg.Bans != nil && s.cfg.Bans.Banned(ip):
+		reason = rejectBanned
+	default:
+		adm, reason = s.limits.admit(src)
+	}
+	if adm != nil {
+		return adm
+	}
+	_ = c.Close()
+	if reason == rejectAudit {
+		s.cfg.Log.Warn("refusing connection: audit log unavailable", "remote_addr", c.RemoteAddr().String())
+		return nil
+	}
+	s.cfg.Log.Debug("connection refused", "remote_addr", c.RemoteAddr().String(), "reason", reason)
+	if ok, suppressed := s.rejects.allow(time.Now()); ok {
+		attrs := []slog.Attr{
+			slog.String("remote_addr", c.RemoteAddr().String()),
+			slog.String("local_addr", c.LocalAddr().String()),
+			slog.String("reason", reason),
+		}
+		if suppressed > 0 {
+			attrs = append(attrs, slog.Int("suppressed", suppressed))
+		}
+		s.cfg.Audit.Event("conn.reject", attrs...)
+	}
+	return nil
 }
 
 // Shutdown waits for in-flight connections to finish; when ctx expires it
@@ -176,8 +253,16 @@ func (s *Server) track(c net.Conn, add bool) {
 
 func newID() string { return fmt.Sprintf("%016x", rand.Uint64()) } //nolint:gosec // G404: correlation IDs, not secrets
 
-// ServeConn handles one connection until it closes.
+// ServeConn handles one connection until it closes, with the same bans and
+// limits as Serve.
 func (s *Server) ServeConn(c net.Conn) {
+	if adm := s.admit(c); adm != nil {
+		s.serveConn(c, adm)
+	}
+}
+
+func (s *Server) serveConn(c net.Conn, adm *admission) {
+	defer adm.release()
 	connID := newID()
 	log := s.cfg.Log.With("conn_id", connID, "remote_addr", c.RemoteAddr().String())
 	defer func() {
@@ -189,10 +274,6 @@ func (s *Server) ServeConn(c net.Conn) {
 	s.track(c, true)
 	defer s.track(c, false)
 
-	if !s.cfg.Audit.Healthy() {
-		log.Warn("refusing connection: audit log unavailable")
-		return
-	}
 	al := s.cfg.Audit.With("conn_id", connID, "remote_addr", c.RemoteAddr().String(), "local_addr", c.LocalAddr().String())
 
 	// Per-connection callbacks: they only record, they never decide.
@@ -222,19 +303,21 @@ func (s *Server) ServeConn(c net.Conn) {
 		return
 	}
 	sconn, chans, reqs, err := ssh.NewServerConn(c, &cfg)
+	adm.authenticated()
 	if err != nil {
 		log.Debug("handshake failed", "err", err)
 		if accepted.Load() {
 			u, _ := attemptedUser.Load().(string)
 			al.Event("auth.failure", slog.String("user", u), slog.Int("attempts", int(failures.Load())))
+			s.recordFailure(c, failures.Load(), al)
 			al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", "error"))
 		}
 		return
 	}
 	defer sconn.Close()
-	if err := c.SetDeadline(time.Time{}); err != nil {
-		return
-	}
+	// This fails if the client already left: the SSH mux closes c when it
+	// reads EOF. The login is audited all the same.
+	_ = c.SetDeadline(time.Time{})
 
 	user, ok := auth.UserFrom(sconn.Permissions)
 	if !ok {
@@ -243,17 +326,48 @@ func (s *Server) ServeConn(c net.Conn) {
 	}
 	al = al.With("user", user)
 	log = log.With("user", user)
-	al.Event("auth.success",
-		slog.String("auth_method", "publickey"),
-		slog.String("key_fp", sconn.Permissions.Extensions[auth.ExtFingerprint]),
-		slog.Int("failed_attempts", int(failures.Load())))
+	success := []slog.Attr{slog.String("auth_method", sconn.Permissions.Extensions[auth.ExtMethod])}
+	if fp := sconn.Permissions.Extensions[auth.ExtFingerprint]; fp != "" {
+		success = append(success, slog.String("key_fp", fp))
+	}
+	al.Event("auth.success", append(success, slog.Int("failed_attempts", int(failures.Load())))...)
 
 	go ssh.DiscardRequests(reqs)
-	s.serveChannels(chans, user, al, log)
-	al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", "ok"))
+	act := &activity{}
+	act.touch(time.Now())
+	var closeReason atomic.Value
+	done := make(chan struct{})
+	defer close(done)
+	go watch(sconn, act, s.cfg.IdleTimeout, s.cfg.KeepaliveInterval, done, func(reason string) {
+		closeReason.Store(reason)
+		log.Info("closing connection", "reason", reason)
+		_ = sconn.Close()
+	})
+	s.serveChannels(chans, user, act, al, log)
+	result, _ := closeReason.Load().(string)
+	if result == "" {
+		result = "ok"
+	}
+	al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", result))
 }
 
-func (s *Server) serveChannels(chans <-chan ssh.NewChannel, user string, al *audit.Logger, log *slog.Logger) {
+// recordFailure counts a connection that ended without logging in against
+// its source, after at least one failed attempt (not a scanner that only
+// completed the key exchange).
+func (s *Server) recordFailure(c net.Conn, failures int32, al *audit.Logger) {
+	if s.cfg.Bans == nil || failures == 0 {
+		return
+	}
+	ip, ok := auth.SourceAddr(c.RemoteAddr())
+	if !ok || !s.cfg.Bans.Fail(ip) {
+		return
+	}
+	src := auth.SourceKey(ip).String()
+	s.cfg.Log.Warn("banning source after repeated login failures", "source", src, "duration", s.cfg.Bans.Duration())
+	al.Event("auth.ban", slog.String("source", src), slog.Int64("duration_ms", s.cfg.Bans.Duration().Milliseconds()))
+}
+
+func (s *Server) serveChannels(chans <-chan ssh.NewChannel, user string, act *activity, al *audit.Logger, log *slog.Logger) {
 	var (
 		sessions sync.WaitGroup
 		active   atomic.Int32
@@ -275,7 +389,7 @@ func (s *Server) serveChannels(chans <-chan ssh.NewChannel, user string, al *aud
 		active.Add(1)
 		sessions.Go(func() {
 			defer active.Add(-1)
-			s.serveSession(ch, creqs, user, al, log)
+			s.serveSession(activeChannel{ch, act}, creqs, user, al, log)
 		})
 	}
 }

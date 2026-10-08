@@ -6,14 +6,35 @@ model and a hardening guide follow in v0.3.
 
 ## What a client can do
 
-- **Authenticate** with a public key only. Unknown users, wrong keys,
-  disabled or expired accounts and disallowed addresses all fail the same
-  way. Identity flows only through the SSH library's permissions, never
-  through state captured during authentication (CVE-2024-45337).
+- **Authenticate** with a public key, or with a password where
+  `auth.methods` allows it. Unknown users, wrong keys or passwords, disabled
+  or expired accounts and disallowed addresses all fail the same way, and an
+  unknown user takes as long to refuse as a wrong password. Identity flows
+  only through the SSH library's permissions, never through state captured
+  during authentication (CVE-2024-45337).
 - **Open SFTP sessions**, nothing else: shell, exec, PTY, environment, agent
   and port forwarding requests are refused.
 - **Work inside its mounts** with the permissions of its user, see
   [configuration.md](configuration.md#permissions).
+
+## Brute force and floods
+
+- Connections are counted right after accept, before the SSH handshake: at
+  most `max_connections` in total, `max_connections_per_ip` per IPv4 address
+  or IPv6 /64, and `max_preauth_connections` that have not logged in yet.
+  One source can therefore never take all pre-authentication slots.
+- A source whose connections fail to log in 10 times within 10 minutes is
+  refused at accept for 30 minutes (`[auth.ban]`). Failures count per
+  connection, so an SSH agent offering many keys does not ban its owner.
+  Loopback is exempt by default. The ban list lives in memory and is bounded
+  (65 536 sources); a restart clears it.
+- The handshake must finish within `handshake_timeout`; a connection without
+  SFTP traffic for `idle_timeout` is closed, and so is one that leaves 3
+  keepalive requests unanswered.
+- Password checks (argon2id, 19 MiB) run at most one per CPU at a time, so
+  pre-authentication memory stays bounded. Passwords over 1024 bytes are
+  refused without hashing.
+- Refused connections are logged at most 10 per second.
 
 ## Confinement
 
@@ -61,6 +82,12 @@ So: run gosftpd as a dedicated unprivileged user, serve directories that only
 that user and gosftpd's clients write to, and do not serve trees that contain
 mounts or hard links you do not control.
 
+## Running as root
+
+`gosftpd serve` refuses to start as root without `--allow-root`. A
+confinement bug would then expose the whole host; run it as a dedicated
+user that owns only the served directories.
+
 ## Files gosftpd trusts
 
 The configuration, included files, host keys and `authorized_keys` files must
@@ -70,10 +97,13 @@ running gosftpd (like sshd's `StrictModes`); host keys must be private
 
 ## Cryptography
 
-Key exchange `mlkem768x25519-sha256` and `curve25519-sha256`; ciphers
-ChaCha20-Poly1305, AES-GCM and AES-CTR; MACs HMAC-SHA2 with encrypt-then-MAC.
-Host and user RSA keys sign with SHA-2 only, and user RSA keys need at least
-2048 bits. `verify-required` in `authorized_keys` is refused, because the SSH
+The default `crypto_policy = "modern"` offers key exchange
+`mlkem768x25519-sha256` and `curve25519-sha256`; ciphers ChaCha20-Poly1305,
+AES-GCM and AES-CTR; MACs HMAC-SHA2 with encrypt-then-MAC. `compat` adds NIST
+curve and SHA-2 Diffie-Hellman key exchange and MACs without
+encrypt-then-MAC, for old clients; scanners such as ssh-audit flag those.
+SHA-1, CBC and DSA are never offered. Host and user RSA keys sign with SHA-2
+only, and user RSA keys need at least 2048 bits. `verify-required` in `authorized_keys` is refused, because the SSH
 library does not check the user-verification flag of security keys.
 
 ## Audit

@@ -91,6 +91,7 @@ type startOpts struct {
 	policy     vfs.ConflictPolicy
 	readOnly   bool
 	categories []string // audit categories; nil means the defaults
+	tweak      func(*Config)
 }
 
 func startWith(t *testing.T, o startOpts) *env {
@@ -128,12 +129,16 @@ func startWith(t *testing.T, o startOpts) *env {
 	}
 	hk := signer(t)
 	e.hostKey = hk.PublicKey()
-	srv, err := New(Config{
+	cfg := Config{
 		HostKeys: []ssh.Signer{hk},
 		Auth:     auth.New("", keys),
 		Mounts:   mounts,
 		Audit:    mustAudit(t, e.auditLog, o.categories),
-	})
+	}
+	if o.tweak != nil {
+		o.tweak(&cfg)
+	}
+	srv, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

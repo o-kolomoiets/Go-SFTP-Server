@@ -28,6 +28,9 @@ PYTHON=${PYTHON:-python3}
 RCLONE=${RCLONE:-rclone}
 
 (cd "$ROOT" && go build -o "$WORK/gosftpd" ./cmd/gosftpd)
+# gosftpd refuses to run as root; containers often are root.
+ROOT_FLAG=()
+if [ "$(id -u)" = 0 ]; then ROOT_FLAG=(--allow-root); fi
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/id_ed25519"
 mkdir -p "$WORK/local"
 head -c 3000000 /dev/urandom >"$WORK/local/upload.bin"
@@ -44,7 +47,7 @@ start_server() {
 	PORT=$((20000 + RANDOM % 20000))
 	"$WORK/gosftpd" serve --dir "$WORK/$name/share" --on-conflict "$policy" \
 		--authorized-keys "$WORK/id_ed25519.pub" --state-dir "$WORK/$name/state" \
-		--listen "127.0.0.1:$PORT" --audit-output "$WORK/$name/audit.jsonl" \
+		--listen "127.0.0.1:$PORT" --audit-output "$WORK/$name/audit.jsonl" "${ROOT_FLAG[@]}" \
 		2>"$WORK/$name/server.log" &
 	PIDS+=($!)
 	for _ in $(seq 100); do
@@ -130,6 +133,9 @@ printf 'public file\n' >"$C/public/readme.txt"
 printf 'existing report\n' >"$C/inbox/report.txt"
 printf 'existing document\n' >"$C/inbox/doc.bin"
 for u in reader partner admin; do ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$WORK/id_$u"; done
+COURIER_PASSWORD='correct horse battery staple'
+COURIER_HASH=$(printf '%s\n' "$COURIER_PASSWORD" | "$WORK/gosftpd" user hash-password --stdin)
+printf '#!/bin/sh\necho "%s"\n' "$COURIER_PASSWORD" >"$WORK/askpass"; chmod 700 "$WORK/askpass"
 PORT=$((20000 + RANDOM % 20000))
 cat >"$C/gosftpd.toml" <<TOML
 config_version = 1
@@ -162,6 +168,13 @@ access = { inbox = "upload" }
 authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
 access = { public = "read", inbox = "full", home = "full" }
 
+[users.courier]
+password_hash = "$COURIER_HASH"
+access = { inbox = "upload" }
+
+[auth]
+methods = ["publickey", "password"]
+
 [audit]
 output = "$C/audit.jsonl"
 TOML
@@ -172,7 +185,7 @@ set +e; "$WORK/gosftpd" config validate --config "$C/typo.toml" 2>"$C/typo.err" 
 [ "$code" = 2 ] && grep -q 'unknown key mounts.public.read_onyl' "$C/typo.err" &&
 	pass "typo in a key: exit 2 naming the key" || fail "typo: exit $code: $(cat "$C/typo.err")"
 
-"$WORK/gosftpd" serve --config "$C/gosftpd.toml" 2>"$C/server.log" &
+"$WORK/gosftpd" serve --config "$C/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$C/server.log" &
 PIDS+=($!)
 for _ in $(seq 100); do
 	if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then break; fi
@@ -240,9 +253,28 @@ grep -q 'home' "$C/admin.out" && grep -q 'inbox' "$C/admin.out" && grep -q 'publ
 cmp -s "$WORK/local/short.txt" "$C/home/admin/notes.txt" && pass "admin: home created" || fail "admin: home"
 [ ! -e "$C/inbox/new.txt" ] && pass "admin: delete" || fail "admin: delete"
 
+# courier: password login (OpenSSH reads the password from SSH_ASKPASS).
+# sftp -b sets BatchMode, which disables password prompts; the first value wins.
+pw_opts=(-o BatchMode=no -o "UserKnownHostsFile=$C/known_hosts" -o StrictHostKeyChecking=yes -o PreferredAuthentications=password
+	-o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1)
+printf 'put %s courier.txt\n' "$WORK/local/short.txt" >"$C/courier.batch"
+if SSH_ASKPASS="$WORK/askpass" SSH_ASKPASS_REQUIRE=force sftp -P "$PORT" "${pw_opts[@]}" -b "$C/courier.batch" \
+	courier@127.0.0.1 </dev/null >"$C/courier.out" 2>&1; then
+	cmp -s "$WORK/local/short.txt" "$C/inbox/courier.txt" && pass "courier: password login and upload" || fail "courier: upload"
+else
+	fail "courier: password login: $(tail -3 "$C/courier.out")"
+fi
+printf '#!/bin/sh\necho wrong\n' >"$WORK/askpass-wrong"; chmod 700 "$WORK/askpass-wrong"
+if SSH_ASKPASS="$WORK/askpass-wrong" SSH_ASKPASS_REQUIRE=force sftp -P "$PORT" "${pw_opts[@]}" -b "$C/courier.batch" \
+	courier@127.0.0.1 </dev/null >/dev/null 2>&1; then
+	fail "courier: wrong password accepted"
+else
+	pass "courier: wrong password refused"
+fi
+
 # --- paramiko ------------------------------------------------------------
 if "$PYTHON" -c 'import paramiko' 2>/dev/null; then
-	"$PYTHON" "$ROOT/test/interop/paramiko_check.py" "$PORT" "$C/known_hosts" "$WORK" "$C/inbox" "$WORK/local/upload.bin" ||
+	COURIER_PASSWORD="$COURIER_PASSWORD" "$PYTHON" "$ROOT/test/interop/paramiko_check.py" "$PORT" "$C/known_hosts" "$WORK" "$C/inbox" "$WORK/local/upload.bin" ||
 		fail "paramiko checks"
 else
 	missing paramiko

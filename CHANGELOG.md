@@ -8,6 +8,40 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Added
+
+- Connection limits checked right after accept, before the SSH handshake:
+  `limits.max_connections` (256), `max_connections_per_ip` (16, per IPv4
+  address or IPv6 /64) and `max_preauth_connections` (64). Refused
+  connections are audited as `conn.reject`, at most 10 per second.
+- Bans (`[auth.ban]`): a source with 10 failed connections within 10 minutes
+  is refused at accept for 30 minutes. Failures count per connection, not per
+  offered key; loopback is exempt by default; the table is bounded. New audit
+  event `auth.ban`.
+- `server.idle_timeout` (15m) closes connections without SFTP traffic;
+  `server.keepalive_interval` (30s) closes connections that leave 3
+  `keepalive@openssh.com` requests unanswered. `conn.close` reports
+  `idle_timeout` or `keepalive_timeout`.
+- Opt-in password login: `auth.methods = ["publickey", "password"]` and
+  `password_hash` (argon2id; bcrypt accepted for imported accounts). Unknown
+  users take as long to refuse as wrong passwords; verifications run at most
+  one per CPU. `gosftpd user hash-password [--stdin]` prints a hash, and
+  `user add --password-hash` adds it to a user.
+- `server.crypto_policy`: `modern` (default, as before) or `compat`, which
+  adds NIST curve and SHA-2 Diffie-Hellman key exchange and non-ETM MACs for
+  old clients.
+
+### Changed
+
+- **BREAKING:** `gosftpd serve` refuses to run as root unless `--allow-root`
+  is given.
+- `auth.success` has `key_fp` only for public-key logins.
+
+### Fixed
+
+- A client that disconnected right after logging in left no `auth.success`
+  and `conn.close` events.
+
 ## [0.2.0] - 2026-10-08
 
 ### Added

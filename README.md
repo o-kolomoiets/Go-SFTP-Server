@@ -11,7 +11,8 @@ root, no database, no web UI.**
 
 > **Status: alpha.** It works with OpenSSH, paramiko, rclone and lftp, with
 > several users and per-folder permissions. Hardening for servers exposed to
-> the internet (rate limits, bans) is not there yet: see the [plan](#plan).
+> the internet is in progress (v0.3): connection limits and bans are there,
+> atomic uploads and fuzzing are not yet. See the [plan](#plan).
 
 ## What it is, and what it is not
 
@@ -32,7 +33,9 @@ exchange point that you can run next to it as an ordinary user. See
 | Resumable uploads that can only append | beta |
 | JSON audit log with a stable schema, fail-closed | beta |
 | `df` over SFTP, virtual file owners | beta |
-| Password login, rate limits and bans, `version` conflict mode | planned (v0.3) |
+| Connection limits, bans after failed logins, idle and keepalive timeouts | alpha |
+| Opt-in password login (argon2id) | alpha |
+| Atomic uploads, `version` conflict mode, disk limits | planned (v0.3) |
 | Reload on SIGHUP, metrics, hooks, systemd integration, SSH certificates | planned (v0.4) |
 | Docker image, deb/rpm packages, signed releases | planned (v0.5) |
 
@@ -100,7 +103,10 @@ its key path.
 
 ## Security model in short
 
-- Login by public key only; an unknown user fails exactly like a wrong key.
+- Login by public key (passwords only if enabled); an unknown user fails
+  exactly like a wrong key or password.
+- Connection limits before the handshake, and bans for sources that keep
+  failing to log in.
 - Each mount is an `os.Root`: `..`, absolute paths and symlinks cannot leave
   it, clients cannot create links, and host paths and accounts never reach
   clients.
@@ -139,9 +145,8 @@ log.
 ## Plan
 
 The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md) (in
-Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.3): password
-login, connection limits and bans, atomic uploads and a `version` conflict
-mode, fuzzing.
+Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.3): atomic
+uploads, a `version` conflict mode, disk limits, fuzzing.
 
 ## Contributing
 
