@@ -168,3 +168,5 @@
 | 2026-10-07 | M1: `gosftpd serve` — SSH/SFTP, ключи, изоляция `os.Root`, политика конфликтов, аудит, interop с OpenSSH | [o-kolomoiets/Go-SFTP-Server#3](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/3) |
 | 2026-10-08 | Ruleset на `main` и релиз `v0.1.0-alpha` (владелец); M1 закрыт, M2 разбит на задачи | этот файл |
 | 2026-10-08 | M2a: конфиг TOML, пользователи и права, `{user}`-home, команды `init`, `config`, `user`, `hostkey generate`; ревью (22 находки, исправлены) | [o-kolomoiets/Go-SFTP-Server#4](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/4) |
+| 2026-10-08 | M2b: докачка только дописыванием, `stat_redirect`, `statvfs`, виртуальные владельцы, фильтр категорий аудита; ревью (9 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#5](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/5) |
+| 2026-10-08 | M2c: interop с OpenSSH 10.6, paramiko, rclone, lftp; документация; GoReleaser; ревью (7 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#6](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/6) |

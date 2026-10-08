@@ -8,6 +8,8 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
 ### Added
 
 - Configuration file (TOML, `config_version = 1`): found via `--config`,
@@ -112,5 +114,6 @@ Incompatible changes are prefixed with **BREAKING:**.
 - The non-functional 2023 skeleton (`main.go`, `cmd/server`, `pkg/`).
 - The JSON configuration promised by the old README; configuration will use TOML.
 
-[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.1.0-alpha...HEAD
+[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.1.0-alpha...v0.2.0
 [0.1.0-alpha]: https://github.com/o-kolomoiets/go-sftp-server/releases/tag/v0.1.0-alpha
