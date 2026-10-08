@@ -7,7 +7,6 @@ linters:
   default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
     - bodyclose
-    - contextcheck
     - copyloopvar
     - errorlint
     - exhaustive
@@ -31,6 +30,8 @@ linters:
     - usestdlibvars
     - usetesting
     - wastedassign
+  # contextcheck is off: audit and log writes are synchronous and are never
+  # cancelled, so threading a context into them only adds noise.
   settings:
     gosec:
       excludes:

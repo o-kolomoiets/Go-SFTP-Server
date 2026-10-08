@@ -10,7 +10,7 @@ A new dependency requires removing another one or revisiting this rule.
 | `github.com/spf13/cobra`         | v1.10.2  | CLI                                      | M0    |
 | `golang.org/x/crypto`            | v0.57.0  | `ssh`; later `argon2`, `bcrypt`          | M1    |
 | `github.com/pkg/sftp`            | v1.13.11 | SFTP `RequestServer`                     | M1    |
-| `golang.org/x/sys`               | via x/crypto | `unix.Renameat2`, `unix.Fstatfs`     | M1    |
+| `golang.org/x/sys`               | v0.48.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
 
 Planned later (see ROADMAP.md §4.5): `golang.org/x/time`, `golang.org/x/term`
