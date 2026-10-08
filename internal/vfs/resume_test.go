@@ -446,3 +446,86 @@ func TestUserStateAcrossSessions(t *testing.T) {
 		t.Errorf("rename after the ownership expired: %v", err)
 	}
 }
+
+// Review finding: an open upload whose ownership entry was evicted by many
+// small uploads can still be renamed once it is closed.
+func TestOwnSurvivesEvictionWhileOpen(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	up := []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}}
+	c1, c2 := session(t, tbl, "partner", up), session(t, tbl, "partner", up)
+	big, err := c1.OpenWrite("/big.bin.abcd.partial", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := big.WriteAt([]byte("data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	v := c2.views[0]
+	for i := range maxOwned {
+		fi, err := os.Stat(filepath.Join(v.m.hostPath, "a.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c2.own(v, fmt.Sprintf("f%d", i), fi)
+	}
+	if err := big.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Rename("/big.bin.abcd.partial", "/big.bin", true); err != nil {
+		t.Errorf("rename after eviction: %v", err)
+	}
+}
+
+// Review finding: a rename allowed by the rename permission does not make a
+// file "own" (and so settable) if it was not own before.
+func TestRenameDoesNotGrantOwnership(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	bob := session(t, tbl, "bob", []Grant{{Mount: "inbox", Perm: mustPerm(t, "list,write,rename")}})
+	if _, err := upload(t, bob, "/x", put, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	tbl.now = func() time.Time { return time.Now().Add(OwnTTL + time.Hour) }
+	if _, err := bob.Rename("/x", "/y", true); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := bob.Setstat("/y", Attrs{Atime: when, Mtime: when, HasTimes: true}); !errors.Is(err, ErrDenied) {
+		t.Errorf("setstat after renaming an expired upload: %v", err)
+	}
+}
+
+// Review finding: read paths do not create per-user state, and state that
+// becomes empty is dropped (zero-config accepts any user name).
+func TestUserStateBounded(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	for i := range 100 {
+		s := session(t, tbl, fmt.Sprintf("u%d", i), tbl.FullAccess())
+		if _, err := s.Stat("/inbox/a.txt"); err != nil {
+			t.Fatal(err)
+		}
+		f, err := s.OpenRead("/inbox/a.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	if n := len(tbl.users); n != 0 {
+		t.Errorf("%d user states after reads only", n)
+	}
+	s := session(t, tbl, "w", tbl.FullAccess())
+	if _, err := upload(t, s, "/inbox/n.txt", put, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove("/inbox/n.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(tbl.users); n != 0 {
+		t.Errorf("%d user states after the only entry was removed", n)
+	}
+}

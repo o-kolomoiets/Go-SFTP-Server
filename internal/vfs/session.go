@@ -313,6 +313,16 @@ func (s *Session) OpenRead(vp string) (*os.File, error) {
 		return nil, ErrDenied
 	}
 	s.clearRedirect(v, rel)
+	// Check the type first, so that a FIFO or device is not even opened;
+	// O_NONBLOCK and the check after opening cover a swap in between.
+	if fi, err := v.root.Stat(rel); err != nil {
+		return nil, osError(err)
+	} else if !fi.Mode().IsRegular() {
+		if fi.IsDir() {
+			return nil, ErrIsDir
+		}
+		return nil, ErrNotRegular
+	}
 	f, err := v.root.OpenFile(rel, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
 		return nil, osError(err)
@@ -493,7 +503,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 	err = noClobberRename(sv.root, srel, drel)
 	switch {
 	case err == nil:
-		s.moveCreated(sv, srel, drel)
+		s.moveCreated(sv, srel, drel, own)
 		return s.virtual(sv, drel), nil
 	case !errors.Is(err, fs.ErrExist):
 		return "", osError(err)
@@ -509,7 +519,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 		if err := sv.root.Rename(srel, drel); err != nil {
 			return "", osError(err)
 		}
-		s.moveCreated(sv, srel, drel)
+		s.moveCreated(sv, srel, drel, own)
 		return s.virtual(sv, drel), nil
 	case ConflictReject:
 		return "", ErrConflict
@@ -518,7 +528,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		s.moveCreated(sv, srel, final)
+		s.moveCreated(sv, srel, final, own)
 		// rclone checks the size of the target after a move and deletes
 		// "a failed copy" at the requested name: that would be the original.
 		if sv.opts().StatRedirect {

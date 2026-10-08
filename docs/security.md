@@ -21,9 +21,10 @@ Each mount is opened as an `os.Root` at start. Every operation resolves the
 client path once (cleaned, at most 4096 bytes and 64 levels, valid UTF-8, no
 NUL) and passes only a relative name to the `os.Root`, which refuses `..`,
 absolute paths and symlinks leading out of the mount. Clients cannot create
-symlinks or hard links. FIFOs, sockets and devices are hidden and never
-opened. No response, listing or error message contains a host path, and
-listings show a virtual owner instead of host accounts.
+symlinks or hard links. FIFOs, sockets and devices are hidden from listings
+and refused for transfers; their type is checked before a file is opened.
+No response, listing or error message contains a host path, and listings
+show a virtual owner instead of host accounts.
 
 Home mounts (`{user}`) open the user's directory only if it is a real
 directory, and check that the opened directory is the one inspected; a

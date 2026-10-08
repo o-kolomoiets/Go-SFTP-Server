@@ -43,18 +43,55 @@ const (
 	// the user last changed it.
 	OwnTTL = time.Hour
 
-	maxRedirects = 1024 // per user
-	maxOwned     = 4096 // per user
+	maxRedirects  = 1024 // per user
+	maxOwned      = 4096 // per user
+	maxUserStates = 8192 // users with recorded state
 )
 
-// state returns the user's state; t.umu must be held.
+// state returns the user's state, creating it; t.umu must be held. It
+// returns nil when too many users have state (zero-config accepts any
+// name): then nothing is recorded, which only costs convenience.
 func (t *Table) state(user string) *userState {
-	st := t.users[user]
-	if st == nil {
-		st = &userState{owned: map[userKey]ownEntry{}, redirects: map[userKey]redirect{}}
-		t.users[user] = st
+	if st := t.users[user]; st != nil {
+		return st
 	}
+	if len(t.users) >= maxUserStates {
+		t.sweep()
+		if len(t.users) >= maxUserStates {
+			return nil
+		}
+	}
+	st := &userState{owned: map[userKey]ownEntry{}, redirects: map[userKey]redirect{}}
+	t.users[user] = st
 	return st
+}
+
+// lookup returns the user's state without creating it; t.umu must be held.
+func (t *Table) lookup(user string) *userState { return t.users[user] }
+
+// tidy drops the user's state once it holds nothing; t.umu must be held.
+func (t *Table) tidy(user string) {
+	if st := t.users[user]; st != nil && len(st.owned) == 0 && len(st.redirects) == 0 {
+		delete(t.users, user)
+	}
+}
+
+// sweep removes expired entries and empty states; t.umu must be held.
+func (t *Table) sweep() {
+	now := t.now()
+	for user, st := range t.users {
+		for k, e := range st.owned {
+			if now.After(e.until) {
+				delete(st.owned, k)
+			}
+		}
+		for k, r := range st.redirects {
+			if now.After(r.until) {
+				delete(st.redirects, k)
+			}
+		}
+		t.tidy(user)
+	}
 }
 
 // makeRoom keeps a map below max: expired entries go first, then the one
@@ -91,6 +128,9 @@ func (s *Session) own(v *view, rel string, fi os.FileInfo) {
 	defer t.umu.Unlock()
 	now := t.now()
 	st := t.state(s.user)
+	if st == nil {
+		return
+	}
 	k := userKey{v.m.name, rel}
 	if _, ok := st.owned[k]; !ok {
 		makeRoom(st.owned, maxOwned, now, ownUntil)
@@ -108,8 +148,15 @@ func (s *Session) isCreated(v *view, rel string) bool {
 	}
 	t := s.t
 	t.umu.Lock()
-	e, ok := t.state(s.user).owned[userKey{v.m.name, rel}]
-	live := ok && !t.now().After(e.until)
+	var (
+		e    ownEntry
+		live bool
+	)
+	if st := t.lookup(s.user); st != nil {
+		var ok bool
+		e, ok = st.owned[userKey{v.m.name, rel}]
+		live = ok && !t.now().After(e.until)
+	}
 	t.umu.Unlock()
 	if live && e.id.matches(cur) {
 		return true
@@ -126,17 +173,22 @@ func (s *Session) isCreated(v *view, rel string) bool {
 	return false
 }
 
-// moveCreated follows a rename: whatever the user created at from is now
-// at to (with a new change time), and to no longer holds an earlier entry.
-func (s *Session) moveCreated(v *view, from, to string) {
+// moveCreated follows a rename by the user. own is whether the file was the
+// user's before (checked by isCreated, with its identity and expiry): only
+// then is it the user's under the new name, with its new change time.
+// Either way, neither name keeps an earlier entry.
+func (s *Session) moveCreated(v *view, from, to string, own bool) {
 	t := s.t
 	t.umu.Lock()
-	st := t.state(s.user)
-	e, ok := st.owned[userKey{v.m.name, from}]
-	delete(st.owned, userKey{v.m.name, from})
-	delete(st.owned, userKey{v.m.name, to})
+	var e ownEntry
+	if st := t.lookup(s.user); st != nil {
+		e = st.owned[userKey{v.m.name, from}]
+		delete(st.owned, userKey{v.m.name, from})
+		delete(st.owned, userKey{v.m.name, to})
+		t.tidy(s.user)
+	}
 	t.umu.Unlock()
-	if !ok {
+	if !own || e.id.fi == nil {
 		return
 	}
 	if cur, err := v.root.Lstat(to); err == nil && os.SameFile(e.id.fi, cur) {
@@ -145,15 +197,16 @@ func (s *Session) moveCreated(v *view, from, to string) {
 }
 
 // refreshCreated re-records rel after a change by its owner.
-func (s *Session) refreshCreated(v *view, rel string) { s.moveCreated(v, rel, rel) }
+func (s *Session) refreshCreated(v *view, rel string) { s.moveCreated(v, rel, rel, true) }
 
-// closedCreated records the final identity of an upload being closed.
+// closedCreated records the final identity of an upload being closed. The
+// handle itself proves that this upload created the file (its entry may
+// have been evicted while the upload was open).
 func (s *Session) closedCreated(h *WriteHandle, st os.FileInfo) {
-	t := s.t
-	t.umu.Lock()
-	e, ok := t.state(s.user).owned[userKey{h.v.m.name, h.rel}]
-	t.umu.Unlock()
-	if ok && os.SameFile(e.id.fi, st) {
+	if h.id == nil || !os.SameFile(h.id, st) {
+		return
+	}
+	if cur, err := h.v.root.Lstat(h.rel); err == nil && os.SameFile(cur, st) {
 		s.own(h.v, h.rel, st)
 	}
 }
@@ -162,7 +215,10 @@ func (s *Session) forget(v *view, rel string) {
 	t := s.t
 	t.umu.Lock()
 	defer t.umu.Unlock()
-	delete(t.state(s.user).owned, userKey{v.m.name, rel})
+	if st := t.lookup(s.user); st != nil {
+		delete(st.owned, userKey{v.m.name, rel})
+		t.tidy(s.user)
+	}
 }
 
 // redirected returns the path STAT, LSTAT and SETSTAT should use for vp.
@@ -182,7 +238,10 @@ func (s *Session) redirectFor(v *view, rel string) (string, bool) {
 	t := s.t
 	t.umu.Lock()
 	defer t.umu.Unlock()
-	st := t.state(s.user)
+	st := t.lookup(s.user)
+	if st == nil {
+		return "", false
+	}
 	k := userKey{v.m.name, rel}
 	r, ok := st.redirects[k]
 	if !ok {
@@ -190,6 +249,7 @@ func (s *Session) redirectFor(v *view, rel string) (string, bool) {
 	}
 	if t.now().After(r.until) {
 		delete(st.redirects, k)
+		t.tidy(s.user)
 		return "", false
 	}
 	return r.final, true
@@ -201,6 +261,9 @@ func (s *Session) setRedirect(v *view, requested, final string) {
 	defer t.umu.Unlock()
 	now := t.now()
 	st := t.state(s.user)
+	if st == nil {
+		return
+	}
 	k := userKey{v.m.name, requested}
 	if _, ok := st.redirects[k]; !ok {
 		makeRoom(st.redirects, maxRedirects, now, redirUntil)
@@ -212,5 +275,8 @@ func (s *Session) clearRedirect(v *view, rel string) {
 	t := s.t
 	t.umu.Lock()
 	defer t.umu.Unlock()
-	delete(t.state(s.user).redirects, userKey{v.m.name, rel})
+	if st := t.lookup(s.user); st != nil {
+		delete(st.redirects, userKey{v.m.name, rel})
+		t.tidy(s.user)
+	}
 }

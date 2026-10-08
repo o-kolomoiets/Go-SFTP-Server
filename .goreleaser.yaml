@@ -43,6 +43,9 @@ checksum:
 # GitHub interface; the release workflow only attaches the files.
 release:
   mode: keep-existing
+  # Follow the tag: v1.2.3-rc.1 stays a pre-release (GoReleaser would
+  # otherwise update the release published in the interface to a full one).
+  prerelease: auto
 
 changelog:
   disable: true
