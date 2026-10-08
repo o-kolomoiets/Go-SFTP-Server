@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -19,19 +18,20 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
+	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hostkey"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/version"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
-const shutdownTimeout = 30 * time.Second
-
 type serveOptions struct {
+	config         string
 	dirs           []string
 	authorizedKeys string
 	hostKeys       []string
@@ -48,66 +48,314 @@ type serveOptions struct {
 func newServeCmd() *cobra.Command {
 	var o serveOptions
 	cmd := &cobra.Command{
-		Use:   "serve --dir [NAME=]PATH...",
+		Use:   "serve [--config FILE | --dir [NAME=]PATH...]",
 		Short: "Serve directories over SFTP",
+		Long: `Serve directories over SFTP.
+
+With --dir, gosftpd runs without a configuration file: every SSH user name
+is accepted with the keys from --authorized-keys and gets full access to the
+directories. Otherwise the configuration file is --config, $GOSFTPD_CONFIG,
+./gosftpd.toml, /etc/gosftpd/config.toml or <user config dir>/gosftpd/config.toml,
+whichever comes first.
+
+Flags override the environment ($GOSFTPD_LISTEN, $GOSFTPD_LOG_LEVEL,
+$GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 		Example: `  gosftpd serve --dir ./share
-  gosftpd serve --dir inbox=/srv/inbox --dir docs=/srv/docs --read-only`,
+  gosftpd serve --dir inbox=/srv/inbox --dir docs=/srv/docs --read-only
+  gosftpd serve --config /etc/gosftpd/config.toml`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runServe(cmd.Context(), o, cmd.ErrOrStderr(), cmd.OutOrStdout())
+			return runServe(cmd.Context(), cmd.Flags(), o, os.Getenv, cmd.ErrOrStderr(), cmd.OutOrStdout())
 		},
 	}
 	f := cmd.Flags()
-	f.StringArrayVar(&o.dirs, "dir", nil, "directory to serve, as PATH or NAME=PATH (repeatable)")
-	f.StringVar(&o.authorizedKeys, "authorized-keys", "", "authorized_keys file (default ~/.ssh/authorized_keys)")
-	f.StringArrayVar(&o.hostKeys, "host-key", nil, "host private key file (repeatable; default: generated in the state directory)")
-	f.StringVar(&o.stateDir, "state-dir", "", "directory for generated host keys (default <user config dir>/gosftpd)")
+	f.StringVar(&o.config, "config", "", "configuration file")
+	f.StringArrayVar(&o.dirs, "dir", nil, "directory to serve without a configuration file, as PATH or NAME=PATH (repeatable)")
+	f.StringVar(&o.authorizedKeys, "authorized-keys", "", "with --dir: authorized_keys file (default ~/.ssh/authorized_keys)")
+	f.StringVar(&o.user, "user", "", "with --dir: accept only this SSH user name (default: any)")
+	f.StringVar(&o.stateDir, "state-dir", "", "with --dir: directory for the generated host key (default <user config dir>/gosftpd)")
+	f.StringArrayVar(&o.hostKeys, "host-key", nil, "host private key file (repeatable)")
 	f.StringVar(&o.listen, "listen", ":2022", "address to listen on")
-	f.BoolVar(&o.readOnly, "read-only", false, "refuse all modifications")
+	f.BoolVar(&o.readOnly, "read-only", false, "refuse all modifications on every mount")
 	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject or overwrite")
-	f.StringVar(&o.user, "user", "", "accept only this SSH user name (default: any)")
 	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
 	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
 	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path")
 	return cmd
 }
 
-func runServe(ctx context.Context, o serveOptions, stderr, stdout io.Writer) error {
-	log, err := newLogger(stderr, o.logLevel, o.logFormat)
-	if err != nil {
-		return usageError{err}
+// buildConfig assembles the configuration: a file, or zero-config with
+// --dir; then the environment; then flags that were set explicitly.
+func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) string) (*config.Config, error) {
+	var (
+		c   *config.Config
+		err error
+	)
+	if err := checkFlagValues(flags, o); err != nil {
+		return nil, err
 	}
-	policy, err := vfs.ParseConflictPolicy(o.onConflict)
-	if err != nil {
-		return usageError{err}
+	if len(o.dirs) > 0 {
+		if o.config != "" {
+			return nil, usageError{errors.New("--dir and --config cannot be used together")}
+		}
+		if c, err = zeroConfig(o); err != nil {
+			return nil, err
+		}
+	} else {
+		for _, name := range []string{"authorized-keys", "user", "state-dir"} {
+			if flags.Changed(name) {
+				return nil, usageError{fmt.Errorf("--%s only applies with --dir; with a configuration file set it there", name)}
+			}
+		}
+		if c, err = loadConfig(o.config, getenv); err != nil {
+			return nil, err
+		}
+		if flags.Changed("read-only") && o.readOnly {
+			for _, m := range c.Mounts {
+				m.ReadOnly = true
+			}
+		}
+		if flags.Changed("on-conflict") {
+			for _, m := range c.Mounts {
+				m.OnConflict = o.onConflict
+			}
+		}
+		if flags.Changed("host-key") {
+			c.Server.HostKeys = absPaths(o.hostKeys)
+		}
 	}
-	specs, err := parseDirs(o.dirs, o.readOnly)
-	if err != nil {
-		return usageError{err}
+	applyEnv(c, getenv)
+	if flags.Changed("listen") {
+		c.Server.Listen = []string{o.listen}
 	}
-	authn, keysFile, err := loadAuthorizedKeys(o.authorizedKeys, o.user, log)
-	if err != nil {
-		return configError{err}
+	if flags.Changed("log-level") {
+		c.Log.Level = o.logLevel
 	}
-	keys, keyInfo, err := loadHostKeys(o.hostKeys, o.stateDir)
+	if flags.Changed("log-format") {
+		c.Log.Format = o.logFormat
+	}
+	if flags.Changed("audit-output") {
+		c.Audit.Output = o.auditOutput
+		if o.auditOutput != "stdout" {
+			c.Audit.Output = absPath(o.auditOutput)
+		}
+	}
+	return c, nil
+}
+
+// checkFlagValues reports bad flag values under the flag's name rather than
+// as a configuration key.
+func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
+	if flags.Changed("on-conflict") || len(o.dirs) > 0 {
+		if _, err := vfs.ParseConflictPolicy(o.onConflict); err != nil {
+			return usageError{fmt.Errorf("--on-conflict: %w", err)}
+		}
+	}
+	if _, err := newLogger(io.Discard, o.logLevel, o.logFormat); err != nil {
+		return usageError{fmt.Errorf("--%w", err)}
+	}
+	return nil
+}
+
+// loadConfig finds and loads the configuration file.
+func loadConfig(explicit string, getenv func(string) string) (*config.Config, error) {
+	path, err := config.Find(explicit, getenv)
+	if errors.Is(err, config.ErrNotFound) {
+		return nil, usageError{fmt.Errorf("no configuration file found (looked for %s); create one with 'gosftpd init' or serve a directory with --dir",
+			strings.Join(config.SearchPaths(), ", "))}
+	}
 	if err != nil {
-		return configError{err}
+		return nil, configError{err}
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		return nil, configError{err}
+	}
+	return c, nil
+}
+
+// applyEnv applies the environment variables that override the file.
+func applyEnv(c *config.Config, getenv func(string) string) {
+	if v := getenv(config.EnvListen); v != "" {
+		c.Server.Listen = strings.Split(v, ",")
+	}
+	if v := getenv(config.EnvLogLevel); v != "" {
+		c.Log.Level = v
+	}
+	if v := getenv(config.EnvLogFormat); v != "" {
+		c.Log.Format = v
+	}
+}
+
+// zeroConfig builds the configuration of serve --dir.
+func zeroConfig(o serveOptions) (*config.Config, error) {
+	c := config.Default()
+	c.Defaults.OnConflict = o.onConflict
+	specs, err := parseDirs(o.dirs)
+	if err != nil {
+		return nil, usageError{err}
+	}
+	for _, s := range specs {
+		if _, dup := c.Mounts[s.Name]; dup {
+			return nil, usageError{fmt.Errorf("two --dir have the name %q; name them with --dir NAME=PATH", s.Name)}
+		}
+		m := c.AddMount(s.Name, s.Path)
+		m.ReadOnly = o.readOnly
 	}
 
-	mounts, err := vfs.Open(specs, vfs.Options{OnConflict: policy, Flatten: true})
+	keys := o.authorizedKeys
+	if keys == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, configError{errors.New("no --authorized-keys given and no home directory")}
+		}
+		keys = filepath.Join(home, ".ssh", "authorized_keys")
+		if _, err := os.Stat(keys); err != nil {
+			return nil, configError{fmt.Errorf("no --authorized-keys given and %s does not exist; add your public key there or pass --authorized-keys FILE", keys)}
+		}
+	}
+	c.AnyUser = &config.ZeroConfigUser{Name: o.user, AuthorizedKeysFile: absPath(keys)}
+
+	if len(o.hostKeys) > 0 {
+		c.Server.HostKeys = absPaths(o.hostKeys)
+	} else {
+		dir := o.stateDir
+		if dir == "" {
+			if dir, err = defaultStateDir(); err != nil {
+				return nil, configError{err}
+			}
+		}
+		c.Server.HostKeys = []string{filepath.Join(absPath(dir), hostkey.DefaultFile)}
+		c.Server.HostKeyAutoGenerate = true
+	}
+	return c, nil
+}
+
+func defaultStateDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot find a state directory, use --state-dir: %w", err)
+	}
+	return filepath.Join(dir, "gosftpd"), nil
+}
+
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+func absPaths(ps []string) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = absPath(p)
+	}
+	return out
+}
+
+// problemsError lists every validation error, one per line.
+type problemsError struct {
+	file string
+	err  error
+}
+
+func (e problemsError) Error() string {
+	var lines []string
+	if joined, ok := e.err.(interface{ Unwrap() []error }); ok {
+		for _, err := range joined.Unwrap() {
+			lines = append(lines, err.Error())
+		}
+	} else {
+		lines = []string{e.err.Error()}
+	}
+	where := "configuration"
+	if e.file != "" {
+		where = e.file
+	}
+	noun := "problems"
+	if len(lines) == 1 {
+		noun = "problem"
+	}
+	return fmt.Sprintf("%s: %d %s:\n  %s", where, len(lines), noun, strings.Join(lines, "\n  "))
+}
+
+func (e problemsError) Unwrap() error { return e.err }
+
+// checkConfig validates c (and the filesystem with checkFS) and returns the
+// warnings.
+func checkConfig(c *config.Config, checkFS bool) ([]string, error) {
+	warns, err := c.Validate()
+	if err != nil {
+		return warns, configError{problemsError{c.File, err}}
+	}
+	if checkFS {
+		fsWarns, err := c.CheckFS()
+		warns = append(warns, fsWarns...)
+		if err != nil {
+			return warns, configError{problemsError{c.File, err}}
+		}
+	}
+	return warns, nil
+}
+
+func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv func(string) string, stderr, stdout io.Writer) error {
+	c, err := buildConfig(flags, o, getenv)
+	if err != nil {
+		return err
+	}
+	warns, err := checkConfig(c, true)
+	if err != nil {
+		return err
+	}
+	log, err := newLogger(stderr, c.Log.Level, c.Log.Format)
+	if err != nil {
+		return configError{err}
+	}
+	for _, w := range warns {
+		log.WarnContext(ctx, "configuration", "detail", w)
+	}
+
+	authn, keyWarns, err := c.Authenticator()
+	if err != nil {
+		return configError{err}
+	}
+	for _, w := range keyWarns {
+		log.WarnContext(ctx, "skipping authorized key", "detail", w)
+	}
+	keys, keyInfo, err := loadHostKeys(c.Server.HostKeys, c.Server.HostKeyAutoGenerate)
+	if err != nil {
+		return configError{err}
+	}
+	specs, err := c.MountSpecs()
+	if err != nil {
+		return configError{err}
+	}
+	mounts, err := vfs.Open(specs, vfs.Options{Flatten: c.Defaults.Flatten})
 	if err != nil {
 		return configError{err}
 	}
 	defer mounts.Close()
 
-	auditOut, closeAudit, err := openAudit(o.auditOutput, stdout)
+	auditOut, closeAudit, err := openAudit(c.Audit.Output, stdout)
 	if err != nil {
 		return configError{err}
 	}
 	defer closeAudit()
 	al := audit.New(auditOut, log)
 
-	srv, err := server.New(server.Config{HostKeys: keys, Auth: authn, Mounts: mounts, Audit: al, Log: log})
+	srv, err := server.New(server.Config{
+		HostKeys:           keys,
+		Auth:               authn,
+		Mounts:             mounts,
+		Grants:             c.Grants,
+		Audit:              al,
+		Log:                log,
+		HandshakeTimeout:   time.Duration(c.Server.HandshakeTimeout),
+		MaxSessionsPerConn: c.Limits.MaxSessionsPerConn,
+		MaxOpenHandles:     c.Limits.MaxOpenHandles,
+		MaxAuthTries:       c.Limits.MaxAuthTries,
+	})
 	if err != nil {
 		return err
 	}
@@ -116,37 +364,60 @@ func runServe(ctx context.Context, o serveOptions, stderr, stdout io.Writer) err
 	defer stop()
 	signal.Ignore(syscall.SIGHUP) // reload comes in v0.4; until then HUP must not kill the server
 
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", o.listen)
-	if err != nil {
-		return err
+	var (
+		lc        net.ListenConfig
+		listeners []net.Listener
+	)
+	for _, addr := range c.Server.Listen {
+		ln, err := lc.Listen(ctx, "tcp", addr)
+		if err != nil {
+			for _, l := range listeners {
+				_ = l.Close()
+			}
+			return err
+		}
+		listeners = append(listeners, ln)
 	}
-	printBanner(stderr, ln.Addr(), keys, keyInfo, authn, keysFile, o.user, mounts)
-	al.Event("server.start", slog.String("version", version.Get().Version), slog.String("listen", ln.Addr().String()))
+	printBanner(stderr, bannerInfo{c: c, listeners: listeners, keys: keys, keyInfo: keyInfo, auth: authn, mounts: mounts})
+	addrs := make([]string, len(listeners))
+	for i, ln := range listeners {
+		addrs[i] = ln.Addr().String()
+	}
+	al.Event("server.start", slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ",")))
 
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ctx, ln) }()
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	served := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		go func() { served <- srv.Serve(serveCtx, ln) }()
+	}
+	var serveErr error
+	pending := len(listeners)
 	select {
-	case err := <-served:
-		return err
+	case serveErr = <-served:
+		pending--
 	case <-ctx.Done():
 	}
+	cancel()
 	stop() // a second signal terminates immediately
-	log.InfoContext(ctx, "shutting down", "timeout", shutdownTimeout)
-	<-served
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-	defer cancel()
+	timeout := time.Duration(c.Server.ShutdownTimeout)
+	log.InfoContext(ctx, "shutting down", "timeout", timeout)
+	for range pending {
+		<-served
+	}
+	sctx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancelShutdown()
 	if err := srv.Shutdown(sctx); err != nil {
 		log.WarnContext(ctx, "closed connections that did not finish in time")
 	}
 	al.Event("server.stop")
-	return nil
+	return serveErr
 }
 
 func newLogger(w io.Writer, level, format string) (*slog.Logger, error) {
 	var lv slog.Level
 	if err := lv.UnmarshalText([]byte(level)); err != nil {
-		return nil, fmt.Errorf("--log-level: %w", err)
+		return nil, fmt.Errorf("log-level: %w", err)
 	}
 	opts := &slog.HandlerOptions{Level: lv}
 	switch format {
@@ -155,16 +426,13 @@ func newLogger(w io.Writer, level, format string) (*slog.Logger, error) {
 	case "json":
 		return slog.New(slog.NewJSONHandler(w, opts)), nil
 	default:
-		return nil, fmt.Errorf("--log-format: unknown format %q (want text or json)", format)
+		return nil, fmt.Errorf("log-format: unknown format %q (want text or json)", format)
 	}
 }
 
 // parseDirs turns --dir values into mounts. "NAME=PATH" names a mount;
 // otherwise the name is the last path component.
-func parseDirs(dirs []string, readOnly bool) ([]vfs.MountSpec, error) {
-	if len(dirs) == 0 {
-		return nil, errors.New("at least one --dir is required, e.g. gosftpd serve --dir ./share")
-	}
+func parseDirs(dirs []string) ([]vfs.MountSpec, error) {
 	specs := make([]vfs.MountSpec, 0, len(dirs))
 	for _, d := range dirs {
 		name, p, ok := strings.Cut(d, "=")
@@ -185,65 +453,38 @@ func parseDirs(dirs []string, readOnly bool) ([]vfs.MountSpec, error) {
 		if name == "" {
 			name = filepath.Base(abs)
 		}
-		specs = append(specs, vfs.MountSpec{Name: name, Path: abs, ReadOnly: readOnly})
+		if filepath.Base(abs) == vfs.UserPlaceholder {
+			return nil, fmt.Errorf("--dir %q: per-user directories ({user}) need a configuration file", d)
+		}
+		specs = append(specs, vfs.MountSpec{Name: name, Path: abs})
 	}
 	return specs, nil
 }
 
-func loadAuthorizedKeys(file, user string, log *slog.Logger) (*auth.Authenticator, string, error) {
-	if file == "" {
-		home, err := os.UserHomeDir()
+// loadHostKeys loads the host keys, generating missing ones as ed25519 when
+// autoGenerate is set. info describes where the keys came from.
+func loadHostKeys(paths []string, autoGenerate bool) (keys []ssh.Signer, info []string, err error) {
+	for _, p := range paths {
+		var (
+			k         ssh.Signer
+			generated bool
+		)
+		if autoGenerate {
+			k, generated, err = hostkey.LoadOrGenerate(p)
+		} else {
+			k, err = hostkey.Load(p)
+		}
 		if err != nil {
-			return nil, "", errors.New("no --authorized-keys given and no home directory")
+			return nil, nil, err
 		}
-		file = filepath.Join(home, ".ssh", "authorized_keys")
-		if _, err := os.Stat(file); errors.Is(err, fs.ErrNotExist) {
-			return nil, "", fmt.Errorf("no --authorized-keys given and %s does not exist", file)
+		keys = append(keys, k)
+		if generated {
+			info = append(info, p+" (generated, 0600)")
+		} else {
+			info = append(info, p)
 		}
 	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return nil, "", err
-	}
-	keys, warnings := auth.ParseAuthorizedKeys(data, file)
-	for _, w := range warnings {
-		log.Warn("skipping authorized_keys line", "detail", w)
-	}
-	if len(keys) == 0 {
-		return nil, "", fmt.Errorf("%s contains no usable keys", file)
-	}
-	return auth.New(user, keys), file, nil
-}
-
-// loadHostKeys loads --host-key files, or loads/generates the default ed25519
-// key in the state directory. info describes where the key came from.
-func loadHostKeys(paths []string, stateDir string) (keys []ssh.Signer, info string, err error) {
-	if len(paths) > 0 {
-		for _, p := range paths {
-			k, err := hostkey.Load(p)
-			if err != nil {
-				return nil, "", err
-			}
-			keys = append(keys, k)
-		}
-		return keys, strings.Join(paths, ", "), nil
-	}
-	if stateDir == "" {
-		cfg, err := os.UserConfigDir()
-		if err != nil {
-			return nil, "", fmt.Errorf("cannot find a state directory, use --state-dir: %w", err)
-		}
-		stateDir = filepath.Join(cfg, "gosftpd")
-	}
-	path := filepath.Join(stateDir, hostkey.DefaultFile)
-	k, generated, err := hostkey.LoadOrGenerate(path)
-	if err != nil {
-		return nil, "", err
-	}
-	if generated {
-		return []ssh.Signer{k}, path + " (generated, 0600)", nil
-	}
-	return []ssh.Signer{k}, path, nil
+	return keys, info, nil
 }
 
 func openAudit(dest string, stdout io.Writer) (io.Writer, func(), error) {
@@ -254,35 +495,56 @@ func openAudit(dest string, stdout io.Writer) (io.Writer, func(), error) {
 	// hole of zeros.
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return nil, nil, fmt.Errorf("--audit-output: %w", err)
+		return nil, nil, fmt.Errorf("audit output: %w", err)
 	}
 	return f, func() { _ = f.Close() }, nil
 }
 
-func printBanner(w io.Writer, addr net.Addr, keys []ssh.Signer, keyInfo string, a *auth.Authenticator, keysFile, user string, mounts *vfs.Table) {
-	host, port := connectHost(addr)
+type bannerInfo struct {
+	c         *config.Config
+	listeners []net.Listener
+	keys      []ssh.Signer
+	keyInfo   []string
+	auth      *auth.Authenticator
+	mounts    *vfs.Table
+}
+
+func printBanner(w io.Writer, b bannerInfo) {
+	host, port := connectHost(b.listeners[0].Addr())
 	fmt.Fprintln(w, version.Get())
-	fmt.Fprintf(w, "host key: %s\n", keyInfo)
-	for _, k := range keys {
+	if b.c.File != "" {
+		fmt.Fprintf(w, "config:  %s\n", b.c.File)
+	}
+	for i, k := range b.keys {
+		fmt.Fprintf(w, "host key: %s\n", b.keyInfo[i])
 		fmt.Fprintf(w, "  %s %s\n", strings.ToUpper(strings.TrimPrefix(k.PublicKey().Type(), "ssh-")), hostkey.Fingerprint(k.PublicKey()))
 		fmt.Fprintf(w, "  known_hosts: %s\n", hostkey.KnownHostsLine(host, port, k.PublicKey()))
 	}
-	fmt.Fprintf(w, "auth:    publickey, %d keys from %s\n", a.Len(), keysFile)
-	for _, m := range mounts.Mounts() {
+	user := "<user>"
+	if z := b.c.AnyUser; z != nil {
+		fmt.Fprintf(w, "auth:    publickey, %d keys from %s\n", b.auth.Len(), z.AuthorizedKeysFile)
+		if z.Name != "" {
+			user = z.Name
+		}
+	} else {
+		fmt.Fprintf(w, "auth:    publickey, %d users, %d keys\n", len(b.c.Users), b.auth.Len())
+	}
+	for _, m := range b.mounts.Mounts() {
 		mode := "rw"
 		if m.ReadOnly() {
 			mode = "ro"
 		}
 		vpath := "/" + m.Name()
-		if mounts.Flattened() {
+		if b.mounts.Flattened() {
 			vpath = "/"
 		}
-		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s)\n", vpath, m.HostPath(), mode, mounts.Policy())
+		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s)\n", vpath, m.HostPath(), mode, m.Options().OnConflict)
 	}
-	fmt.Fprintf(w, "listen:  %s\n", addr)
-	if user == "" {
-		user = "<user>"
+	addrs := make([]string, len(b.listeners))
+	for i, ln := range b.listeners {
+		addrs[i] = ln.Addr().String()
 	}
+	fmt.Fprintf(w, "listen:  %s\n", strings.Join(addrs, ", "))
 	fmt.Fprintf(w, "connect: sftp -P %d %s@%s\n", port, user, host)
 }
 

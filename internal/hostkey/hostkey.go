@@ -4,8 +4,12 @@
 package hostkey
 
 import (
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -49,15 +53,41 @@ func Load(path string) (ssh.Signer, error) {
 	return restrictRSA(signer)
 }
 
-// Generate creates a new ed25519 host key at path with mode 0600, plus a
-// "<path>.pub" public key, and returns the signer. It never overwrites an
-// existing key file.
-func Generate(path string) (ssh.Signer, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+// Key types for GenerateType.
+const (
+	TypeED25519 = "ed25519"
+	TypeECDSA   = "ecdsa" // P-256
+	TypeRSA     = "rsa"   // 3072 bits
+)
+
+// rsaBits is the size of generated RSA host keys.
+const rsaBits = 3072
+
+// Generate creates a new ed25519 host key at path; see GenerateType.
+func Generate(path string) (ssh.Signer, error) { return GenerateType(path, TypeED25519) }
+
+// GenerateType creates a new host key of type typ at path with mode 0600,
+// plus a "<path>.pub" public key, and returns the signer. It never
+// overwrites an existing key file.
+func GenerateType(path, typ string) (ssh.Signer, error) {
+	var (
+		priv crypto.Signer
+		err  error
+	)
+	switch typ {
+	case TypeED25519:
+		_, priv, err = ed25519.GenerateKey(rand.Reader)
+	case TypeECDSA:
+		priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case TypeRSA:
+		priv, err = rsa.GenerateKey(rand.Reader, rsaBits)
+	default:
+		return nil, fmt.Errorf("unknown key type %q (want ed25519, ecdsa or rsa)", typ)
+	}
+	if err != nil {
 		return nil, err
 	}
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	block, err := ssh.MarshalPrivateKey(priv, "gosftpd host key")
@@ -86,7 +116,7 @@ func Generate(path string) (ssh.Signer, error) {
 	if err := os.WriteFile(path+".pub", pub, 0o644); err != nil { //nolint:gosec // G306: public keys are meant to be world-readable
 		return nil, err
 	}
-	return signer, nil
+	return restrictRSA(signer)
 }
 
 // LoadOrGenerate loads the key at path, generating it first if it does not

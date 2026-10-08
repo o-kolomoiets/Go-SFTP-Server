@@ -127,3 +127,33 @@ func TestKnownHostsLine(t *testing.T) {
 		t.Errorf("KnownHostsLine() on port 22 = %q", line)
 	}
 }
+
+func TestGenerateTypes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for typ, want := range map[string]string{
+		TypeED25519: ssh.KeyAlgoED25519,
+		TypeECDSA:   ssh.KeyAlgoECDSA256,
+		TypeRSA:     ssh.KeyAlgoRSA,
+	} {
+		path := filepath.Join(dir, typ)
+		s, err := GenerateType(path, typ)
+		if err != nil {
+			t.Fatalf("%s: %v", typ, err)
+		}
+		if got := s.PublicKey().Type(); got != want {
+			t.Errorf("%s: type %s, want %s", typ, got, want)
+		}
+		loaded, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: Load: %v", typ, err)
+		}
+		if Fingerprint(loaded.PublicKey()) != Fingerprint(s.PublicKey()) {
+			t.Errorf("%s: loaded key differs", typ)
+		}
+	}
+	if _, err := GenerateType(filepath.Join(dir, "dsa"), "dsa"); err == nil {
+		t.Error("dsa accepted")
+	}
+}

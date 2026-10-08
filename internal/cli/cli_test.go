@@ -90,7 +90,6 @@ func TestServeUsageErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
-		{"serve"},
 		{"serve", "--dir", dir, "--on-conflict", "version"},
 		{"serve", "--dir", dir, "--log-level", "loud"},
 		{"serve", "--dir", dir, "--log-format", "xml"},
@@ -113,11 +112,11 @@ func TestParseDirs(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	specs, err := parseDirs([]string{dir, "docs=" + dir}, true)
+	specs, err := parseDirs([]string{dir, "docs=" + dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if specs[0].Name != filepath.Base(dir) || specs[1].Name != "docs" || !specs[1].ReadOnly {
+	if specs[0].Name != filepath.Base(dir) || specs[1].Name != "docs" {
 		t.Errorf("specs = %+v", specs)
 	}
 }

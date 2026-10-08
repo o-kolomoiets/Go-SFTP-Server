@@ -8,10 +8,10 @@
 
 | Milestone | Версия | Статус | Готово |
 |---|---|---|---|
-| M0 Фундамент | — | 🔄 | 17 / 21 |
-| M1 Вертикальный срез | v0.1.0-alpha | 🔄 | 17 / 19 |
-| M2 MVP | v0.2.0 | ⬜ | 0 / 9 |
-| M3 Hardening | v0.3.0 | ⬜ | 0 / 11 |
+| M0 Фундамент | — | 🔄 | 18 / 21 |
+| M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
+| M2 MVP | v0.2.0 | 🔄 | 9 / 18 |
+| M3 Hardening | v0.3.0 | ⬜ | 0 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
@@ -39,7 +39,7 @@
 | M0-16 | `CODE_OF_CONDUCT.md` (Contributor Covenant 3.0) | ⬜ 👤 | Нужен контакт для жалоб (email): владелец сообщает, текст добавлю |
 | M0-17 | Переименовать репозиторий в `go-sftp-server` | ⬜ 👤 | Settings → General → Repository name. Не обязательно: GitHub не различает регистр в URL |
 | M0-18 | Включить private vulnerability reporting, secret scanning + push protection, CodeQL default setup | ✅ | PVR (проверено через API), Secret Protection, push protection, Dependabot alerts и security updates, CodeQL (проверка `Analyze (go)` в PR #3) |
-| M0-19 | Ruleset на `main`: PR обязателен (approvals: 0), required check `ci-ok`, code scanning, linear history, без force-push | 🔄 👤 | Ruleset создан, но по API на 2026-10-07 `main` не защищён: проверить, что Enforcement status = Active |
+| M0-19 | Ruleset на `main`: PR обязателен (approvals: 0), required check `ci-ok`, без удаления и force-push | ✅ | Проверено через API 2026-10-08: `deletion`, `non_fast_forward`, `pull_request`, `required_status_checks: ci-ok`. Linear history и code scanning не включены: merge-коммиты разрешены, CodeQL и так идёт на каждом PR |
 | M0-20 | DoD: `go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest` работает | ✅ | Проверено 2026-10-07 на чистом GOBIN |
 | M0-21 | DoD: страница Community Standards закрыта полностью | ⬜ | После M0-16 |
 
@@ -56,7 +56,7 @@
 | M1-05 | Каналы: только `session` (≤ 4 на соединение), subsystem через `ssh.Unmarshal`, остальное `Reply(false)` | ✅ | direct-tcpip, exec, shell, другие subsystem отклоняются (тесты) |
 | M1-06 | `RequestServer` + `exit-status` (0 при `nil`/`io.EOF`, иначе 1) | ✅ | T1 закрыт: `scp` завершается с 0 (interop) |
 | M1-07 | Graceful shutdown (SIGINT/SIGTERM, `shutdown_timeout`), SIGHUP игнорируется | ✅ | Проверено в interop: SIGHUP не останавливает, SIGTERM → exit 0 |
-| M1-08 | `ServeConn` для тестов, `testutil.AsyncConn` | 🔄 | `ServeConn` есть; `testutil.AsyncConn` перенесён в M3 (нужен для synctest-тестов таймаутов) |
+| M1-08 | `ServeConn` для тестов | ✅ | `testutil.AsyncConn` перенесён в M3-12 (нужен для synctest-тестов таймаутов) |
 | M1-09 | `internal/auth`: `--authorized-keys`, allowlist опций, чистый lookup, личность только из `Permissions`, `--user` | ✅ | `internal/auth`; `from=` → `source-address`, `expiry-time=`, `cert-authority`/`verify-required` отклоняются |
 | M1-10 | `internal/vfs`: mount table из `--dir [NAME=]PATH`, `os.OpenRoot`, синтетический корень, `resolve()` | ✅ | `internal/vfs` |
 | M1-11 | Операции VFS: open (`O_NONBLOCK`, только регулярные), write (без `O_APPEND`), stat/lstat, листинг, mkdir, remove, rename no-clobber, symlink/link → unsupported, setstat | ✅ | Rename без перезаписи: `renameat2(RENAME_NOREPLACE)` на Linux, иначе `Link`+`Remove` |
@@ -67,21 +67,33 @@
 | M1-16 | Интеграционные тесты: ST-1…5, 7, 9…11, 50 параллельных загрузок, goleak | ✅ | ST-1…5, 7, 9…11 + fail-closed аудит; goleak, `-race`; покрытие `internal/vfs` 81% |
 | M1-17 | Interop: `test/interop/run.sh` + `basic.batch` (`sftp -b`, `scp`), job в CI, добавить в `ci-ok` | ✅ | `test/interop/run.sh` (26 проверок, OpenSSH 9.6p1), job `interop` в CI |
 | M1-18 | `docs/adr/0003-sftp-library.md` | ✅ |  |
-| M1-19 | Проверка DoD M1, тег `v0.1.0-alpha` | ⬜ 👤 | DoD выполнен, кроме проверки на OpenSSH 10.x (перенесено в M2-06). После мержа владелец ставит тег `v0.1.0-alpha` |
+| M1-19 | Проверка DoD M1, тег `v0.1.0-alpha` | ✅ | [Релиз v0.1.0-alpha](https://github.com/o-kolomoiets/Go-SFTP-Server/releases/tag/v0.1.0-alpha) (pre-release, 533795c); `go list -m …@v0.1.0-alpha` находит его через proxy.golang.org. Проверка на OpenSSH 10.x перенесена в M2-15 |
 
 ## M2: MVP (v0.2.0)
 
-| ID | Блок | Статус |
-|---|---|---|
-| M2-01 | Конфиг TOML: типы, загрузка, приоритет источников, `Validate()`, `CheckFS()`, примеры через go:embed | ⬜ |
-| M2-02 | CLI: `init`, `config validate\|show\|example`, `user add\|list`, `hostkey generate`, `completion` | ⬜ |
-| M2-03 | Пользователи и права: пресеты, `from=`, `expiry-time=`, `{user}`-home безопасно (ST-12) | ⬜ |
-| M2-04 | Политика конфликтов полностью: append-only resume, `stat_redirect` | ⬜ |
-| M2-05 | Протокол: statvfs, виртуальные владельцы, `RealPath`, политика symlink | ⬜ |
-| M2-06 | Interop: OpenSSH 10.6, paramiko, rclone, lftp; golden-тест схемы аудита | ⬜ |
-| M2-07 | Документация: README, quickstart, configuration, audit-log, security, interop, release-checklist | ⬜ |
-| M2-08 | Минимальный GoReleaser, `release.yml`, job `goreleaser-check` | ⬜ |
-| M2-09 | DoD M2, релиз `v0.2.0` | ⬜ |
+| ID | Задача | Статус | Где / заметка |
+|---|---|---|---|
+| **M2a** | **Конфиг, пользователи, права, CLI** | | |
+| M2-01 | `internal/config`: типы, `Default()`, загрузка TOML (неизвестный ключ — ошибка с позицией), `FileMode`, `config_version`, `include` | ✅ | `internal/config`; `ByteSize` — в M3 вместе с `max_file_size`. `include` принимает только `[users.NAME]` |
+| M2-02 | Источники: порядок поиска файла, приоритет флаги > env > файл > умолчания; zero-config `--dir` без поиска файла | ✅ | `config.Find`, `cli.buildConfig`; `--authorized-keys`, `--user`, `--state-dir` — только с `--dir` |
+| M2-03 | `Validate()` (все ошибки сразу, с путём ключа) и `CheckFS()` (пути mount'ов, права файлов по §6.5) | ✅ | Права файлов как StrictModes в sshd: не запускается, если конфиг, ключи или `authorized_keys` доступны группе на запись |
+| M2-04 | Опции mount'а: `create`, `read_only`, `on_conflict`, `rename_template`, `max_rename_attempts`, `compound_extensions`, `umask`, `require_mountpoint`, `setstat_mode`, `flatten` | ✅ | `symlinks`, `resume`, `stat_redirect` — в M2b |
+| M2-05 | Пользователи `[users.NAME]`: `authorized_keys`, `authorized_keys_file`, `allow_from`, `expires`, `disabled`, `access`; неизвестный пользователь идёт тем же путём, что неверный ключ | ✅ | `auth.NewUsers` |
+| M2-06 | Права: флаги и пресеты §6.3, temp-загрузки через `write`, `size` на writer этой сессии, `read_only` | ✅ | `vfs/perm.go`; interop: пользователи `read`, `upload`, `full` с OpenSSH |
+| M2-07 | `{user}`-home: безопасное создание и открытие (ST-12) | ✅ | `Mount.openHome`: `Lstat` + `OpenRoot` + `os.SameFile`; symlink `alice → bob` или наружу → mount недоступен, `fs.denied reason=home_not_dir` |
+| M2-08 | CLI: `init`, `config validate\|show\|example`, `user add\|list`, `hostkey generate`, `completion`; golden-тесты | ✅ | golden-тест `user add`; `completion` — встроенная команда cobra |
+| M2-09 | Примеры конфигов через go:embed; тест `Validate()` и e2e минимального примера | ✅ | `TestExamples`, `TestExampleFullCoversEveryKey`, `TestServeMinimalExample` |
+| **M2b** | **Протокол** | | |
+| M2-10 | Докачка: append-only guard, `resume = "append-only"\|"off"` | ⬜ | |
+| M2-11 | `stat_redirect` (в пределах сессии, TTL 60 с, цель posix-rename) | ⬜ | |
+| M2-12 | `statvfs@openssh.com` (Linux, darwin, freebsd) | ⬜ | |
+| M2-13 | Виртуальные владельцы в листинге, `Readlink` → unsupported, политика `symlinks = "inside-only"\|"deny"` | ⬜ | |
+| M2-14 | Аудит: фильтр `audit.events`, `audit.on_error`, golden-схема `testdata/audit.schema.json` | ⬜ | |
+| **M2c** | **Interop, документация, релиз** | | |
+| M2-15 | Interop: OpenSSH 10.x, paramiko, rclone, lftp | ⬜ | |
+| M2-16 | Документация: README, quickstart, configuration (тест на каждый ключ), audit-log, security, interop, release-checklist | ⬜ | |
+| M2-17 | Минимальный GoReleaser, `release.yml`, job `goreleaser-check` | ⬜ | |
+| M2-18 | DoD M2, релиз `v0.2.0` | ⬜ | |
 
 ## M3: Hardening (v0.3.0)
 
@@ -98,6 +110,7 @@
 | M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ |
 | M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | ⬜ |
 | M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ⬜ |
+| M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ⬜ |
 
 ## M3b: Windows (можно после v1.0)
 
@@ -152,4 +165,6 @@
 |---|---|---|
 | 2026-10-07 | Roadmap | [o-kolomoiets/Go-SFTP-Server#1](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/1) |
 | 2026-10-07 | M0: расчистка, скелет, CI, гигиена, документы, ADR; CI зелёный (12/12) | [o-kolomoiets/Go-SFTP-Server#2](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/2) |
-| 2026-10-07 | M1: `gosftpd serve` — SSH/SFTP, ключи, изоляция `os.Root`, политика конфликтов, аудит, interop с OpenSSH | ветка `claude/accessible-repositories-cy9usl`, ждёт PR |
+| 2026-10-07 | M1: `gosftpd serve` — SSH/SFTP, ключи, изоляция `os.Root`, политика конфликтов, аудит, interop с OpenSSH | [o-kolomoiets/Go-SFTP-Server#3](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/3) |
+| 2026-10-08 | Ruleset на `main` и релиз `v0.1.0-alpha` (владелец); M1 закрыт, M2 разбит на задачи | этот файл |
+| 2026-10-08 | M2a: конфиг TOML, пользователи и права, `{user}`-home, команды `init`, `config`, `user`, `hostkey generate`; ревью (22 находки, исправлены) | [o-kolomoiets/Go-SFTP-Server#4](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/4) |

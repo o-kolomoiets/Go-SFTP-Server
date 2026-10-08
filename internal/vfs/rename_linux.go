@@ -38,10 +38,3 @@ func renameNoReplace(root *os.Root, src, dst string) error {
 		return &os.LinkError{Op: "renameat2", Old: src, New: dst, Err: err}
 	}
 }
-
-func parentOf(rel string) string {
-	if d := filepath.Dir(rel); d != "" {
-		return d
-	}
-	return "."
-}

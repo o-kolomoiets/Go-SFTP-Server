@@ -115,8 +115,116 @@ scp -q -P "$PORT" "${OPTS[@]}" "$WORK/local/short.txt" alice@127.0.0.1:a.txt && 
 cmp -s "$WORK/local/short.txt" "$WORK/overwrite/share/a.txt" &&
 	pass "scp overwrite gives an identical file" || fail "scp overwrite left stale bytes: $(od -c "$WORK/overwrite/share/a.txt" | head -3)"
 
+# --- configuration file: users with read, upload and full access ----------
+C="$WORK/cfg"
+mkdir -p "$C/public" "$C/inbox" "$C/state"
+printf 'public file\n' >"$C/public/readme.txt"
+printf 'existing report\n' >"$C/inbox/report.txt"
+for u in reader partner admin; do ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$WORK/id_$u"; done
+PORT=$((20000 + RANDOM % 20000))
+cat >"$C/gosftpd.toml" <<TOML
+config_version = 1
+
+[server]
+listen = ["127.0.0.1:$PORT"]
+host_keys = ["$C/state/host_key"]
+host_key_auto_generate = true
+
+[mounts.public]
+path = "$C/public"
+read_only = true
+
+[mounts.inbox]
+path = "$C/inbox"
+
+[mounts.home]
+path = "$C/home/{user}"
+create = true
+
+[users.reader]
+authorized_keys = ["$(cat "$WORK/id_reader.pub")"]
+access = { public = "read" }
+
+[users.partner]
+authorized_keys_file = "$WORK/id_partner.pub"
+access = { inbox = "upload" }
+
+[users.admin]
+authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
+access = { public = "read", inbox = "full", home = "full" }
+
+[audit]
+output = "$C/audit.jsonl"
+TOML
+chmod 600 "$C/gosftpd.toml"
+"$WORK/gosftpd" config validate --check-fs --config "$C/gosftpd.toml" >/dev/null && pass "config validate --check-fs" || fail "config validate"
+sed 's/^read_only = true/read_onyl = true/' "$C/gosftpd.toml" >"$C/typo.toml"; chmod 600 "$C/typo.toml"
+set +e; "$WORK/gosftpd" config validate --config "$C/typo.toml" 2>"$C/typo.err" >/dev/null; code=$?; set -e
+[ "$code" = 2 ] && grep -q 'unknown key mounts.public.read_onyl' "$C/typo.err" &&
+	pass "typo in a key: exit 2 naming the key" || fail "typo: exit $code: $(cat "$C/typo.err")"
+
+"$WORK/gosftpd" serve --config "$C/gosftpd.toml" 2>"$C/server.log" &
+PIDS+=($!)
+for _ in $(seq 100); do
+	if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then break; fi
+	sleep 0.1
+done
+"$WORK/gosftpd" hostkey show --host-key "$C/state/host_key" --known-hosts "127.0.0.1:$PORT" | tail -n 1 >"$C/known_hosts"
+as() { # as USER: sftp/scp options for USER
+	echo -o "UserKnownHostsFile=$C/known_hosts" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes -i "$WORK/id_$1"
+}
+
+# reader: the only mount is "/", downloads work, uploads do not.
+cat >"$C/reader.batch" <<BATCH
+get readme.txt $C/readme.got
+-put $WORK/local/short.txt new.txt
+BATCH
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as reader) -b "$C/reader.batch" reader@127.0.0.1 >"$C/reader.out" 2>&1 && pass "reader: sftp batch" || { fail "reader batch"; cat "$C/reader.out" >&2; }
+cmp -s "$C/public/readme.txt" "$C/readme.got" && pass "reader: download" || fail "reader: download"
+[ ! -e "$C/public/new.txt" ] && grep -q 'Permission denied' "$C/reader.out" && pass "reader: upload denied" || fail "reader: upload not denied"
+
+# partner (upload): new files and renamed copies, no download, no delete.
+cat >"$C/partner.batch" <<BATCH
+put $WORK/local/short.txt new.txt
+put $WORK/local/short.txt report.txt
+-get report.txt $C/report.got
+-rm report.txt
+BATCH
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as partner) -b "$C/partner.batch" partner@127.0.0.1 >"$C/partner.out" 2>&1 && pass "partner: sftp batch" || { fail "partner batch"; cat "$C/partner.out" >&2; }
+cmp -s "$WORK/local/short.txt" "$C/inbox/new.txt" && pass "partner: upload" || fail "partner: upload"
+grep -q 'existing report' "$C/inbox/report.txt" && cmp -s "$WORK/local/short.txt" "$C/inbox/report (1).txt" &&
+	pass "partner: conflict kept the original" || fail "partner: conflict"
+[ ! -e "$C/report.got" ] && [ -e "$C/inbox/report.txt" ] && pass "partner: download and delete denied" || fail "partner: read or delete allowed"
+# DoD M2: scp into an upload mount works without error messages (FSETSTAT size).
+# shellcheck disable=SC2046
+if scp -q -P "$PORT" $(as partner) "$WORK/local/upload.bin" partner@127.0.0.1:report.txt 2>"$C/scp.err" && [ ! -s "$C/scp.err" ]; then
+	pass "partner: scp exits 0 without messages"
+else
+	fail "partner: scp: $(cat "$C/scp.err")"
+fi
+cmp -s "$WORK/local/upload.bin" "$C/inbox/report (2).txt" && pass "partner: scp went to a copy" || fail "partner: scp copy"
+
+# admin: several mounts under /, a personal home created on login.
+cat >"$C/admin.batch" <<BATCH
+ls /
+put $WORK/local/short.txt /home/notes.txt
+rm /inbox/new.txt
+BATCH
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as admin) -b "$C/admin.batch" admin@127.0.0.1 >"$C/admin.out" 2>&1 && pass "admin: sftp batch" || { fail "admin batch"; cat "$C/admin.out" >&2; }
+grep -q 'home' "$C/admin.out" && grep -q 'inbox' "$C/admin.out" && grep -q 'public' "$C/admin.out" && pass "admin: sees three mounts" || fail "admin: mounts"
+cmp -s "$WORK/local/short.txt" "$C/home/admin/notes.txt" && pass "admin: home created" || fail "admin: home"
+[ ! -e "$C/inbox/new.txt" ] && pass "admin: delete" || fail "admin: delete"
+
+# An unknown user is refused.
+# shellcheck disable=SC2046
+if sftp -P "$PORT" $(as admin) -b "$C/admin.batch" mallory@127.0.0.1 >/dev/null 2>&1; then fail "unknown user accepted"; else pass "unknown user refused"; fi
+
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"
+	echo "--- server log (config)"; cat "$C/server.log"
 	exit 1
 fi
 echo "all interop checks passed ($(ssh -V 2>&1))"

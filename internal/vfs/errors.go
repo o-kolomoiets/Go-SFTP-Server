@@ -23,6 +23,12 @@ var (
 	ErrNotDir            = errors.New("not a directory")
 	ErrNotEmpty          = errors.New("directory not empty")
 	ErrInvalidPath       = errors.New("invalid path")
+
+	// ErrHomeNotDir: a user's home is not a real directory (for example a
+	// symlink planted in its place); the home mount is unavailable.
+	ErrHomeNotDir = errors.New("home is not a directory")
+	// ErrHomeMissing: a user's home does not exist and create is off.
+	ErrHomeMissing = errors.New("home does not exist")
 )
 
 // osError classifies an error from os.Root into one of the VFS errors.

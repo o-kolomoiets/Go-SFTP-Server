@@ -1,0 +1,18 @@
+# gosftpd minimal config (`gosftpd config example`). Reference: `gosftpd config example --full`.
+config_version = 1
+
+[server]
+listen = [":2022"]
+host_keys = ["/var/lib/gosftpd/ssh_host_ed25519_key"]  # Docker volume "state"
+host_key_auto_generate = true
+
+[mounts.data]
+path = "/srv/sftp"                                     # Docker volume "data"
+create = true
+
+[users.alice]
+authorized_keys = ["<paste your public key, e.g. ~/.ssh/id_ed25519.pub>"]
+access = { data = "full" }
+
+[audit]
+output = "stdout"

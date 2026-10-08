@@ -3,9 +3,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,10 +20,43 @@ import (
 func newHostkeyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "hostkey",
-		Short: "Inspect host keys",
+		Short: "Create and inspect host keys",
 		Args:  noArgs,
+		RunE:  showHelp,
 	}
-	cmd.AddCommand(newHostkeyShowCmd())
+	cmd.AddCommand(newHostkeyShowCmd(), newHostkeyGenerateCmd())
+	return cmd
+}
+
+func newHostkeyGenerateCmd() *cobra.Command {
+	var typ, out string
+	cmd := &cobra.Command{
+		Use:   "generate",
+		Short: "Create a new host key (never overwrites an existing one)",
+		Example: `  gosftpd hostkey generate
+  gosftpd hostkey generate --type ecdsa --out /var/lib/gosftpd/ssh_host_ecdsa_key`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if out == "" {
+				dir, err := defaultStateDir()
+				if err != nil {
+					return configError{err}
+				}
+				out = filepath.Join(dir, "ssh_host_"+typ+"_key")
+			}
+			k, err := hostkey.GenerateType(out, typ)
+			if err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					return configError{fmt.Errorf("%s already exists; remove it first to replace the key", out)}
+				}
+				return configError{err}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", hostkey.Fingerprint(k.PublicKey()), out)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&typ, "type", hostkey.TypeED25519, "key type: ed25519, ecdsa (P-256) or rsa (3072 bits)")
+	cmd.Flags().StringVar(&out, "out", "", "private key file to create (default <user config dir>/gosftpd/ssh_host_TYPE_key)")
 	return cmd
 }
 
@@ -37,11 +71,10 @@ func newHostkeyShowCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if path == "" {
 				if stateDir == "" {
-					cfg, err := os.UserConfigDir()
-					if err != nil {
+					var err error
+					if stateDir, err = defaultStateDir(); err != nil {
 						return configError{err}
 					}
-					stateDir = filepath.Join(cfg, "gosftpd")
 				}
 				path = filepath.Join(stateDir, hostkey.DefaultFile)
 			}

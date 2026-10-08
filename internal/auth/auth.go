@@ -9,6 +9,11 @@ package auth
 
 import (
 	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"regexp"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -22,42 +27,118 @@ const (
 	ExtFingerprint = "pubkey-fp"
 )
 
-// maxUserLen bounds user names accepted from clients.
+// maxUserLen bounds user names accepted from clients in zero-config mode.
 const maxUserLen = 64
 
 var errDenied = errors.New("authentication failed")
 
-// Authenticator checks public keys against an authorized_keys set.
-type Authenticator struct {
-	user string // required SSH user name; empty accepts any valid name
-	keys map[string]Key
-	now  func() time.Time
+var userNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// ValidUserName reports whether name is a valid configured user name.
+func ValidUserName(name string) bool { return userNameRE.MatchString(name) }
+
+// User is an account in the configuration.
+type User struct {
+	Name      string
+	Keys      []Key
+	AllowFrom []netip.Prefix // empty: any address
+	Expires   time.Time      // zero: never
+	Disabled  bool
 }
 
-// New returns an Authenticator for keys. If user is not empty, only that SSH
-// user name is accepted.
-func New(user string, keys []Key) *Authenticator {
+type account struct {
+	keys      map[string]Key
+	allowFrom []netip.Prefix
+	expires   time.Time
+	disabled  bool
+}
+
+func newAccount(keys []Key) *account {
 	m := make(map[string]Key, len(keys))
 	for _, k := range keys {
 		m[string(k.Key.Marshal())] = k
 	}
-	return &Authenticator{user: user, keys: m, now: time.Now}
+	return &account{keys: m}
+}
+
+// noKeys stands in for an unknown user, so that it takes the same path as a
+// known user with a wrong key.
+var noKeys = newAccount(nil)
+
+// Authenticator checks public keys of configured users, or, in zero-config
+// mode, of any user name against one authorized_keys set.
+type Authenticator struct {
+	users map[string]*account
+	any   *account // zero-config: accepts every valid user name
+	now   func() time.Time
+}
+
+// New returns a zero-config Authenticator for keys. If user is not empty,
+// only that SSH user name is accepted; otherwise any valid name is.
+func New(user string, keys []Key) *Authenticator {
+	a := &Authenticator{users: map[string]*account{}, now: time.Now}
+	if user != "" {
+		a.users[user] = newAccount(keys)
+	} else {
+		a.any = newAccount(keys)
+	}
+	return a
+}
+
+// NewUsers returns an Authenticator for configured users.
+func NewUsers(users []User) *Authenticator {
+	a := &Authenticator{users: make(map[string]*account, len(users)), now: time.Now}
+	for _, u := range users {
+		acc := newAccount(u.Keys)
+		acc.allowFrom = u.AllowFrom
+		acc.expires = u.Expires
+		acc.disabled = u.Disabled
+		a.users[u.Name] = acc
+	}
+	return a
 }
 
 // Len returns the number of accepted keys.
-func (a *Authenticator) Len() int { return len(a.keys) }
+func (a *Authenticator) Len() int {
+	n := 0
+	if a.any != nil {
+		n += len(a.any.keys)
+	}
+	for _, acc := range a.users {
+		n += len(acc.keys)
+	}
+	return n
+}
 
-// PublicKey is an ssh.ServerConfig.PublicKeyCallback.
+func (a *Authenticator) lookup(name string) *account {
+	if acc := a.users[name]; acc != nil {
+		return acc
+	}
+	if a.any != nil && validUser(name) {
+		return a.any
+	}
+	return nil
+}
+
+// PublicKey is an ssh.ServerConfig.PublicKeyCallback. It is a pure lookup:
+// unknown users, wrong keys, disabled or expired accounts and disallowed
+// source addresses all fail the same way.
 func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	name := conn.User()
-	if !validUser(name) || (a.user != "" && name != a.user) {
-		return nil, errDenied
+	acc := a.lookup(name)
+	keys := noKeys.keys
+	if acc != nil {
+		keys = acc.keys
 	}
-	k, ok := a.keys[string(key.Marshal())]
-	if !ok {
+	k, ok := keys[string(key.Marshal())]
+	switch {
+	case acc == nil, !ok, acc.disabled:
 		return nil, errDenied
-	}
-	if !k.expires.IsZero() && a.now().After(k.expires) {
+	case !acc.expires.IsZero() && a.now().After(acc.expires):
+		return nil, errDenied
+	case !k.expires.IsZero() && a.now().After(k.expires):
+		return nil, errDenied
+	case !addrAllowed(acc.allowFrom, conn.RemoteAddr()):
 		return nil, errDenied
 	}
 	perms := &ssh.Permissions{
@@ -85,7 +166,7 @@ func UserFrom(perms *ssh.Permissions) (string, bool) {
 	return u, ok && u != ""
 }
 
-// validUser accepts printable names up to maxUserLen bytes.
+// validUser accepts printable names up to maxUserLen bytes (zero-config).
 func validUser(name string) bool {
 	if name == "" || len(name) > maxUserLen || !utf8.ValidString(name) {
 		return false
@@ -96,4 +177,41 @@ func validUser(name string) bool {
 		}
 	}
 	return true
+}
+
+// ParsePrefix parses an IP address or CIDR block for allow_from.
+func ParsePrefix(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if p, err := netip.ParsePrefix(s); err == nil {
+		if p.Addr().Is4In6() {
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+		}
+		return p.Masked(), nil
+	}
+	ip, err := netip.ParseAddr(s)
+	if err != nil || ip.Zone() != "" {
+		return netip.Prefix{}, fmt.Errorf("%q is not an IP address or CIDR block", s)
+	}
+	ip = ip.Unmap()
+	return netip.PrefixFrom(ip, ip.BitLen()), nil
+}
+
+func addrAllowed(prefixes []netip.Prefix, addr net.Addr) bool {
+	if len(prefixes) == 0 {
+		return true
+	}
+	if addr == nil {
+		return false
+	}
+	ap, err := netip.ParseAddrPort(addr.String())
+	if err != nil {
+		return false
+	}
+	ip := ap.Addr().Unmap().WithZone("")
+	for _, p := range prefixes {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
