@@ -187,16 +187,14 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 		return nil, ErrDenied
 	}
 
-	requested := s.virtual(v, rel)
-	if final, ok := s.redirectFor(requested); ok && isResume(fl) {
+	requested := rel
+	if final, ok := s.redirectFor(v, rel); ok && isResume(fl) {
 		// OpenSSH reput stats the name first and resumes at the size it
-		// got: through the redirect, the size of this session's copy. The
+		// got: through the redirect, the size of the user's copy. The
 		// resume must go to that copy too, never to the original.
-		if fv, frel, err := s.resolve(final); err == nil && fv == v {
-			rel = frel
-		}
+		rel = final
 	} else {
-		s.clearRedirect(requested)
+		s.clearRedirect(v, rel)
 	}
 	h, err := s.openWrite(v, rel, fl)
 	if err != nil {
@@ -205,8 +203,8 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	h.s, h.v = s, v
 	h.virtual = s.virtual(v, h.rel)
 	s.register(h)
-	if h.virtual != requested && v.opts().StatRedirect {
-		s.setRedirect(requested, h.virtual)
+	if h.rel != requested && v.opts().StatRedirect {
+		s.setRedirect(v, requested, h.rel)
 	}
 	return h, nil
 }

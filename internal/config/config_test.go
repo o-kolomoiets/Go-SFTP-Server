@@ -808,3 +808,41 @@ on_error = "fail-open"
 		t.Errorf("default audit options = %+v", d)
 	}
 }
+
+// TestConfigurationDocCoversEveryKey keeps docs/configuration.md complete.
+func TestConfigurationDocCoversEveryKey(t *testing.T) {
+	t.Parallel()
+
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "configuration.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var walk func(reflect.Type)
+	walk = func(typ reflect.Type) {
+		for f := range typ.Fields() {
+			tag, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
+			switch {
+			case tag == "-":
+				continue
+			case f.Anonymous:
+				walk(f.Type)
+				continue
+			}
+			ft := f.Type
+			for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Map {
+				ft = ft.Elem()
+			}
+			table := ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]()
+			switch {
+			case table && !strings.Contains(string(doc), "`["+tag):
+				t.Errorf("docs/configuration.md has no section for [%s]", tag)
+			case !table && !strings.Contains(string(doc), "`"+tag+"`"):
+				t.Errorf("docs/configuration.md does not describe `%s`", tag)
+			}
+			if table {
+				walk(ft)
+			}
+		}
+	}
+	walk(reflect.TypeFor[Config]())
+}

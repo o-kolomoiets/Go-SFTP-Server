@@ -137,8 +137,9 @@ type MountOptions struct {
 	SetstatMode       SetstatMode
 	Umask             fs.FileMode
 	Resume            ResumeMode
-	// StatRedirect makes STAT, LSTAT and SETSTAT of a path this session
-	// uploaded under another name (rename policy) answer for that name.
+	// StatRedirect makes STAT, LSTAT and SETSTAT of a path the user just
+	// uploaded or moved under another name (rename policy) answer for that
+	// name, in all of the user's sessions.
 	StatRedirect bool
 	Symlinks     SymlinkPolicy
 }
@@ -286,6 +287,10 @@ type Table struct {
 	// (ROADMAP §6.2: existing data must not change behind an upload).
 	wmu     sync.Mutex
 	writing []*WriteHandle
+
+	umu   sync.Mutex
+	users map[string]*userState // see users.go
+	now   func() time.Time
 }
 
 // Open validates specs and opens an os.Root for every mount.
@@ -301,6 +306,8 @@ func Open(specs []MountSpec, opts Options) (*Table, error) {
 		byName:  make(map[string]*Mount, len(specs)),
 		flatten: opts.Flatten,
 		started: time.Now(),
+		users:   map[string]*userState{},
+		now:     time.Now,
 	}
 	for _, s := range specs {
 		m, err := openMount(s)

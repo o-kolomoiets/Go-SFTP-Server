@@ -156,7 +156,7 @@ func TestStatRedirect(t *testing.T) {
 	if _, err := upload(t, s, "/a.txt", put, "third"); err != nil { // "a (2).txt"
 		t.Fatal(err)
 	}
-	s.now = func() time.Time { return time.Now().Add(RedirectTTL + time.Second) }
+	tbl.now = func() time.Time { return time.Now().Add(RedirectTTL + time.Second) }
 	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("original")) {
 		t.Errorf("after the TTL: %v, %v; want the original", fi, err)
 	}
@@ -383,20 +383,149 @@ func TestRedirectTableFull(t *testing.T) {
 
 	tbl, _ := permFixture(t, DefaultMountOptions())
 	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: PermAll}})
+	v := s.views[0]
 	base := time.Now()
 	for i := range maxRedirects {
-		s.now = func() time.Time { return base.Add(time.Duration(i) * time.Millisecond) }
-		s.setRedirect(fmt.Sprintf("/f%d", i), fmt.Sprintf("/f%d (1)", i))
+		tbl.now = func() time.Time { return base.Add(time.Duration(i) * time.Millisecond) }
+		s.setRedirect(v, fmt.Sprintf("f%d", i), fmt.Sprintf("f%d (1)", i))
 	}
-	s.now = func() time.Time { return base.Add(time.Second) }
-	s.setRedirect("/a.txt", "/a (1).txt")
+	tbl.now = func() time.Time { return base.Add(time.Second) }
+	s.setRedirect(v, "a.txt", "a (1).txt")
 	if got := s.redirected("/a.txt"); got != "/a (1).txt" {
 		t.Errorf("new redirect dropped: %q", got)
 	}
 	if got := s.redirected("/f0"); got != "/f0" {
 		t.Errorf("oldest redirect kept: %q", got)
 	}
-	if len(s.redirects) != maxRedirects {
-		t.Errorf("%d redirects", len(s.redirects))
+	if n := len(tbl.users["u"].redirects); n != maxRedirects {
+		t.Errorf("%d redirects", n)
+	}
+}
+
+// rclone spreads one transfer over several connections of the same user:
+// upload on one, rename, set the time and check the size on others.
+func TestUserStateAcrossSessions(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions()) // inbox/a.txt = "original"
+	up := []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}}
+	conn1, conn2, conn3 := session(t, tbl, "partner", up), session(t, tbl, "partner", up), session(t, tbl, "partner", up)
+	other := session(t, tbl, "other", up)
+
+	if _, err := upload(t, conn1, "/a.txt.1234.partial", put, "new version"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Rename("/a.txt.1234.partial", "/stolen", true); !errors.Is(err, ErrDenied) {
+		t.Errorf("another user renamed the upload: %v", err)
+	}
+	final, err := conn2.Rename("/a.txt.1234.partial", "/a.txt", true)
+	if err != nil || final != "/a (1).txt" {
+		t.Fatalf("rename on another connection = %q, %v", final, err)
+	}
+	fi, err := conn3.Stat("/a.txt")
+	if err != nil || fi.Size() != int64(len("new version")) {
+		t.Errorf("size check on a third connection = %v, %v; want the moved file", fi, err)
+	}
+	when := time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := conn3.Setstat("/a.txt", Attrs{Atime: when, Mtime: when, HasTimes: true}); err != nil {
+		t.Errorf("set time on a third connection: %v", err)
+	}
+	if got := readFile(t, filepath.Join(base, "inbox", "a.txt")); got != "original" {
+		t.Errorf("original changed: %q", got)
+	}
+	if fi, _ := other.Stat("/a.txt"); fi.Size() != int64(len("original")) {
+		t.Error("another user sees the redirect")
+	}
+
+	// Ownership expires.
+	if _, err := upload(t, conn1, "/b.partial", put, "b"); err != nil {
+		t.Fatal(err)
+	}
+	tbl.now = func() time.Time { return time.Now().Add(OwnTTL + time.Minute) }
+	if _, err := conn2.Rename("/b.partial", "/b", true); !errors.Is(err, ErrDenied) {
+		t.Errorf("rename after the ownership expired: %v", err)
+	}
+}
+
+// Review finding: an open upload whose ownership entry was evicted by many
+// small uploads can still be renamed once it is closed.
+func TestOwnSurvivesEvictionWhileOpen(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	up := []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}}
+	c1, c2 := session(t, tbl, "partner", up), session(t, tbl, "partner", up)
+	big, err := c1.OpenWrite("/big.bin.abcd.partial", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := big.WriteAt([]byte("data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	v := c2.views[0]
+	for i := range maxOwned {
+		fi, err := os.Stat(filepath.Join(v.m.hostPath, "a.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c2.own(v, fmt.Sprintf("f%d", i), fi)
+	}
+	if err := big.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Rename("/big.bin.abcd.partial", "/big.bin", true); err != nil {
+		t.Errorf("rename after eviction: %v", err)
+	}
+}
+
+// Review finding: a rename allowed by the rename permission does not make a
+// file "own" (and so settable) if it was not own before.
+func TestRenameDoesNotGrantOwnership(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	bob := session(t, tbl, "bob", []Grant{{Mount: "inbox", Perm: mustPerm(t, "list,write,rename")}})
+	if _, err := upload(t, bob, "/x", put, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	tbl.now = func() time.Time { return time.Now().Add(OwnTTL + time.Hour) }
+	if _, err := bob.Rename("/x", "/y", true); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := bob.Setstat("/y", Attrs{Atime: when, Mtime: when, HasTimes: true}); !errors.Is(err, ErrDenied) {
+		t.Errorf("setstat after renaming an expired upload: %v", err)
+	}
+}
+
+// Review finding: read paths do not create per-user state, and state that
+// becomes empty is dropped (zero-config accepts any user name).
+func TestUserStateBounded(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	for i := range 100 {
+		s := session(t, tbl, fmt.Sprintf("u%d", i), tbl.FullAccess())
+		if _, err := s.Stat("/inbox/a.txt"); err != nil {
+			t.Fatal(err)
+		}
+		f, err := s.OpenRead("/inbox/a.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+	if n := len(tbl.users); n != 0 {
+		t.Errorf("%d user states after reads only", n)
+	}
+	s := session(t, tbl, "w", tbl.FullAccess())
+	if _, err := upload(t, s, "/inbox/n.txt", put, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove("/inbox/n.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(tbl.users); n != 0 {
+		t.Errorf("%d user states after the only entry was removed", n)
 	}
 }

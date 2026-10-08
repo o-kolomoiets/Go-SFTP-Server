@@ -61,9 +61,12 @@ func TestStatRedirectThroughClient(t *testing.T) {
 	if err != nil || fi.Size() != 3 {
 		t.Errorf("Stat after a renamed upload = %v, %v; want the copy", fi, err)
 	}
-	other := e.sftp(t)
-	if fi, err := other.Stat("/a.txt"); err != nil || fi.Size() != int64(len("original content")) {
-		t.Errorf("another session = %v, %v; want the original", fi, err)
+	// rclone checks from another connection of the same user.
+	if fi, err := e.sftp(t).Stat("/a.txt"); err != nil || fi.Size() != 3 {
+		t.Errorf("another connection of the user = %v, %v; want the copy", fi, err)
+	}
+	if fi, err := e.sftpAs(t, "bob").Stat("/a.txt"); err != nil || fi.Size() != int64(len("original content")) {
+		t.Errorf("another user = %v, %v; want the original", fi, err)
 	}
 }
 
@@ -243,5 +246,31 @@ func waitForMsg(t *testing.T, cond func() bool, msg func() string) {
 			t.Fatalf("condition not met in time: %s", msg())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAuditDocCoversSchema keeps docs/audit-log.md in step with the schema.
+func TestAuditDocCoversSchema(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "audit.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema auditSchema
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "audit-log.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ev, spec := range schema.Events {
+		if !strings.Contains(string(doc), "`"+ev+"`") {
+			t.Errorf("docs/audit-log.md does not list `%s`", ev)
+		}
+		for _, f := range slices.Concat(schema.Common, schema.Context, spec.Required, spec.Optional) {
+			if !strings.Contains(string(doc), "`"+f+"`") {
+				t.Errorf("docs/audit-log.md does not describe the field `%s` (%s)", f, ev)
+			}
+		}
 	}
 }

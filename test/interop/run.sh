@@ -2,6 +2,9 @@
 # Interop test: real OpenSSH sftp, scp and ssh clients against a freshly
 # built gosftpd. Usage: test/interop/run.sh (from anywhere). Needs bash,
 # openssh-client and Go. KEEP_WORK=1 keeps the work directory for inspection.
+#
+# paramiko, rclone and lftp are tested when available (PYTHON with paramiko,
+# RCLONE, lftp in PATH); REQUIRE_CLIENTS=1 makes a missing one a failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -18,6 +21,11 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; FAILED=1; }
 pass() { echo "ok:   $*"; }
+missing() { # missing CLIENT: skip, or fail with REQUIRE_CLIENTS=1
+	if [ -n "${REQUIRE_CLIENTS:-}" ]; then fail "$1 is not installed"; else echo "skip: $1 is not installed"; fi
+}
+PYTHON=${PYTHON:-python3}
+RCLONE=${RCLONE:-rclone}
 
 (cd "$ROOT" && go build -o "$WORK/gosftpd" ./cmd/gosftpd)
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/id_ed25519"
@@ -231,6 +239,66 @@ sftp -P "$PORT" $(as admin) -b "$C/admin.batch" admin@127.0.0.1 >"$C/admin.out" 
 grep -q 'home' "$C/admin.out" && grep -q 'inbox' "$C/admin.out" && grep -q 'public' "$C/admin.out" && pass "admin: sees three mounts" || fail "admin: mounts"
 cmp -s "$WORK/local/short.txt" "$C/home/admin/notes.txt" && pass "admin: home created" || fail "admin: home"
 [ ! -e "$C/inbox/new.txt" ] && pass "admin: delete" || fail "admin: delete"
+
+# --- paramiko ------------------------------------------------------------
+if "$PYTHON" -c 'import paramiko' 2>/dev/null; then
+	"$PYTHON" "$ROOT/test/interop/paramiko_check.py" "$PORT" "$C/known_hosts" "$WORK" "$C/inbox" "$WORK/local/upload.bin" ||
+		fail "paramiko checks"
+else
+	missing paramiko
+fi
+
+# --- rclone (sftp backend, no shell) ---------------------------------------
+if command -v "$RCLONE" >/dev/null 2>&1; then
+	# rclone reads every RCLONE_* variable as a flag.
+	for v in $(compgen -e | grep '^RCLONE_' || true); do unset "$v"; done
+	mkdir -p "$WORK/local/rc"
+	printf 'first\n' >"$WORK/local/rc/a.txt"
+	cp "$WORK/local/upload.bin" "$WORK/local/rc/big.bin"
+	# remote USER: an on-the-fly rclone remote for USER
+	remote() { echo ":sftp,host=127.0.0.1,port=$PORT,user=$1,key_file=$WORK/id_$1,known_hosts_file=$C/known_hosts,shell_type=none:"; }
+	RC=("$RCLONE" --config /dev/null --retries 1 --low-level-retries 1)
+	# DoD M2: without --inplace into an upload-only mount (temporary name, then rename).
+	if "${RC[@]}" copy "$WORK/local/rc" "$(remote partner)rc" 2>"$C/rclone.err"; then
+		cmp -s "$WORK/local/rc/big.bin" "$C/inbox/rc/big.bin" && pass "rclone: copy into an upload mount" || fail "rclone: copied file differs"
+	else
+		fail "rclone copy (upload): $(tail -3 "$C/rclone.err")"
+	fi
+	if [ -d "$C/inbox/rc" ] && ! ls "$C/inbox/rc" | grep -q partial; then
+		pass "rclone: no temporary files left"
+	else
+		fail "rclone: temporary files left or nothing copied: $(ls "$C/inbox/rc" 2>&1)"
+	fi
+	# DoD M2: with full access and on_conflict=rename, a changed file must not
+	# delete or change the original.
+	printf 'second version\n' >"$WORK/local/rc/a.txt"
+	if "${RC[@]}" copy "$WORK/local/rc" "$(remote admin)inbox/rc" 2>"$C/rclone2.err"; then
+		pass "rclone: copy of a changed file exits 0"
+	else
+		fail "rclone copy (full): $(tail -3 "$C/rclone2.err")"
+	fi
+	grep -qx 'first' "$C/inbox/rc/a.txt" && grep -qx 'second version' "$C/inbox/rc/a (1).txt" &&
+		pass "rclone: original kept, new version as a copy" || fail "rclone: $(ls "$C/inbox/rc"): $(cat "$C/inbox/rc/a.txt")"
+	"${RC[@]}" about "$(remote admin)inbox" >"$C/rclone.about" 2>&1 && grep -q 'Total' "$C/rclone.about" &&
+		pass "rclone: about (statvfs)" || fail "rclone about: $(cat "$C/rclone.about")"
+else
+	missing rclone
+fi
+
+# --- lftp ------------------------------------------------------------------
+if command -v lftp >/dev/null 2>&1; then
+	LFTP_SSH="ssh -a -x -i $WORK/id_admin -o UserKnownHostsFile=$C/known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes"
+	if lftp -c "set sftp:connect-program '$LFTP_SSH'; set net:max-retries 1; open -u admin,unused sftp://127.0.0.1:$PORT;
+		cd home; put $WORK/local/upload.bin -o lftp.bin; get lftp.bin -o $C/lftp.got; cls -1 /" >"$C/lftp.out" 2>&1; then
+		cmp -s "$WORK/local/upload.bin" "$C/home/admin/lftp.bin" && cmp -s "$WORK/local/upload.bin" "$C/lftp.got" &&
+			pass "lftp: put and get" || fail "lftp: files differ"
+		grep -q 'inbox' "$C/lftp.out" && pass "lftp: listing" || fail "lftp listing: $(cat "$C/lftp.out")"
+	else
+		fail "lftp: $(tail -3 "$C/lftp.out")"
+	fi
+else
+	missing lftp
+fi
 
 # An unknown user is refused.
 # shellcheck disable=SC2046

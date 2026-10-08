@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""paramiko against gosftpd, called by test/interop/run.sh.
+
+Usage: paramiko_check.py PORT KNOWN_HOSTS KEYDIR INBOX LOCAL_FILE
+KEYDIR holds id_reader, id_partner and id_admin; INBOX is the host path of
+the "inbox" mount (partner: upload preset, on_conflict=rename).
+"""
+
+import io
+import os
+import sys
+
+import paramiko
+
+port, known_hosts, keydir, inbox, local = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+failed = False
+
+
+def check(ok, what):
+    global failed
+    print(("ok:   " if ok else "FAIL: ") + "paramiko: " + what)
+    failed = failed or not ok
+
+
+def connect(user):
+    client = paramiko.SSHClient()
+    client.load_host_keys(known_hosts)
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    key = paramiko.Ed25519Key.from_private_key_file(os.path.join(keydir, "id_" + user))
+    client.connect("127.0.0.1", port=int(port), username=user, pkey=key,
+                   allow_agent=False, look_for_keys=False, timeout=10)
+    return client, client.open_sftp()
+
+
+with open(local, "rb") as f:
+    data = f.read()
+
+# partner: put(confirm=True) over an existing file passes thanks to the stat
+# redirect; the original is untouched and a copy holds the upload (DoD M2).
+ssh, sftp = connect("partner")
+original = open(os.path.join(inbox, "report.txt"), "rb").read()
+before = set(os.listdir(inbox))
+try:
+    attrs = sftp.put(local, "report.txt", confirm=True)
+    check(attrs.st_size == len(data), "put(confirm=True) over an existing file")
+except Exception as e:  # noqa: BLE001
+    check(False, "put(confirm=True) over an existing file: %r" % e)
+new = sorted(set(os.listdir(inbox)) - before)
+check(open(os.path.join(inbox, "report.txt"), "rb").read() == original, "original kept")
+check(len(new) == 1 and new[0].startswith("report (") and
+      open(os.path.join(inbox, new[0]), "rb").read() == data, "upload went to a copy: %s" % new)
+
+# partner: resume with mode "a" completes a partial upload.
+half = len(data) // 2
+sftp.putfo(io.BytesIO(data[:half]), "resume.bin")
+with sftp.open("resume.bin", "a") as f:
+    f.write(data[half:])
+check(open(os.path.join(inbox, "resume.bin"), "rb").read() == data, "append mode completes a partial upload")
+
+# A write into the existing bytes is refused.
+try:
+    with sftp.open("resume.bin", "r+") as f:
+        f.write(b"EVIL")
+    check(False, "overwriting existing bytes was allowed")
+except IOError:
+    check(open(os.path.join(inbox, "resume.bin"), "rb").read() == data, "overwriting existing bytes refused")
+
+# Listings show the virtual owner, not host accounts.
+attrs = sftp.listdir_attr(".")
+check(attrs and all(a.st_uid == 1000 and a.st_gid == 1000 for a in attrs), "virtual owners in listings")
+
+# No download for the upload preset.
+try:
+    sftp.getfo("report.txt", io.BytesIO())
+    check(False, "partner could download")
+except IOError:
+    check(True, "download refused for the upload preset")
+sftp.close()
+ssh.close()
+
+# reader: downloads work, uploads do not.
+ssh, sftp = connect("reader")
+check(sftp.open("readme.txt").read() == b"public file\n", "reader download")
+try:
+    sftp.putfo(io.BytesIO(b"x"), "new.txt")
+    check(False, "reader could upload")
+except IOError:
+    check(True, "upload refused for the read preset")
+sftp.close()
+ssh.close()
+
+sys.exit(1 if failed else 0)
