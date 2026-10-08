@@ -359,7 +359,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		Grants:                c.Grants,
 		Audit:                 al,
 		Log:                   log,
-		Password:              c.Auth.HasMethod(auth.MethodPassword),
+		Methods:               c.Auth.Methods,
 		Bans:                  c.Bans(),
 		CryptoPolicy:          c.Server.CryptoPolicy,
 		HandshakeTimeout:      time.Duration(c.Server.HandshakeTimeout),

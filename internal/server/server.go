@@ -53,8 +53,9 @@ type Config struct {
 	Audit  *audit.Logger
 	Log    *slog.Logger
 
-	// Password enables password logins (auth.methods includes "password").
-	Password bool
+	// Methods lists the enabled login methods, auth.MethodPublicKey and
+	// auth.MethodPassword; empty means public keys only.
+	Methods []string
 	// Bans refuses sources that keep failing to log in; nil disables bans.
 	Bans *auth.BanTable
 	// CryptoPolicy is PolicyModern (default) or PolicyCompat.
@@ -100,8 +101,8 @@ func New(cfg Config) (*Server, error) {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
 	setDefault(&cfg.HandshakeTimeout, DefaultHandshakeTimeout)
-	setDefault(&cfg.IdleTimeout, DefaultIdleTimeout)
-	setDefault(&cfg.KeepaliveInterval, DefaultKeepaliveInterval)
+	setDefaultOrOff(&cfg.IdleTimeout, DefaultIdleTimeout)
+	setDefaultOrOff(&cfg.KeepaliveInterval, DefaultKeepaliveInterval)
 	setDefault(&cfg.MaxConnections, DefaultMaxConnections)
 	setDefault(&cfg.MaxConnectionsPerIP, DefaultMaxPerSource)
 	setDefault(&cfg.MaxPreauthConnections, DefaultMaxPreauth)
@@ -118,13 +119,22 @@ func New(cfg Config) (*Server, error) {
 
 	sc := &ssh.ServerConfig{
 		Config:                  ssh.Config{KeyExchanges: algos.kex, Ciphers: algos.ciphers, MACs: algos.macs},
-		PublicKeyCallback:       cfg.Auth.PublicKey,
 		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
 		MaxAuthTries:            cfg.MaxAuthTries,
 		ServerVersion:           serverVersion,
 	}
-	if cfg.Password {
-		sc.PasswordCallback = cfg.Auth.Password
+	if len(cfg.Methods) == 0 {
+		cfg.Methods = []string{auth.MethodPublicKey}
+	}
+	for _, m := range cfg.Methods {
+		switch m {
+		case auth.MethodPublicKey:
+			sc.PublicKeyCallback = cfg.Auth.PublicKey
+		case auth.MethodPassword:
+			sc.PasswordCallback = cfg.Auth.Password
+		default:
+			return nil, fmt.Errorf("unknown authentication method %q", m)
+		}
 	}
 	for _, k := range cfg.HostKeys {
 		sc.AddHostKey(k)
@@ -137,7 +147,16 @@ func New(cfg Config) (*Server, error) {
 	}, nil
 }
 
+// setDefault replaces a zero or negative value with def.
 func setDefault[T int | time.Duration](v *T, def T) {
+	if *v <= 0 {
+		*v = def
+	}
+}
+
+// setDefaultOrOff replaces zero with def and a negative value with zero,
+// which turns the setting off.
+func setDefaultOrOff(v *time.Duration, def time.Duration) {
 	switch {
 	case *v == 0:
 		*v = def
@@ -276,13 +295,32 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 
 	al := s.cfg.Audit.With("conn_id", connID, "remote_addr", c.RemoteAddr().String(), "local_addr", c.LocalAddr().String())
 
-	// Per-connection callbacks: they only record, they never decide.
+	// Per-connection callbacks record, and refuse a change of user name
+	// within the connection (as sshd does); they never grant anything.
 	var (
 		accepted      atomic.Bool
 		failures      atomic.Int32
+		pwFailures    atomic.Int32
 		attemptedUser atomic.Value
+		user          pinnedUser
 	)
 	cfg := *s.sshCfg
+	if pk := cfg.PublicKeyCallback; pk != nil {
+		cfg.PublicKeyCallback = func(md ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if !user.same(md.User()) {
+				return nil, errUserChanged
+			}
+			return pk(md, key)
+		}
+	}
+	if pw := cfg.PasswordCallback; pw != nil {
+		cfg.PasswordCallback = func(md ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			if !user.same(md.User()) {
+				return nil, errUserChanged
+			}
+			return pw(md, password)
+		}
+	}
 	cfg.PreAuthConnCallback = func(pc ssh.ServerPreAuthConn) {
 		accepted.Store(true)
 		v := string(pc.ClientVersion())
@@ -292,8 +330,12 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		al.Event("conn.accept", slog.String("client_version", v))
 	}
 	cfg.AuthLogCallback = func(md ssh.ConnMetadata, method string, err error) {
+		user.same(md.User()) // the first request, often "none", fixes the name
 		if method != "none" && err != nil {
 			failures.Add(1)
+			if method == auth.MethodPassword {
+				pwFailures.Add(1)
+			}
 			attemptedUser.Store(md.User())
 		}
 	}
@@ -309,7 +351,13 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		if accepted.Load() {
 			u, _ := attemptedUser.Load().(string)
 			al.Event("auth.failure", slog.String("user", u), slog.Int("attempts", int(failures.Load())))
-			s.recordFailure(c, failures.Load(), al)
+			// Every wrong password counts; rejected keys count once, since an
+			// agent offers all of its keys.
+			n := pwFailures.Load()
+			if failures.Load() > n {
+				n++
+			}
+			s.recordFailures(c, n, al)
 			al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", "error"))
 		}
 		return
@@ -319,13 +367,17 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	// reads EOF. The login is audited all the same.
 	_ = c.SetDeadline(time.Time{})
 
-	user, ok := auth.UserFrom(sconn.Permissions)
+	// Wrong passwords before a login count too: a password can be guessed
+	// a few tries at a time between logins.
+	s.recordFailures(c, pwFailures.Load(), al)
+
+	name, ok := auth.UserFrom(sconn.Permissions)
 	if !ok {
 		log.Error("authenticated connection without a user")
 		return
 	}
-	al = al.With("user", user)
-	log = log.With("user", user)
+	al = al.With("user", name)
+	log = log.With("user", name)
 	success := []slog.Attr{slog.String("auth_method", sconn.Permissions.Extensions[auth.ExtMethod])}
 	if fp := sconn.Permissions.Extensions[auth.ExtFingerprint]; fp != "" {
 		success = append(success, slog.String("key_fp", fp))
@@ -343,7 +395,7 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		log.Info("closing connection", "reason", reason)
 		_ = sconn.Close()
 	})
-	s.serveChannels(chans, user, act, al, log)
+	s.serveChannels(chans, name, act, al, log)
 	result, _ := closeReason.Load().(string)
 	if result == "" {
 		result = "ok"
@@ -351,15 +403,21 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", result))
 }
 
-// recordFailure counts a connection that ended without logging in against
-// its source, after at least one failed attempt (not a scanner that only
-// completed the key exchange).
-func (s *Server) recordFailure(c net.Conn, failures int32, al *audit.Logger) {
-	if s.cfg.Bans == nil || failures == 0 {
+// recordFailures counts n login failures against the connection's source.
+// A scanner that only completed the key exchange has none.
+func (s *Server) recordFailures(c net.Conn, n int32, al *audit.Logger) {
+	if s.cfg.Bans == nil || n <= 0 {
 		return
 	}
 	ip, ok := auth.SourceAddr(c.RemoteAddr())
-	if !ok || !s.cfg.Bans.Fail(ip) {
+	if !ok {
+		return
+	}
+	banned := false
+	for range n {
+		banned = s.cfg.Bans.Fail(ip) || banned
+	}
+	if !banned {
 		return
 	}
 	src := auth.SourceKey(ip).String()
@@ -464,4 +522,25 @@ func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *s
 	_ = ch.Close()
 	_ = vs.Close()
 	al.Event("session.end", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.Int("exit_status", int(code)))
+}
+
+var errUserChanged = errors.New("the user name may not change within a connection")
+
+// pinnedUser is the user name of a connection's first authentication
+// request.
+type pinnedUser struct {
+	mu   sync.Mutex
+	name string
+	set  bool
+}
+
+// same pins name if no name is pinned yet and reports whether name is the
+// pinned one.
+func (p *pinnedUser) same(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.set {
+		p.name, p.set = name, true
+	}
+	return p.name == name
 }

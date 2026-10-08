@@ -3,6 +3,8 @@
 package auth
 
 import (
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -141,20 +143,39 @@ func TestPassword(t *testing.T) {
 	}
 }
 
-// TestPasswordTiming checks that an unknown user is refused about as slowly
-// as a wrong password (M3 DoD: medians within 10%).
+// TestPasswordTiming checks that a password attempt takes equally long
+// whichever user it names: unknown, without a password, or with a hash of
+// another kind or cost (M3 DoD: medians within 10%).
 func TestPasswordTiming(t *testing.T) {
-	if testing.Short() {
-		t.Skip("timing test")
+	if testing.Short() || raceEnabled {
+		t.Skip("timing test; TestPasswordConstantWork checks the same without timing")
 	}
-	h, err := HashPassword([]byte("alice pw"))
+	argon, err := HashPassword([]byte("pw"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ph, _ := ParsePasswordHash(h)
-	a := NewUsers([]User{{Name: "alice", Password: ph}})
-	a.Password(fakeConn{user: "mallory"}, []byte("warm up")) //nolint:errcheck // warms up the dummy hash
+	def, _ := ParsePasswordHash(argon)
+	bc, _ := bcrypt.GenerateFromPassword([]byte("pw"), 10)
+	imported, err := ParsePasswordHash(string(bc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A costlier argon2id than the default.
+	salt := base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	key := base64.RawStdEncoding.EncodeToString(make([]byte, 32))
+	costly, err := ParsePasswordHash("$argon2id$v=19$m=24576,t=3,p=1$" + salt + "$" + key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewUsers([]User{
+		{Name: "default", Password: def},
+		{Name: "imported", Password: imported},
+		{Name: "costly", Password: costly},
+		{Name: "keyonly", Keys: []Key{{Key: newKey(t)}}},
+	})
 
+	users := []string{"default", "imported", "costly", "keyonly", "mallory"}
+	const rounds = 7
 	measure := func(user string) time.Duration {
 		start := time.Now()
 		if _, err := a.Password(fakeConn{user: user}, []byte("wrong")); err == nil {
@@ -167,20 +188,98 @@ func TestPasswordTiming(t *testing.T) {
 		return d[len(d)/2]
 	}
 	// Noise from other processes can only make one round fail; a real
-	// difference (an unknown user not hashing) fails every round.
+	// difference fails every round.
 	var report strings.Builder
 	for range 3 {
-		var known, unknown []time.Duration
-		for range 15 {
-			known = append(known, measure("alice"))
-			unknown = append(unknown, measure("mallory"))
+		times := make([][]time.Duration, len(users))
+		for range rounds {
+			for i, u := range users {
+				times[i] = append(times[i], measure(u))
+			}
 		}
-		mk, mu := median(known), median(unknown)
-		diff := float64(mk-mu) / float64(mk)
-		if diff <= 0.1 && diff >= -0.1 {
+		meds := make([]time.Duration, len(users))
+		for i := range users {
+			meds[i] = median(times[i])
+		}
+		lo, hi := slices.Min(meds), slices.Max(meds)
+		if float64(hi-lo)/float64(hi) <= 0.1 {
 			return
 		}
-		fmt.Fprintf(&report, "\n  median wrong password %v, unknown user %v: %+.0f%%", mk, mu, 100*diff)
+		fmt.Fprintf(&report, "\n  medians %v for %v", meds, users)
 	}
-	t.Errorf("unknown users are refused at a different speed than wrong passwords:%s", report.String())
+	t.Errorf("password attempts take different times depending on the user:%s", report.String())
+}
+
+// countingHash records which classes an attempt verifies.
+type countingHash struct {
+	cls, pw string
+	calls   map[string]int
+}
+
+func (h countingHash) verify(pw []byte) bool {
+	h.calls[h.cls]++
+	return h.pw != "" && string(pw) == h.pw
+}
+func (h countingHash) class() string       { return h.cls }
+func (h countingHash) dummy() PasswordHash { return countingHash{cls: h.cls, calls: h.calls} }
+
+// TestPasswordConstantWork checks without timing that every attempt
+// verifies one hash of each configured class, whichever user it names.
+func TestPasswordConstantWork(t *testing.T) {
+	t.Parallel()
+
+	calls := map[string]int{}
+	a := NewUsers([]User{
+		{Name: "alice", Password: countingHash{cls: "a", pw: "alice pw", calls: calls}},
+		{Name: "bob", Password: countingHash{cls: "b", pw: "bob pw", calls: calls}},
+		{Name: "carol", Password: countingHash{cls: "a", pw: "carol pw", calls: calls}},
+		{Name: "dave", Keys: []Key{{Key: newKey(t)}}},
+	})
+	for _, tt := range []struct {
+		user, pw string
+		ok       bool
+	}{
+		{"alice", "alice pw", true},
+		{"alice", "wrong", false},
+		{"bob", "bob pw", true},
+		{"bob", "alice pw", false},
+		{"carol", "alice pw", false},
+		{"dave", "x", false},
+		{"mallory", "x", false},
+	} {
+		clear(calls)
+		_, err := a.Password(fakeConn{user: tt.user}, []byte(tt.pw))
+		if (err == nil) != tt.ok {
+			t.Errorf("%s/%s: err = %v", tt.user, tt.pw, err)
+		}
+		if calls["a"] != 1 || calls["b"] != 1 || len(calls) != 2 {
+			t.Errorf("%s: verified %v, want one hash of each class", tt.user, calls)
+		}
+	}
+}
+
+func TestPasswordClasses(t *testing.T) {
+	t.Parallel()
+
+	bc, _ := bcrypt.GenerateFromPassword([]byte("pw"), 10)
+	imported, _ := ParsePasswordHash(string(bc))
+	h, _ := HashPassword([]byte("pw"))
+	def, _ := ParsePasswordHash(h)
+	classes := passwordClasses([]PasswordHash{def, imported, def})
+	if len(classes) != 2 {
+		t.Fatalf("%d classes, want 2", len(classes))
+	}
+	for _, d := range classes {
+		if d.verify([]byte("pw")) || d.verify(nil) {
+			t.Errorf("dummy %s matches a password", d.class())
+		}
+	}
+	// A dummy is well-formed: bcrypt really hashes instead of failing early.
+	bd := imported.dummy().(bcryptHash)
+	if _, err := bcrypt.Cost(bd); err != nil {
+		t.Errorf("bcrypt dummy %q: %v", bd, err)
+	}
+	if err := bcrypt.CompareHashAndPassword(bd, []byte("pw")); !errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+		t.Errorf("bcrypt dummy compare = %v, want a mismatch after hashing", err)
+	}
 }

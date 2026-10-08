@@ -115,8 +115,14 @@ func TestBanTable(t *testing.T) {
 		}
 	}
 	// An exempt address stays exempt when its /64 is banned.
+	for range 3 {
+		b.Fail(netip.MustParseAddr("::2"))
+	}
+	if !b.Banned(netip.MustParseAddr("::2")) {
+		t.Fatal("::/64 not banned")
+	}
 	if b.Banned(netip.MustParseAddr("::1")) {
-		t.Error("exempt ::1 banned")
+		t.Error("exempt ::1 banned with its /64")
 	}
 }
 

@@ -220,7 +220,7 @@ func TestConfigValidateErrors(t *testing.T) {
 	if code != exitUsage {
 		t.Errorf("exit %d", code)
 	}
-	for _, want := range []string{"4 problems:", "server.listen", "server.host_keys", "mounts.m.path", `users.a.access: unknown mount "x"`, "warning: users.a: no authorized_keys"} {
+	for _, want := range []string{"4 problems:", "server.listen", "server.host_keys", "mounts.m.path", `users.a.access: unknown mount "x"`, "warning: users.a: no usable authorized_keys"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}

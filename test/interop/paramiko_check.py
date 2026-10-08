@@ -11,8 +11,10 @@ environment variable COURIER_PASSWORD is the password of the user courier.
 import io
 import os
 import sys
+import threading
 
 import paramiko
+from paramiko.message import Message
 
 port, known_hosts, keydir, inbox, local = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 failed = False
@@ -111,5 +113,31 @@ try:
     check(False, "wrong password accepted")
 except paramiko.AuthenticationException:
     check(True, "wrong password refused")
+
+# A change of user name within one connection is refused, as sshd does: a
+# wrong password for courier, then admin's key on the same connection.
+# This drives paramiko's auth handler directly (no public API for it).
+t = paramiko.Transport(("127.0.0.1", int(port)))
+t.start_client(timeout=10)
+try:
+    t.auth_password("courier", "wrong", fallback=False)
+except paramiko.AuthenticationException:
+    pass
+ah = t.auth_handler
+event = threading.Event()
+ah.auth_event = event
+ah.username = "admin"
+ah.auth_method = "publickey"
+ah.private_key = paramiko.Ed25519Key.from_private_key_file(os.path.join(keydir, "id_admin"))
+accept = Message()
+accept.add_string("ssh-userauth")
+accept.rewind()
+ah._parse_service_accept(accept)
+try:
+    ah.wait_for_response(event)
+    check(False, "user name changed within a connection")
+except paramiko.AuthenticationException:
+    check(True, "user name change within a connection refused")
+t.close()
 
 sys.exit(1 if failed else 0)

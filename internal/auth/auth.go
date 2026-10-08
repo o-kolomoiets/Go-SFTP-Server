@@ -84,10 +84,17 @@ type Authenticator struct {
 	// hashing bounds concurrent password verifications, and so the memory
 	// they take before authentication.
 	hashing chan struct{}
+	// classes holds one dummy hash per class of configured password hash.
+	classes []PasswordHash
 }
 
 func newAuthenticator(n int) *Authenticator {
-	return &Authenticator{users: make(map[string]*account, n), now: time.Now, hashing: make(chan struct{}, runtime.NumCPU())}
+	return &Authenticator{
+		users:   make(map[string]*account, n),
+		now:     time.Now,
+		hashing: make(chan struct{}, runtime.NumCPU()),
+		classes: passwordClasses(nil),
+	}
 }
 
 // New returns a zero-config Authenticator for keys. If user is not empty,
@@ -105,14 +112,19 @@ func New(user string, keys []Key) *Authenticator {
 // NewUsers returns an Authenticator for configured users.
 func NewUsers(users []User) *Authenticator {
 	a := newAuthenticator(len(users))
+	var hashes []PasswordHash
 	for _, u := range users {
 		acc := newAccount(u.Keys)
 		acc.password = u.Password
+		if u.Password != nil {
+			hashes = append(hashes, u.Password)
+		}
 		acc.allowFrom = u.AllowFrom
 		acc.expires = u.Expires
 		acc.disabled = u.Disabled
 		a.users[u.Name] = acc
 	}
+	a.classes = passwordClasses(hashes)
 	return a
 }
 
@@ -167,21 +179,29 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 	return perms, nil
 }
 
-// Password is an ssh.ServerConfig.PasswordCallback. Unknown users and users
-// without a password verify a dummy hash, so that every failure takes about
-// as long as a wrong password.
+// Password is an ssh.ServerConfig.PasswordCallback. Every attempt verifies
+// one hash of each configured class (the user's own hash for its class,
+// dummies for the others), so that it takes equally long whichever user it
+// names.
 func (a *Authenticator) Password(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 	if len(password) == 0 || len(password) > MaxPasswordLen {
 		return nil, errDenied
 	}
 	name := conn.User()
 	acc := a.lookup(name)
-	h := dummyHash()
-	if acc != nil && acc.password != nil {
-		h = acc.password
+	var own PasswordHash
+	if acc != nil {
+		own = acc.password
 	}
+	ok := false
 	a.hashing <- struct{}{}
-	ok := h.verify(password)
+	for _, d := range a.classes {
+		if own != nil && d.class() == own.class() {
+			ok = own.verify(password)
+		} else {
+			d.verify(password)
+		}
+	}
 	<-a.hashing
 	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
 		return nil, errDenied

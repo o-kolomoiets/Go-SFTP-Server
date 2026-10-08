@@ -138,6 +138,10 @@ func (c *Config) validateLimits(p *problems) {
 			p.errorf(l.key, "must be between 1 and %d", l.max)
 		}
 	}
+	if l := c.Limits; l.MaxConnectionsPerIP >= l.MaxPreauthConnections && l.MaxPreauthConnections > 0 {
+		p.warnf("limits.max_connections_per_ip", "%d is not below max_preauth_connections (%d): one address can hold every slot for clients that have not logged in yet",
+			l.MaxConnectionsPerIP, l.MaxPreauthConnections)
+	}
 }
 
 func (c *Config) validateAuth(p *problems) {
@@ -150,8 +154,8 @@ func (c *Config) validateAuth(p *problems) {
 			p.errorf("auth.methods", "unknown method %q (want publickey or password)", m)
 		}
 	}
-	if c.AnyUser != nil && a.HasMethod(auth.MethodPassword) {
-		p.errorf("auth.methods", "password logins need users with password_hash in a configuration file")
+	if c.AnyUser != nil && (a.HasMethod(auth.MethodPassword) || !a.HasMethod(auth.MethodPublicKey)) {
+		p.errorf("auth.methods", "without a configuration file only publickey is possible")
 	}
 	b := a.Ban
 	if b.AfterFailures < 0 || b.AfterFailures > maxBanFailures {
@@ -311,8 +315,13 @@ func (c *Config) validateUsers(p *problems) {
 				p.warnf(k("password_hash"), "ignored: auth.methods does not include \"password\"")
 			}
 		}
-		if len(u.AuthorizedKeys) == 0 && u.AuthorizedKeysFile == "" && !c.canUsePassword(u) {
-			p.warnf(where, "no authorized_keys or authorized_keys_file: the user cannot log in")
+		hasKeys := len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != ""
+		if hasKeys && !c.Auth.HasMethod(auth.MethodPublicKey) {
+			p.warnf(where, "keys ignored: auth.methods does not include \"publickey\"")
+		}
+		usableKeys := hasKeys && c.Auth.HasMethod(auth.MethodPublicKey)
+		if !usableKeys && !c.canUsePassword(u) {
+			p.warnf(where, "no usable authorized_keys or password_hash: the user cannot log in")
 		}
 	}
 }

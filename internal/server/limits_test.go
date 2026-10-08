@@ -225,7 +225,7 @@ func TestPasswordLogin(t *testing.T) {
 
 	e := startWith(t, startOpts{policy: vfs.ConflictRename, categories: []string{audit.CategoryAuth}, tweak: func(c *Config) {
 		c.Auth = auth.NewUsers(users)
-		c.Password = true
+		c.Methods = []string{auth.MethodPublicKey, auth.MethodPassword}
 	}})
 	if err := dial(e, "wrong"); err == nil {
 		t.Fatal("wrong password accepted")
@@ -384,42 +384,79 @@ func TestIdleTimeout(t *testing.T) {
 	})
 }
 
-// freezeConn stops reading when frozen, like a peer that vanished.
+// freezeConn stops delivering data once frozen, like a peer that vanished:
+// a goroutine reads ahead from the connection, and Read stops handing on
+// what it got.
 type freezeConn struct {
 	net.Conn
-	mu     sync.Mutex
+	data   chan []byte
 	frozen chan struct{}
 	closed chan struct{}
+	buf    []byte
 	once   sync.Once
+	wg     sync.WaitGroup
 }
 
-func (c *freezeConn) freeze() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.frozen = make(chan struct{})
+func newFreezeConn(c net.Conn) *freezeConn {
+	f := &freezeConn{Conn: c, data: make(chan []byte), frozen: make(chan struct{}), closed: make(chan struct{})}
+	f.wg.Go(func() {
+		defer close(f.data)
+		for {
+			b := make([]byte, 32*1024)
+			n, err := c.Read(b)
+			if n > 0 {
+				select {
+				case f.data <- b[:n]:
+				case <-f.closed:
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	})
+	return f
 }
 
-func (c *freezeConn) Read(p []byte) (int, error) {
-	c.mu.Lock()
-	frozen := c.frozen
-	c.mu.Unlock()
-	if frozen != nil {
-		<-c.closed
-		return 0, io.EOF
+func (f *freezeConn) freeze() { close(f.frozen) }
+
+func (f *freezeConn) Read(p []byte) (int, error) {
+	if len(f.buf) == 0 {
+		select {
+		case <-f.frozen:
+			<-f.closed
+			return 0, io.EOF
+		default:
+		}
+		select {
+		case b, ok := <-f.data:
+			if !ok {
+				return 0, io.EOF
+			}
+			f.buf = b
+		case <-f.frozen:
+			<-f.closed
+			return 0, io.EOF
+		}
 	}
-	return c.Conn.Read(p)
+	n := copy(p, f.buf)
+	f.buf = f.buf[n:]
+	return n, nil
 }
 
-func (c *freezeConn) Close() error {
-	c.once.Do(func() { close(c.closed) })
-	return c.Conn.Close()
+func (f *freezeConn) Close() error {
+	f.once.Do(func() { close(f.closed) })
+	err := f.Conn.Close()
+	f.wg.Wait()
+	return err
 }
 
 func TestKeepalive(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var fc *freezeConn
 		wrap := func(c net.Conn) net.Conn {
-			fc = &freezeConn{Conn: c, closed: make(chan struct{})}
+			fc = newFreezeConn(c)
 			return fc
 		}
 		_, c, log, cleanup := pipeServer(t, Config{IdleTimeout: -1, KeepaliveInterval: 30 * time.Second}, wrap)
@@ -431,10 +468,17 @@ func TestKeepalive(t *testing.T) {
 			t.Fatalf("idle connection closed although keepalives were answered: %v", err)
 		}
 
-		// The read already waiting may still deliver one request; after
-		// that nothing is answered, and 3 misses close the connection.
+		// From now on nothing is answered. Keepalives go out every 30s,
+		// the first one 29s after the freeze; the third one left
+		// unanswered after it closes the connection, 119s after the freeze.
+		time.Sleep(time.Second)
 		fc.freeze()
-		time.Sleep(6 * 30 * time.Second)
+		time.Sleep(110 * time.Second)
+		synctest.Wait()
+		if got := closedWith(t, log); got != "" {
+			t.Fatalf("closed after %d unanswered keepalives, want %d", 2, keepaliveMisses)
+		}
+		time.Sleep(15 * time.Second)
 		synctest.Wait()
 		if got := closedWith(t, log); got != "keepalive_timeout" {
 			t.Errorf("conn.close result = %q, want keepalive_timeout\n%s", got, log.String())
@@ -471,4 +515,137 @@ func TestQuickDisconnectAudited(t *testing.T) {
 		func() string {
 			return fmt.Sprintf("%d auth.success and %d conn.close events for %d logins", count("auth.success"), count("conn.close"), n)
 		})
+}
+
+func TestPinnedUser(t *testing.T) {
+	t.Parallel()
+
+	var p pinnedUser
+	for i, tt := range []struct {
+		name string
+		want bool
+	}{{"alice", true}, {"alice", true}, {"bob", false}, {"", false}, {"alice", true}} {
+		if got := p.same(tt.name); got != tt.want {
+			t.Errorf("call %d: same(%q) = %v, want %v", i, tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestPasswordFailuresBan: every wrong password counts toward a ban, also
+// in a connection that then logs in; rejected keys before a login do not.
+func TestPasswordFailuresBan(t *testing.T) {
+	t.Parallel()
+
+	h, err := auth.HashPassword([]byte("s3cret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph, _ := auth.ParsePasswordHash(h)
+	key := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
+	var bans *auth.BanTable
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Password: ph, Keys: keys}})
+		c.Methods = []string{auth.MethodPublicKey, auth.MethodPassword}
+		bans = auth.NewBanTable(auth.BanOptions{AfterFailures: 3})
+		c.Bans = bans
+	}})
+	login := func(methods ...ssh.AuthMethod) error {
+		c, err := ssh.Dial("tcp", e.addr, &ssh.ClientConfig{
+			User: "bob", Auth: methods, HostKeyCallback: ssh.FixedHostKey(e.hostKey), Timeout: 10 * time.Second,
+		})
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+	lo := netip.MustParseAddr("127.0.0.1")
+
+	// An agent with many keys: rejected keys before the right one are free.
+	for range 3 {
+		if err := login(ssh.PublicKeys(signer(t), signer(t), signer(t), key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f, _ := bans.Len(); f != 0 {
+		t.Fatalf("%d sources with failures after logins with an agent", f)
+	}
+
+	// Two wrong passwords, then the right key: both passwords count.
+	guesses := []string{"guess1", "guess2"}
+	pw := ssh.RetryableAuthMethod(ssh.PasswordCallback(func() (string, error) {
+		g := guesses[0]
+		guesses = guesses[1:]
+		return g, nil
+	}), len(guesses))
+	if err := login(pw, ssh.PublicKeys(key)); err != nil {
+		t.Fatal(err)
+	}
+	if bans.Banned(lo) {
+		t.Fatal("banned after two failures")
+	}
+	if err := login(ssh.Password("guess3")); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	waitForMsg(t, func() bool { return bans.Banned(lo) }, func() string { return "not banned after three wrong passwords" })
+}
+
+// TestMethods: auth.methods turns each method on or off.
+func TestMethods(t *testing.T) {
+	t.Parallel()
+
+	h, err := auth.HashPassword([]byte("s3cret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph, _ := auth.ParsePasswordHash(h)
+	key := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
+	for _, tt := range []struct {
+		methods       []string
+		keyOK, passOK bool
+	}{
+		{nil, true, false},
+		{[]string{auth.MethodPublicKey}, true, false},
+		{[]string{auth.MethodPassword}, false, true},
+		{[]string{auth.MethodPassword, auth.MethodPublicKey}, true, true},
+	} {
+		e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+			c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Password: ph, Keys: keys}})
+			c.Methods = tt.methods
+		}})
+		for _, m := range []struct {
+			name   string
+			method ssh.AuthMethod
+			want   bool
+		}{{"publickey", ssh.PublicKeys(key), tt.keyOK}, {"password", ssh.Password("s3cret"), tt.passOK}} {
+			c, err := ssh.Dial("tcp", e.addr, &ssh.ClientConfig{
+				User: "bob", Auth: []ssh.AuthMethod{m.method}, HostKeyCallback: ssh.FixedHostKey(e.hostKey), Timeout: 10 * time.Second,
+			})
+			if (err == nil) != m.want {
+				t.Errorf("methods %v, %s login: err = %v", tt.methods, m.name, err)
+			}
+			if err == nil {
+				c.Close()
+			}
+		}
+	}
+	if _, err := New(Config{HostKeys: []ssh.Signer{signer(t)}, Auth: auth.New("", nil), Mounts: &vfs.Table{}, Methods: []string{"hostbased"}}); err == nil {
+		t.Error("unknown method accepted")
+	}
+}
+
+// TestNegativeLimits: negative values in Config mean the default, except
+// for the two timeouts where they mean off.
+func TestNegativeLimits(t *testing.T) {
+	t.Parallel()
+
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.HandshakeTimeout, c.MaxConnections, c.MaxConnectionsPerIP, c.MaxPreauthConnections = -1, -1, -1, -1
+		c.MaxSessionsPerConn, c.MaxAuthTries, c.IdleTimeout, c.KeepaliveInterval = -1, -1, -1, -1
+	}})
+	c := e.sftp(t)
+	if _, err := c.Getwd(); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -8,9 +8,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
@@ -44,12 +45,28 @@ const (
 // for imported accounts.
 type PasswordHash interface {
 	verify(password []byte) bool
+	// class names the algorithm and cost; hashes of one class take
+	// equally long to verify.
+	class() string
+	// dummy returns a hash of the same class that matches no password.
+	dummy() PasswordHash
 }
 
 type argon2Hash struct {
 	memory, time uint32
 	threads      uint8
 	salt, key    []byte
+}
+
+func (h *argon2Hash) class() string {
+	return fmt.Sprintf("argon2id m=%d t=%d p=%d len=%d", h.memory, h.time, h.threads, len(h.key))
+}
+
+func (h *argon2Hash) dummy() PasswordHash {
+	d := &argon2Hash{memory: h.memory, time: h.time, threads: h.threads, salt: make([]byte, len(h.salt)), key: make([]byte, len(h.key))}
+	_, _ = rand.Read(d.salt)
+	_, _ = rand.Read(d.key)
+	return d
 }
 
 func (h *argon2Hash) verify(password []byte) bool {
@@ -61,6 +78,25 @@ type bcryptHash []byte
 
 func (h bcryptHash) verify(password []byte) bool {
 	return bcrypt.CompareHashAndPassword(h, password) == nil
+}
+
+func (h bcryptHash) class() string {
+	cost, _ := bcrypt.Cost(h)
+	return "bcrypt cost=" + strconv.Itoa(cost)
+}
+
+// bcryptAlphabet is bcrypt's base64 alphabet.
+const bcryptAlphabet = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+func (h bcryptHash) dummy() PasswordHash {
+	cost, _ := bcrypt.Cost(h)
+	// A random salt and digest: verifying it costs as much as a real hash.
+	b := make([]byte, 53)
+	_, _ = rand.Read(b)
+	for i := range b {
+		b[i] = bcryptAlphabet[int(b[i])%len(bcryptAlphabet)]
+	}
+	return bcryptHash(fmt.Sprintf("$2b$%02d$%s", cost, b))
 }
 
 // HashPassword returns an argon2id hash of password in PHC format.
@@ -148,16 +184,29 @@ func parseArgon2(s string) (PasswordHash, error) {
 	return &argon2Hash{memory: uint32(m), time: uint32(t), threads: uint8(p), salt: salt, key: key}, nil
 }
 
-// dummyHash is verified for unknown users and users without a password, so
-// that they take as long as a wrong password.
-var dummyHash = sync.OnceValue(func() PasswordHash {
-	h, err := HashPassword([]byte("gosftpd dummy password"))
-	if err != nil {
-		panic(err)
+// defaultDummy is a hash with the parameters of HashPassword that matches
+// no password.
+func defaultDummy() PasswordHash {
+	return (&argon2Hash{memory: argonMemory, time: argonTime, threads: argonThreads, salt: make([]byte, argonSaltLen), key: make([]byte, argonKeyLen)}).dummy()
+}
+
+// passwordClasses returns one dummy hash per class of the configured
+// hashes (at least the default class), sorted by class. Every password
+// attempt verifies one hash of each class, so that it takes equally long
+// whichever user it names, whether the user exists, has a password, or
+// has a hash with other costs.
+func passwordClasses(hashes []PasswordHash) []PasswordHash {
+	byClass := map[string]PasswordHash{}
+	d := defaultDummy()
+	byClass[d.class()] = d
+	for _, h := range hashes {
+		if _, ok := byClass[h.class()]; !ok {
+			byClass[h.class()] = h.dummy()
+		}
 	}
-	ph, err := ParsePasswordHash(h)
-	if err != nil {
-		panic(err)
+	out := make([]PasswordHash, 0, len(byClass))
+	for _, c := range slices.Sorted(maps.Keys(byClass)) {
+		out = append(out, byClass[c])
 	}
-	return ph
-})
+	return out
+}

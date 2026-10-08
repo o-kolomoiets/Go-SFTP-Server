@@ -96,13 +96,18 @@ the proxy to `auth.ban.exempt`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `methods` | `["publickey"]` | Login methods: `publickey`, and `password` for users with `password_hash`. Either one is enough to log in. |
+| `methods` | `["publickey"]` | Login methods: `publickey`, and `password` for users with `password_hash`. Either one is enough to log in; a method that is not listed is refused. Without a configuration file only `publickey` is possible. |
+
+A connection keeps the user name of its first authentication request, as
+sshd does: a client cannot try one user's password and then log in as
+another user.
 
 ### `[auth.ban]`
 
-A connection that closes after at least one failed login attempt, without
-logging in, counts as one failure of its source: the IPv4 address or the IPv6
-/64. Keys an SSH agent offers in one connection count once. A source with
+Failures count against the source, the IPv4 address or the IPv6 /64:
+every wrong password is one failure, also in a connection that then logs
+in; a connection that closes without logging in after rejected keys is one
+failure, however many keys an SSH agent offered. A source with
 `after_failures` failures within `within` is refused right after accept for
 `duration` (`conn.reject` with `reason=banned`; the ban itself is logged as
 `auth.ban`). Bans are kept in memory, for at most 65 536 sources.
@@ -227,9 +232,12 @@ Passwords are off unless `auth.methods` includes `password`. Prefer keys:
 a password can be guessed, and every attempt costs the server about 19 MiB
 and tens of milliseconds of CPU. New hashes use argon2id with m=19456,
 t=2, p=1. Imported hashes may use argon2id with up to 64 MiB, t ≤ 10 and
-p ≤ 8, or bcrypt with cost 10 to 14 (`$2a$`, `$2b$`, `$2y$`). An unknown user
-or a user without a password takes as long to refuse as a wrong password of
-an argon2id user.
+p ≤ 8, or bcrypt with cost 10 to 14 (`$2a$`, `$2b$`, `$2y$`). So that the
+response time does not tell which users exist, every attempt checks one hash
+of each kind and cost in use (the user's own, and stand-ins for the others):
+with only `hash-password` hashes that is one argon2id check, while imported
+bcrypt hashes make every attempt cost one bcrypt check more. Re-hash
+imported passwords with `gosftpd user hash-password` when you can.
 
 ### Permissions
 

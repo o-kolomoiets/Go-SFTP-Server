@@ -258,7 +258,7 @@ path = "{dir}/m"
 expires = 2001-01-01T00:00:00Z
 `)
 	warns := strings.Join(mustValidate(t, c), "\n")
-	for _, want := range []string{"users.bob.access: no mounts", "users.bob.expires: already expired", "users.bob: no authorized_keys"} {
+	for _, want := range []string{"users.bob.access: no mounts", "users.bob.expires: already expired", "users.bob: no usable authorized_keys"} {
 		if !strings.Contains(warns, want) {
 			t.Errorf("warnings do not mention %q:\n%s", want, warns)
 		}
@@ -893,12 +893,29 @@ access = { m = "read" }
 		t.Error("after_failures = 0 did not turn bans off")
 	}
 
-	// Zero-config has no password users.
-	zero := Default()
-	zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: "k"}
-	zero.Auth.Methods = []string{"password"}
-	if _, err := zero.Validate(); err == nil || !strings.Contains(err.Error(), "auth.methods") {
-		t.Errorf("zero-config with passwords: %v", err)
+	// Zero-config has public keys only.
+	for _, methods := range [][]string{{"password"}, {"publickey", "password"}} {
+		zero := Default()
+		zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: "k"}
+		zero.Auth.Methods = methods
+		if _, err := zero.Validate(); err == nil || !strings.Contains(err.Error(), "auth.methods") {
+			t.Errorf("zero-config with methods %v: %v", methods, err)
+		}
+	}
+
+	// Keys of a password-only server are ignored, and one address that may
+	// hold every pre-authentication slot is worth a warning.
+	c, _ = load(t, fmt.Sprintf(base, hash)+`authorized_keys = ["`+pubKey(t)+`"]
+[auth]
+methods = ["password"]
+[limits]
+max_connections_per_ip = 64
+`)
+	warns = mustValidate(t, c)
+	for _, want := range []string{"users.bob: keys ignored", "limits.max_connections_per_ip: 64 is not below"} {
+		if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, want) }) {
+			t.Errorf("warnings %q lack %q", warns, want)
+		}
 	}
 }
 
