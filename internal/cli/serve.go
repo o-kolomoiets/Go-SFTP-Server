@@ -91,6 +91,9 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 		c   *config.Config
 		err error
 	)
+	if err := checkFlagValues(flags, o); err != nil {
+		return nil, err
+	}
 	if len(o.dirs) > 0 {
 		if o.config != "" {
 			return nil, usageError{errors.New("--dir and --config cannot be used together")}
@@ -138,6 +141,20 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 		}
 	}
 	return c, nil
+}
+
+// checkFlagValues reports bad flag values under the flag's name rather than
+// as a configuration key.
+func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
+	if flags.Changed("on-conflict") || len(o.dirs) > 0 {
+		if _, err := vfs.ParseConflictPolicy(o.onConflict); err != nil {
+			return usageError{fmt.Errorf("--on-conflict: %w", err)}
+		}
+	}
+	if _, err := newLogger(io.Discard, o.logLevel, o.logFormat); err != nil {
+		return usageError{fmt.Errorf("--%w", err)}
+	}
+	return nil
 }
 
 // loadConfig finds and loads the configuration file.
@@ -400,7 +417,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 func newLogger(w io.Writer, level, format string) (*slog.Logger, error) {
 	var lv slog.Level
 	if err := lv.UnmarshalText([]byte(level)); err != nil {
-		return nil, fmt.Errorf("log level: %w", err)
+		return nil, fmt.Errorf("log-level: %w", err)
 	}
 	opts := &slog.HandlerOptions{Level: lv}
 	switch format {
@@ -409,7 +426,7 @@ func newLogger(w io.Writer, level, format string) (*slog.Logger, error) {
 	case "json":
 		return slog.New(slog.NewJSONHandler(w, opts)), nil
 	default:
-		return nil, fmt.Errorf("log format: unknown format %q (want text or json)", format)
+		return nil, fmt.Errorf("log-format: unknown format %q (want text or json)", format)
 	}
 }
 
@@ -435,6 +452,9 @@ func parseDirs(dirs []string) ([]vfs.MountSpec, error) {
 		}
 		if name == "" {
 			name = filepath.Base(abs)
+		}
+		if filepath.Base(abs) == vfs.UserPlaceholder {
+			return nil, fmt.Errorf("--dir %q: per-user directories ({user}) need a configuration file", d)
 		}
 		specs = append(specs, vfs.MountSpec{Name: name, Path: abs})
 	}

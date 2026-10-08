@@ -22,6 +22,7 @@ func newHostkeyCmd() *cobra.Command {
 		Use:   "hostkey",
 		Short: "Create and inspect host keys",
 		Args:  noArgs,
+		RunE:  showHelp,
 	}
 	cmd.AddCommand(newHostkeyShowCmd(), newHostkeyGenerateCmd())
 	return cmd

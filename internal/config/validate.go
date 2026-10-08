@@ -83,10 +83,10 @@ func (c *Config) validateServer(p *problems) {
 			p.errorf("server.host_keys", "empty path")
 		}
 	}
-	if d := time.Duration(s.HandshakeTimeout); d <= 0 || d > maxHandshakeTimeout {
+	if d := time.Duration(s.HandshakeTimeout); d < time.Second || d > maxHandshakeTimeout {
 		p.errorf("server.handshake_timeout", "must be between 1s and %s", maxHandshakeTimeout)
 	}
-	if d := time.Duration(s.ShutdownTimeout); d <= 0 || d > maxShutdownTimeout {
+	if d := time.Duration(s.ShutdownTimeout); d < time.Second || d > maxShutdownTimeout {
 		p.errorf("server.shutdown_timeout", "must be between 1s and %s", maxShutdownTimeout)
 	}
 }
@@ -248,7 +248,7 @@ func (c *Config) validateUsers(p *problems) {
 }
 
 func (c *Config) validateLogs(p *problems) {
-	switch c.Log.Level {
+	switch strings.ToLower(c.Log.Level) {
 	case "debug", "info", "warn", "error":
 	default:
 		p.errorf("log.level", "unknown level %q (want debug, info, warn or error)", c.Log.Level)

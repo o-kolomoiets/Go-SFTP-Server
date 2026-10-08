@@ -26,6 +26,7 @@ func newUserCmd() *cobra.Command {
 		Use:   "user",
 		Short: "Prepare and list users",
 		Args:  noArgs,
+		RunE:  showHelp,
 	}
 	cmd.AddCommand(newUserAddCmd(), newUserListCmd())
 	return cmd
@@ -117,7 +118,7 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n[users.%s]\n", name)
+	fmt.Fprintf(&b, "\n[users.%s]\n", tomlKey(name))
 	fmt.Fprintf(&b, "authorized_keys = %s\n", tomlStrings(keys))
 	if len(o.allowFrom) > 0 {
 		fmt.Fprintf(&b, "allow_from = %s\n", tomlStrings(o.allowFrom))

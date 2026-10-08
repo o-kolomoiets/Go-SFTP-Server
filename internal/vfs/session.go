@@ -17,6 +17,14 @@ import (
 	"unicode/utf8"
 )
 
+// parentOf returns the directory part of rel, "." for a top-level name.
+func parentOf(rel string) string {
+	if d := filepath.Dir(rel); d != "" {
+		return d
+	}
+	return "."
+}
+
 // errNoAtomicRename means the platform cannot rename without replacing.
 var errNoAtomicRename = errors.New("atomic no-replace rename unavailable")
 
@@ -41,6 +49,21 @@ type createdKey struct {
 	rel string
 }
 
+// fileID identifies a file across paths. The inode number alone is not
+// enough: once a file is deleted, a new file may get the same number. The
+// change time tells them apart; it moves with every change, so the session
+// refreshes it after its own changes.
+type fileID struct {
+	fi    fs.FileInfo // for os.SameFile: device and inode, or NTFS file ID
+	ctime int64
+}
+
+func identify(fi fs.FileInfo) fileID { return fileID{fi: fi, ctime: ctime(fi)} }
+
+func (id fileID) matches(fi fs.FileInfo) bool {
+	return os.SameFile(id.fi, fi) && id.ctime == ctime(fi)
+}
+
 // Session is one client's view of the table. It is safe for concurrent use.
 type Session struct {
 	t       *Table
@@ -52,7 +75,7 @@ type Session struct {
 
 	mu      sync.Mutex
 	writers map[string][]*WriteHandle // open uploads by final virtual path
-	created map[createdKey]struct{}   // regular files this session created
+	created map[createdKey]fileID     // regular files this session created
 }
 
 // Session starts a session for user with the given grants. Mounts that
@@ -65,18 +88,20 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 		user:    user,
 		byName:  make(map[string]*view, len(grants)),
 		writers: make(map[string][]*WriteHandle),
-		created: make(map[createdKey]struct{}),
+		created: make(map[createdKey]fileID),
 	}
 	var errs []error
+	granted := map[string]bool{}
 	for _, g := range grants {
 		m := t.byName[g.Mount]
 		if m == nil {
 			errs = append(errs, &MountError{Mount: g.Mount, Err: fs.ErrNotExist})
 			continue
 		}
-		if s.byName[m.name] != nil {
+		if granted[m.name] {
 			continue
 		}
+		granted[m.name] = true
 		perm := g.Perm
 		if m.readOnly {
 			perm &= PermReadOnly
@@ -96,7 +121,9 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 		s.byName[m.name] = v
 	}
 	slices.SortFunc(s.views, func(a, b *view) int { return strings.Compare(a.m.name, b.m.name) })
-	s.flatten = t.flatten && len(s.views) == 1
+	// Flatten by what was granted, not by what opened: if a granted home is
+	// unavailable, /home/x must not resolve into the other mount.
+	s.flatten = t.flatten && len(granted) == 1 && len(s.views) == 1
 	return s, errs
 }
 
@@ -341,7 +368,7 @@ func (s *Session) Remove(vp string) error {
 	if fi.IsDir() {
 		return ErrIsDir
 	}
-	if err := v.root.Remove(rel); err != nil {
+	if err := removeEntry(v.root, rel, false); err != nil {
 		return osError(err)
 	}
 	s.forget(v, rel)
@@ -364,7 +391,7 @@ func (s *Session) Rmdir(vp string) error {
 	if !fi.IsDir() {
 		return ErrNotDir
 	}
-	return osError(v.root.Remove(rel))
+	return osError(removeEntry(v.root, rel, true))
 }
 
 // Attrs are the attributes a client may set.
@@ -407,10 +434,17 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 		return ErrDenied
 	case SetstatTimes:
 	}
-	if !v.perm.Has(PermSetstat) && !s.isCreated(v, rel) {
+	own := s.isCreated(v, rel)
+	if !v.perm.Has(PermSetstat) && !own {
 		return ErrDenied
 	}
-	return osError(v.root.Chtimes(rel, a.Atime, a.Mtime))
+	if err := v.root.Chtimes(rel, a.Atime, a.Mtime); err != nil {
+		return osError(err)
+	}
+	if own {
+		s.refreshCreated(v, rel, rel)
+	}
+	return nil
 }
 
 // Rename moves src to dst. With posix set (posix-rename@openssh.com) an
@@ -445,7 +479,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 	err = noClobberRename(sv.root, srel, drel)
 	switch {
 	case err == nil:
-		s.moveCreated(sv, srel, drel, own)
+		s.moveCreated(sv, srel, drel)
 		return s.virtual(sv, drel), nil
 	case !errors.Is(err, fs.ErrExist):
 		return "", osError(err)
@@ -461,7 +495,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 		if err := sv.root.Rename(srel, drel); err != nil {
 			return "", osError(err)
 		}
-		s.moveCreated(sv, srel, drel, own)
+		s.moveCreated(sv, srel, drel)
 		return s.virtual(sv, drel), nil
 	case ConflictReject:
 		return "", ErrConflict
@@ -470,7 +504,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		s.moveCreated(sv, srel, final, own)
+		s.moveCreated(sv, srel, final)
 		return s.virtual(sv, final), nil
 	}
 	return "", fmt.Errorf("unknown conflict policy %q", sv.opts().OnConflict)
@@ -522,8 +556,8 @@ func (s *Session) register(h *WriteHandle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writers[h.virtual] = append(s.writers[h.virtual], h)
-	if h.reserved {
-		s.created[createdKey{h.v, h.rel}] = struct{}{}
+	if h.reserved && h.id != nil {
+		s.created[createdKey{h.v, h.rel}] = identify(h.id)
 	}
 }
 
@@ -550,21 +584,63 @@ func (s *Session) openWriter(vp string) *WriteHandle {
 	return nil
 }
 
+// isCreated reports whether rel is a file this session created and nobody
+// has changed since: an upload of this session still open on it, or a
+// recorded file whose identity still matches.
 func (s *Session) isCreated(v *view, rel string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.created[createdKey{v, rel}]
-	return ok
-}
-
-func (s *Session) moveCreated(v *view, from, to string, own bool) {
-	if !own {
-		return
+	cur, err := v.root.Lstat(rel)
+	if err != nil || !cur.Mode().IsRegular() {
+		return false
 	}
 	s.mu.Lock()
+	id, ok := s.created[createdKey{v, rel}]
+	s.mu.Unlock()
+	if ok && id.matches(cur) {
+		return true
+	}
+	// While the upload is open its inode cannot be reused, so the device
+	// and inode are proof enough.
+	if h := s.openWriter(s.virtual(v, rel)); h != nil && h.reserved && h.v == v {
+		if st, err := h.f.Stat(); err == nil && os.SameFile(st, cur) {
+			return true
+		}
+	}
+	return false
+}
+
+// moveCreated follows a rename: whatever the session created at from is now
+// at to (with a new change time), and to no longer holds an earlier entry.
+func (s *Session) moveCreated(v *view, from, to string) {
+	s.mu.Lock()
+	_, ok := s.created[createdKey{v, from}]
+	delete(s.created, createdKey{v, to})
+	s.mu.Unlock()
+	if ok {
+		s.refreshCreated(v, from, to)
+	}
+}
+
+// refreshCreated re-records the entry for from under to after a change by
+// this session, if the file at to is still the same inode.
+func (s *Session) refreshCreated(v *view, from, to string) {
+	cur, err := v.root.Lstat(to)
+	s.mu.Lock()
 	defer s.mu.Unlock()
+	id, ok := s.created[createdKey{v, from}]
 	delete(s.created, createdKey{v, from})
-	s.created[createdKey{v, to}] = struct{}{}
+	if ok && err == nil && os.SameFile(id.fi, cur) {
+		s.created[createdKey{v, to}] = identify(cur)
+	}
+}
+
+// closedCreated records the final identity of an upload being closed.
+func (s *Session) closedCreated(h *WriteHandle, st fs.FileInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := createdKey{h.v, h.rel}
+	if id, ok := s.created[k]; ok && os.SameFile(id.fi, st) {
+		s.created[k] = identify(st)
+	}
 }
 
 func (s *Session) forget(v *view, rel string) {

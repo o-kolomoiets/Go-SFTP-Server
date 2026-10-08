@@ -179,17 +179,17 @@ max_open_handles = 0
 rename_template = "{stem} copy{ext}"
 
 [mounts.inbox]
-path = "/srv/sftp/inbox"
+path = "{dir}/sftp/inbox"
 setstat_mode = "chmod"
 
 [mounts.Inbox]
-path = "/srv/sftp/inbox/sub"
+path = "{dir}/sftp/inbox/sub"
 
 [mounts.rel]
 path = "relative/path"
 
 [mounts.home]
-path = "/srv/{user}/x"
+path = "{dir}/{user}/x"
 
 [users.Alice]
 authorized_keys = ["<paste alice's key>"]
@@ -239,7 +239,7 @@ func TestValidateMissingVersionAndWarnings(t *testing.T) {
 [server]
 host_keys = ["/k"]
 [mounts.m]
-path = "/srv/m"
+path = "{dir}/m"
 `)
 	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "config_version: missing") {
 		t.Errorf("missing version: %v", err)
@@ -250,7 +250,7 @@ config_version = 1
 [server]
 host_keys = ["/k"]
 [mounts.m]
-path = "/srv/m"
+path = "{dir}/m"
 [users.bob]
 expires = 2001-01-01T00:00:00Z
 `)
@@ -261,7 +261,7 @@ expires = 2001-01-01T00:00:00Z
 		}
 	}
 
-	c, _ = load(t, "config_version = 1\n[server]\nhost_keys = [\"/k\"]\n[mounts.m]\npath = \"/srv/m\"\n")
+	c, _ = load(t, "config_version = 1\n[server]\nhost_keys = [\"/k\"]\n[mounts.m]\npath = \"{dir}/m\"\n")
 	if warns := mustValidate(t, c); len(warns) != 1 || !strings.Contains(warns[0], "no users configured") {
 		t.Errorf("warnings = %q", warns)
 	}
@@ -288,7 +288,7 @@ include = ["users.d/*.toml"]
 [server]
 host_keys = ["/k"]
 [mounts.m]
-path = "/srv/m"
+path = "{dir}/m"
 [users.alice]
 authorized_keys = ["`+key+`"]
 access = { m = "full" }
@@ -328,7 +328,7 @@ config_version = 1
 [server]
 host_keys = ["/k"]
 [mounts.m]
-path = "/srv/m"
+path = "{dir}/m"
 umask = "0077"
 [users.alice]
 authorized_keys = ["`+key+`"]
@@ -494,7 +494,7 @@ config_version = 1
 [server]
 host_keys = ["/k"]
 [mounts.m]
-path = "/srv/m"
+path = "{dir}/m"
 [users.alice]
 authorized_keys = ["`+k1+`"]
 allow_from = ["10.0.0.0/8"]
@@ -578,6 +578,10 @@ func TestExamples(t *testing.T) {
 	for _, full := range []bool{false, true} {
 		dir := t.TempDir()
 		data := string(Example(full))
+		// Absolute Unix paths are not absolute on Windows.
+		for _, prefix := range []string{`"/srv/`, `"/var/`, `"/etc/`} {
+			data = strings.ReplaceAll(data, prefix, `"{dir}`+prefix[1:])
+		}
 		// Replace placeholders with a real key, as a user would.
 		for {
 			i := strings.Index(data, `"<paste`)
@@ -638,4 +642,114 @@ func TestExampleFullCoversEveryKey(t *testing.T) {
 		}
 	}
 	walk(reflect.TypeFor[Config]())
+}
+
+func TestKeysAreCaseSensitive(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, data := range []string{
+		"config_version = 1\n[mounts.m]\npath = \"/a\"\nPATH = \"/b\"\n",
+		"config_version = 1\n[mounts.m]\npath = \"/a\"\nRead_Only = true\n",
+		"config_version = 1\n[Server]\nlisten = [\":22\"]\n",
+		"config_version = 1\n[defaults]\nOn_Conflict = \"reject\"\n",
+	} {
+		_, err := Load(writeConfig(t, dir, data))
+		if err == nil || !strings.Contains(err.Error(), "keys are case-sensitive") {
+			t.Errorf("%q: %v", data, err)
+		}
+	}
+	_, err := Load(writeConfig(t, dir, "config_version = 1\n[Server]\nlisten = [\":22\"]\nhandshake_timeout = \"5s\"\n"))
+	if err == nil || strings.Count(err.Error(), "case-sensitive") != 1 {
+		t.Errorf("keys below a reported table are reported again: %v", err)
+	}
+	// Names (of mounts, users, access entries) keep their case.
+	c, err := Load(writeConfig(t, dir, "config_version = 1\n[mounts.Docs]\npath = \"{dir}/d\"\n[users.a]\naccess = { Docs = \"read\" }\n"))
+	if err != nil || c.Mounts["Docs"] == nil || c.Users["a"].Access["Docs"] != "read" {
+		t.Errorf("names: %+v, %v", c, err)
+	}
+}
+
+func TestIncludeGlob(t *testing.T) {
+	t.Parallel()
+
+	// Glob characters in the configuration directory itself are literal.
+	dir := filepath.Join(t.TempDir(), "sftp[prod]")
+	if err := os.MkdirAll(filepath.Join(dir, "users.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "users.d", "bob.toml"), []byte("[users.bob]\naccess = {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(writeConfig(t, dir, "config_version = 1\ninclude = [\"users.d/*.toml\"]\n"))
+	if err != nil || c.Users["bob"] == nil {
+		t.Errorf("include below a [bracketed] directory: users = %v, %v", c, err)
+	}
+	if _, err := Load(writeConfig(t, dir, "config_version = 1\ninclude = [\"../*.toml\"]\n")); err == nil {
+		t.Error("relative include outside the directory accepted")
+	}
+	abs := filepath.ToSlash(filepath.Join(dir, "users.d", "*.toml"))
+	if c, err := Load(writeConfig(t, t.TempDir(), "config_version = 1\ninclude = [\""+abs+"\"]\n")); err == nil && c.Users["bob"] != nil {
+		t.Log("absolute include patterns are globbed as written")
+	}
+}
+
+func TestValidateEdgeValues(t *testing.T) {
+	t.Parallel()
+
+	base := "config_version = 1\n[mounts.m]\npath = \"{dir}/m\"\n[server]\nhost_keys = [\"k\"]\n"
+	c, _ := load(t, base+"handshake_timeout = \"30ms\"\nshutdown_timeout = \"1ns\"\n")
+	_, err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "server.handshake_timeout") || !strings.Contains(err.Error(), "server.shutdown_timeout") {
+		t.Errorf("sub-second timeouts: %v", err)
+	}
+	c, _ = load(t, base+"[log]\nlevel = \"DEBUG\"\n")
+	if _, err := c.Validate(); err != nil {
+		t.Errorf("upper-case level: %v", err)
+	}
+}
+
+func TestEncodeWithInclude(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "users.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "users.d", "bob.toml"), []byte("[users.bob]\naccess = { m = \"read\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(writeConfig(t, dir, "config_version = 1\ninclude = [\"users.d/*.toml\"]\n[server]\nhost_keys = [\"k\"]\n[mounts.m]\npath = \"{dir}/m\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := c.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := filepath.Join(dir, "shown.toml")
+	if err := os.WriteFile(shown, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(shown)
+	if err != nil || again.Users["bob"] == nil || len(again.Files) != 1 {
+		t.Errorf("shown config with include does not reload: %v\n%s", err, data)
+	}
+}
+
+func TestCheckFSAuditOutput(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	c := Default()
+	c.Audit.Output = dir
+	if _, err := c.CheckFS(); err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Errorf("directory as audit output: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		c.Audit.Output = os.DevNull
+		if _, err := c.CheckFS(); err != nil {
+			t.Errorf("%s as audit output: %v", os.DevNull, err)
+		}
+	}
 }

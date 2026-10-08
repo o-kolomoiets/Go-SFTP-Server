@@ -130,15 +130,9 @@ func (c *Config) checkUsers(p *problems) {
 		}
 		if err := checkOwner(f, fi); err != nil {
 			p.errorf(k, "%v", err)
-			continue
 		}
-		_, warns, err := readAuthorizedKeys(f)
-		if err != nil {
-			p.errorf(k, "%v", err)
-		}
-		for _, w := range warns {
-			p.warnf(k, "skipping %s", w)
-		}
+		// Not parsed here: Authenticator reads each file once, which also
+		// keeps a pipe (--authorized-keys <(...)) usable.
 	}
 }
 
@@ -147,8 +141,8 @@ func (c *Config) checkAudit(p *problems) {
 	if out == "stdout" || out == "" {
 		return
 	}
-	if fi, err := os.Stat(out); err == nil && !fi.Mode().IsRegular() {
-		p.errorf("audit.output", "%s is not a regular file", out)
+	if fi, err := os.Stat(out); err == nil && fi.IsDir() {
+		p.errorf("audit.output", "%s is a directory", out)
 		return
 	}
 	if fi, err := os.Stat(filepath.Dir(out)); err != nil || !fi.IsDir() {

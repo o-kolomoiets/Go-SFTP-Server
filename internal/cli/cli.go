@@ -77,6 +77,10 @@ type configError struct{ err error }
 func (e configError) Error() string { return e.err.Error() }
 func (e configError) Unwrap() error { return e.err }
 
+// showHelp makes a command group runnable, so that noArgs rejects unknown
+// subcommands with exit code 2 instead of cobra printing help with 0.
+func showHelp(cmd *cobra.Command, _ []string) error { return cmd.Help() }
+
 // noArgs rejects positional arguments, including unknown subcommands.
 func noArgs(cmd *cobra.Command, args []string) error {
 	if err := cobra.NoArgs(cmd, args); err != nil {

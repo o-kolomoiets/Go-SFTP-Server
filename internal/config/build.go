@@ -133,12 +133,15 @@ func (c *Config) Grants(user string) []vfs.Grant {
 	return gs
 }
 
-// Encode returns the configuration as TOML, with every default spelled out.
+// Encode returns the configuration as TOML, with every default spelled out
+// and the users of included files merged in (so include is left out).
 func (c *Config) Encode() ([]byte, error) {
 	var b bytes.Buffer
 	enc := toml.NewEncoder(&b)
 	enc.Indent = ""
-	if err := enc.Encode(c); err != nil {
+	out := *c
+	out.Include = nil
+	if err := enc.Encode(&out); err != nil {
 		return nil, err
 	}
 	return b.Bytes(), nil

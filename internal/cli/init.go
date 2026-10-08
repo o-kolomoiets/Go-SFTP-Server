@@ -70,6 +70,7 @@ func runInit(w io.Writer, o initOptions) error {
 	}
 	type mount struct{ name, path string }
 	var mounts []mount
+	seen := map[string]bool{}
 	for _, d := range o.dirs {
 		n, p, ok := strings.Cut(d, "=")
 		if !ok || !vfs.ValidMountName(n) {
@@ -82,6 +83,13 @@ func runInit(w io.Writer, o initOptions) error {
 		if n == "" {
 			n = filepath.Base(abs)
 		}
+		switch {
+		case !vfs.ValidMountName(n):
+			return usageError{fmt.Errorf("--dir %q: %q is not a valid mount name; name it with --dir NAME=PATH (letters, digits, '.', '_', '-', spaces)", d, n)}
+		case seen[strings.ToLower(n)]:
+			return usageError{fmt.Errorf("--dir %q: the mount name %q is used twice; name them with --dir NAME=PATH", d, n)}
+		}
+		seen[strings.ToLower(n)] = true
 		mounts = append(mounts, mount{n, abs})
 	}
 
@@ -120,7 +128,7 @@ func runInit(w io.Writer, o initOptions) error {
 		access = append(access, tomlKey(m.name)+" = \"full\"")
 	}
 	fmt.Fprintf(&b, "\n# Add users with: gosftpd user add NAME --key FILE --access MOUNT=upload\n")
-	fmt.Fprintf(&b, "[users.%s]\n", name)
+	fmt.Fprintf(&b, "[users.%s]\n", tomlKey(name))
 	if keysFile != "" {
 		fmt.Fprintf(&b, "authorized_keys_file = %s\n", tomlString(keysFile))
 	} else {

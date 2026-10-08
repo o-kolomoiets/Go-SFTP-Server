@@ -11,9 +11,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -238,7 +240,7 @@ func Load(path string) (*Config, error) {
 		}
 		c.Mounts[name] = m
 	}
-	if err := unknownKeys(abs, md); err != nil {
+	if err := errors.Join(unknownKeys(abs, md), exactKeys(abs, md, reflect.TypeFor[Config]())); err != nil {
 		return nil, err
 	}
 
@@ -283,6 +285,70 @@ func unknownKeys(file string, md toml.MetaData) error {
 	return errors.Join(errs...)
 }
 
+// exactKeys reports keys that match a field only when case is ignored:
+// BurntSushi/toml accepts PATH for path, but TOML keys are case-sensitive
+// and a second spelling would silently compete with the first. Keys with no
+// match at all are reported by unknownKeys.
+func exactKeys(file string, md toml.MetaData, root reflect.Type) error {
+	var errs []error
+	var reported []toml.Key
+	for _, k := range md.Keys() {
+		if slices.ContainsFunc(reported, func(r toml.Key) bool { return len(r) <= len(k) && slices.Equal(r, k[:len(r)]) }) {
+			continue // a parent table was already reported
+		}
+		t := root
+	walk:
+		for _, part := range k {
+			for t.Kind() == reflect.Pointer {
+				t = t.Elem()
+			}
+			switch {
+			case t.Kind() == reflect.Map:
+				t = t.Elem() // part is a name: a mount, a user, an access entry
+			case t.Kind() == reflect.Struct && t != reflect.TypeFor[time.Time]():
+				f, exact, found := fieldByTag(t, part)
+				if !found {
+					break walk
+				}
+				if !exact {
+					errs = append(errs, fmt.Errorf("%s: unknown key %s (keys are case-sensitive)", file, k))
+					reported = append(reported, k)
+					break walk
+				}
+				t = f.Type
+			default:
+				break walk
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// fieldByTag finds the field whose toml tag is name, looking into embedded
+// structs; exact is false when only a case-insensitive match exists.
+func fieldByTag(t reflect.Type, name string) (f reflect.StructField, exact, found bool) {
+	for sf := range t.Fields() {
+		if sf.Anonymous && sf.Type.Kind() == reflect.Struct {
+			ff, ex, ok := fieldByTag(sf.Type, name)
+			if ok && ex {
+				return ff, true, true
+			}
+			if ok && !found {
+				f, found = ff, true
+			}
+			continue
+		}
+		tag, _, _ := strings.Cut(sf.Tag.Get("toml"), ",")
+		switch {
+		case tag == name:
+			return sf, true, true
+		case strings.EqualFold(tag, name) && !found:
+			f, found = sf, true
+		}
+	}
+	return f, false, found
+}
+
 // resolvePaths makes relative file paths relative to the config directory.
 // Mount paths are not touched: they must be absolute (Validate).
 func (c *Config) resolvePaths(dir string) {
@@ -308,10 +374,7 @@ func (c *Config) resolvePaths(dir string) {
 func (c *Config) loadIncludes(dir string) error {
 	var errs []error
 	for _, pattern := range c.Include {
-		if !filepath.IsAbs(pattern) {
-			pattern = filepath.Join(dir, pattern)
-		}
-		files, err := filepath.Glob(pattern)
+		files, err := globInclude(dir, pattern)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("include %q: %w", pattern, err))
 			continue
@@ -329,6 +392,28 @@ func (c *Config) loadIncludes(dir string) error {
 	return errors.Join(errs...)
 }
 
+// globInclude expands an include pattern. A relative pattern is matched
+// inside dir without treating dir itself as a pattern (it may contain [ or
+// *), and must stay below it.
+func globInclude(dir, pattern string) ([]string, error) {
+	if filepath.IsAbs(pattern) {
+		return filepath.Glob(pattern)
+	}
+	rel := filepath.ToSlash(filepath.Clean(pattern))
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		return nil, errors.New("a relative pattern must stay inside the configuration directory; use an absolute path")
+	}
+	matches, err := fs.Glob(os.DirFS(dir), rel)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, len(matches))
+	for i, m := range matches {
+		files[i] = filepath.Join(dir, filepath.FromSlash(m))
+	}
+	return files, nil
+}
+
 func (c *Config) loadInclude(file string) error {
 	data, err := readFile(file)
 	if err != nil {
@@ -339,7 +424,7 @@ func (c *Config) loadInclude(file string) error {
 	if err != nil {
 		return decodeError(file, err)
 	}
-	if err := unknownKeys(file, md); err != nil {
+	if err := errors.Join(unknownKeys(file, md), exactKeys(file, md, reflect.TypeFor[includeFile]())); err != nil {
 		return fmt.Errorf("%w (an included file may only define [users.NAME] tables)", err)
 	}
 	c.Files = append(c.Files, file)

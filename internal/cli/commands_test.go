@@ -72,8 +72,10 @@ func isolate(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("AppData", filepath.Join(home, "AppData"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "LocalAppData"))
 	t.Setenv(config.EnvConfig, "")
 	t.Setenv(config.EnvListen, "")
 	t.Setenv(config.EnvLogLevel, "")
@@ -222,14 +224,116 @@ func TestConfigValidateErrors(t *testing.T) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}
 	}
+}
 
-	// No configuration at all.
-	t.Chdir(dir)
-	if err := os.Remove(path); err != nil {
+// noSystemConfig skips tests that need the search order to find nothing.
+func noSystemConfig(t *testing.T) {
+	t.Helper()
+	for _, p := range config.SearchPaths() {
+		if filepath.IsAbs(p) && fileExists(p) {
+			t.Skipf("%s exists on this machine", p)
+		}
+	}
+}
+
+func TestNoConfigFound(t *testing.T) {
+	isolate(t)
+	noSystemConfig(t)
+	t.Chdir(t.TempDir())
+	for _, args := range [][]string{{"serve"}, {"config", "validate"}, {"config", "show"}, {"user", "list"}} {
+		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, "gosftpd init") {
+			t.Errorf("%q: exit %d: %s", args, code, stderr)
+		}
+	}
+}
+
+func TestUnknownSubcommands(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{{"config", "validat"}, {"user", "bogus"}, {"hostkey", "bogus"}} {
+		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, "unknown command") {
+			t.Errorf("%q: exit %d: %s", args, code, stderr)
+		}
+	}
+	for _, args := range [][]string{{"config"}, {"user"}, {"hostkey"}} {
+		if code, stdout, _ := execute(t, args...); code != exitOK || !strings.Contains(stdout, "Available Commands") {
+			t.Errorf("%q: exit %d", args, code)
+		}
+	}
+}
+
+func TestDottedUserNames(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	keys := filepath.Join(dir, "keys")
+	key := authorizedKey(newSigner(t))
+	writeFile(t, keys, key+"\n")
+	out := filepath.Join(dir, "gosftpd.toml")
+	if code, _, stderr := execute(t, "init", "--out", out, "--user", "john.doe", "--authorized-keys", keys, "--dir", "data="+filepath.Join(dir, "data")); code != exitOK {
+		t.Fatalf("init: exit %d: %s", code, stderr)
+	}
+	code, stdout, _ := execute(t, "user", "add", "mary.jane", "--key", key, "--access", "data=upload")
+	if code != exitOK {
+		t.Fatalf("user add: exit %d", code)
+	}
+	f, err := os.OpenFile(out, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if code, _, stderr := execute(t, "config", "validate"); code != exitUsage || !strings.Contains(stderr, "gosftpd init") {
-		t.Errorf("no config: exit %d: %s", code, stderr)
+	if _, err := f.WriteString(stdout); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	c, err := config.Load(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Users["john.doe"] == nil || c.Users["mary.jane"] == nil {
+		t.Errorf("users = %v", c.Users)
+	}
+	if code, _, stderr := execute(t, "config", "validate", "--config", out); code != exitOK {
+		t.Errorf("validate: exit %d: %s", code, stderr)
+	}
+}
+
+func TestInitRejectsBadMountNames(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	for _, dirs := range [][]string{
+		{"--dir", filepath.Join(dir, "a", "share"), "--dir", filepath.Join(dir, "b", "share")},
+		{"--dir", "x=" + filepath.Join(dir, "x"), "--dir", "X=" + filepath.Join(dir, "y")},
+		{"--dir", filepath.Join(dir, ".hidden")},
+	} {
+		out := filepath.Join(dir, "gosftpd.toml")
+		args := append([]string{"init", "--out", out, "--user", "u"}, dirs...)
+		if code, _, stderr := execute(t, args...); code != exitUsage {
+			t.Errorf("%q: exit %d: %s", dirs, code, stderr)
+		}
+		if fileExists(out) {
+			t.Errorf("%q: config written", dirs)
+		}
+	}
+}
+
+func TestServeFlagErrorsNameTheFlag(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for flag, args := range map[string][]string{
+		"--on-conflict": {"serve", "--dir", dir, "--on-conflict", "merge"},
+		"--log-level":   {"serve", "--dir", dir, "--log-level", "loud"},
+		"--log-format":  {"serve", "--dir", dir, "--log-format", "xml"},
+	} {
+		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, flag) {
+			t.Errorf("%s: exit %d: %s", flag, code, stderr)
+		}
+	}
+	home := filepath.Join(dir, "{user}")
+	if err := os.Mkdir(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := execute(t, "serve", "--dir", home); code != exitUsage || !strings.Contains(stderr, "need a configuration file") {
+		t.Errorf("--dir {user}: exit %d: %s", code, stderr)
 	}
 }
 
@@ -237,7 +341,7 @@ func TestConfigShowAndExample(t *testing.T) {
 	isolate(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gosftpd.toml")
-	writeFile(t, path, "config_version = 1\n[server]\nhost_keys = [\"/k\"]\n[mounts.m]\npath = \"/srv/m\"\n")
+	writeFile(t, path, "config_version = 1\n[server]\nhost_keys = [\"k\"]\n[mounts.m]\npath = \""+filepath.ToSlash(filepath.Join(dir, "m"))+"\"\n")
 	t.Setenv(config.EnvListen, "127.0.0.1:2222")
 
 	code, stdout, stderr := execute(t, "config", "show", "--config", path)

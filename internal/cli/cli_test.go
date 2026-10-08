@@ -90,7 +90,6 @@ func TestServeUsageErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
-		{"serve"},
 		{"serve", "--dir", dir, "--on-conflict", "version"},
 		{"serve", "--dir", dir, "--log-level", "loud"},
 		{"serve", "--dir", dir, "--log-format", "xml"},

@@ -383,3 +383,157 @@ func TestValidMountName(t *testing.T) {
 		}
 	}
 }
+
+// Review finding: an aborted empty upload must not delete a file that
+// another user put at its path after this session renamed its own file away.
+func TestAbortedUploadKeepsOthersFile(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions())
+	inbox := filepath.Join(base, "inbox")
+	attacker := session(t, tbl, "attacker", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	partner := session(t, tbl, "partner", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+
+	h, err := attacker.OpenWrite("/report.csv", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attacker.Rename("/report.csv", "/junk", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload(t, partner, "/report.csv", put, "partner's data"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(true); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(inbox, "report.csv")); got != "partner's data" {
+		t.Errorf("partner's file = %q", got)
+	}
+}
+
+// Review finding: with the overwrite policy another user may write into the
+// file an aborted upload created; it must survive.
+func TestAbortedUploadKeepsDataWrittenByOthers(t *testing.T) {
+	t.Parallel()
+
+	opts := DefaultMountOptions()
+	opts.OnConflict = ConflictOverwrite
+	tbl, base := permFixture(t, opts)
+	alice := session(t, tbl, "alice", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	bob := session(t, tbl, "bob", []Grant{{Mount: "inbox", Perm: PermAll}})
+
+	h, err := alice.OpenWrite("/new.csv", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload(t, bob, "/new.csv", put, "bob's data"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(true); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(base, "inbox", "new.csv")); got != "bob's data" {
+		t.Errorf("bob's file = %q", got)
+	}
+}
+
+// Review finding: "created by this session" follows the file, not the path.
+func TestCreatedIsTiedToTheFile(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions())
+	a := session(t, tbl, "a", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	b := session(t, tbl, "b", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	c := session(t, tbl, "c", []Grant{{Mount: "inbox", Perm: PermAll}})
+
+	if _, err := upload(t, a, "/export.csv", put, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Remove("/export.csv"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload(t, b, "/export.csv", put, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Rename("/export.csv", "/hidden.csv", true); !errors.Is(err, ErrDenied) {
+		t.Errorf("rename of another user's file at an own path: %v", err)
+	}
+	when := time.Now().Add(-time.Hour)
+	if err := a.Setstat("/export.csv", Attrs{Atime: when, Mtime: when, HasTimes: true}); !errors.Is(err, ErrDenied) {
+		t.Errorf("setstat of another user's file at an own path: %v", err)
+	}
+	if got := readFile(t, filepath.Join(base, "inbox", "export.csv")); got != "b" {
+		t.Errorf("export.csv = %q", got)
+	}
+}
+
+// Review finding: a granted home that is unavailable must not flatten the
+// remaining mount, or /home/x would land in the shared one.
+func TestUnavailableMountKeepsLayout(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	mustWrite(t, filepath.Join(base, "share", "a.txt"), "a")
+	if err := os.MkdirAll(filepath.Join(base, "homes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := Open([]MountSpec{
+		spec("share", filepath.Join(base, "share"), ConflictRename),
+		spec("home", filepath.Join(base, "homes", UserPlaceholder), ConflictRename),
+	}, Options{Flatten: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tbl.Close()
+	s, errs := tbl.Session("alice", []Grant{{Mount: "share", Perm: PermAll}, {Mount: "home", Perm: PermAll}})
+	defer s.Close()
+	if len(errs) != 1 || s.flatten {
+		t.Fatalf("errs = %v, flatten = %v", errs, s.flatten)
+	}
+	if _, err := s.OpenWrite("/home/private.txt", put); err == nil {
+		t.Error("upload to the unavailable home succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(base, "share", "home")); err == nil {
+		t.Error("upload landed in the shared mount")
+	}
+	if _, err := s.Stat("/share/a.txt"); err != nil {
+		t.Errorf("share: %v", err)
+	}
+}
+
+// Review finding: removal enforces the entry type itself.
+func TestRemoveEntryEnforcesType(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("no unlinkat")
+	}
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "f"), "x")
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := removeEntry(root, "f", true); err == nil {
+		t.Error("rmdir removed a file")
+	}
+	if err := removeEntry(root, "d", false); err == nil {
+		t.Error("remove removed a directory")
+	}
+	for _, name := range []string{"f", "d"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if err := removeEntry(root, "f", false); err != nil {
+		t.Errorf("remove file: %v", err)
+	}
+	if err := removeEntry(root, "d", true); err != nil {
+		t.Errorf("remove dir: %v", err)
+	}
+}

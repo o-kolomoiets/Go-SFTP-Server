@@ -16,6 +16,7 @@ func newConfigCmd() *cobra.Command {
 		Use:   "config",
 		Short: "Check, show and create configuration files",
 		Args:  noArgs,
+		RunE:  showHelp,
 	}
 	cmd.AddCommand(newConfigValidateCmd(), newConfigShowCmd(), newConfigExampleCmd())
 	return cmd
@@ -43,6 +44,14 @@ serve does at startup.`,
 			}
 			applyEnv(c, os.Getenv)
 			warns, err := checkConfig(c, checkFS)
+			if err == nil && checkFS {
+				var keyWarns []string
+				_, keyWarns, err = c.Authenticator()
+				warns = append(warns, keyWarns...)
+				if err != nil {
+					err = configError{err}
+				}
+			}
 			for _, w := range warns {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
 			}

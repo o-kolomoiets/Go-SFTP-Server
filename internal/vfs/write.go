@@ -38,7 +38,8 @@ type WriteHandle struct {
 	f         *os.File
 	virtual   string // final client path
 	conflict  string
-	reserved  bool // the file was created by this upload
+	reserved  bool        // the file was created by this upload
+	id        fs.FileInfo // identity of the created file
 	written   atomic.Int64
 	closeOnce sync.Once
 	closeErr  error
@@ -63,15 +64,42 @@ func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
 
 func (h *WriteHandle) truncate(size int64) error { return osError(h.f.Truncate(size)) }
 
+// removeIfUnused deletes the file this upload created, if it is still empty
+// and still at its path: the session may have renamed it, and another user
+// may have put a file there or written into it since.
+func (h *WriteHandle) removeIfUnused() bool {
+	cur, err := h.f.Stat()
+	if err != nil || cur.Size() != 0 || h.id == nil || !os.SameFile(cur, h.id) {
+		return false
+	}
+	onDisk, err := h.v.root.Lstat(h.rel)
+	if err != nil || !os.SameFile(cur, onDisk) {
+		return false
+	}
+	return removeEntry(h.v.root, h.rel, false) == nil
+}
+
+// reservedHandle returns a handle for a file this upload just created.
+func reservedHandle(rel string, f *os.File, conflict string) (*WriteHandle, error) {
+	id, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, osError(err)
+	}
+	return &WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true, id: id}, nil
+}
+
 // Close finishes the upload. When aborted (the connection broke) and no byte
 // was written to a file this upload created, the empty file is removed.
 func (h *WriteHandle) Close(aborted bool) error {
 	h.closeOnce.Do(func() {
-		h.closeErr = osError(h.f.Close())
-		removed := false
-		if aborted && h.reserved && h.written.Load() == 0 {
-			removed = h.v.root.Remove(h.rel) == nil
+		removed := aborted && h.reserved && h.written.Load() == 0 && h.removeIfUnused()
+		if h.reserved && !removed {
+			if st, err := h.f.Stat(); err == nil {
+				h.s.closedCreated(h, st)
+			}
 		}
+		h.closeErr = osError(h.f.Close())
 		h.s.unregister(h, removed)
 	})
 	return h.closeErr
@@ -128,7 +156,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 			// Lost a race, or rel is a dangling symlink: do not follow it.
 			return nil, osError(err)
 		}
-		return &WriteHandle{rel: rel, f: f, conflict: ConflictNone, reserved: true}, nil
+		return reservedHandle(rel, f, ConflictNone)
 	case err != nil:
 		return nil, osError(err)
 	case fi.IsDir():
@@ -174,7 +202,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		if err != nil {
 			return nil, err
 		}
-		return &WriteHandle{rel: final, f: f, conflict: ConflictRenamed, reserved: true}, nil
+		return reservedHandle(final, f, ConflictRenamed)
 	}
 	return nil, fmt.Errorf("unknown conflict policy %q", opts.OnConflict)
 }
