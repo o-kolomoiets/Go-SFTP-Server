@@ -703,21 +703,32 @@ func (s *Session) redirected(vp string) string {
 	return r.final
 }
 
+// redirectFor returns the live redirect target of a requested path.
+func (s *Session) redirectFor(p string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.redirects[p]
+	if !ok || s.now().After(r.until) {
+		return "", false
+	}
+	return r.final, true
+}
+
 func (s *Session) setRedirect(requested, final string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
-	if len(s.redirects) >= maxRedirects {
+	if _, ok := s.redirects[requested]; !ok && len(s.redirects) >= maxRedirects {
+		// The newest redirect is the one a client is about to check: make
+		// room by dropping the one that expires first.
+		oldest := ""
 		for k, r := range s.redirects {
-			if now.After(r.until) {
-				delete(s.redirects, k)
+			if oldest == "" || r.until.Before(s.redirects[oldest].until) {
+				oldest = k
 			}
 		}
-		if len(s.redirects) >= maxRedirects {
-			return
-		}
+		delete(s.redirects, oldest)
 	}
-	s.redirects[requested] = redirect{final: final, until: now.Add(RedirectTTL)}
+	s.redirects[requested] = redirect{final: final, until: s.now().Add(RedirectTTL)}
 }
 
 func (s *Session) clearRedirect(p string) {

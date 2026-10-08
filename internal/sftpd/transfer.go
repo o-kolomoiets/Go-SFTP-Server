@@ -75,12 +75,16 @@ type writer struct {
 
 	mu      sync.Mutex
 	aborted bool
+	denied  atomic.Bool // a write was refused (append-only guard)
 	once    sync.Once
 }
 
 func (w *writer) WriteAt(p []byte, off int64) (int, error) {
 	n, err := w.wh.WriteAt(p, off)
 	if err != nil {
+		if errors.Is(err, vfs.ErrImmutable) && !w.denied.Swap(true) {
+			return n, w.h.fail("fs.upload", w.wh.Path(), err) // one fs.denied per upload
+		}
 		w.h.log.Debug("write failed", "path", w.wh.Path(), "err", err)
 		_, st := toStatus(err)
 		return n, st
@@ -106,6 +110,8 @@ func (w *writer) Close() error {
 		switch {
 		case aborted:
 			result = "aborted"
+		case w.denied.Load():
+			result = "denied"
 		case err != nil:
 			result = "error"
 		}

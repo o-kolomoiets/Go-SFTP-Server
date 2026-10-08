@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -280,6 +281,11 @@ type Table struct {
 	byName  map[string]*Mount
 	flatten bool
 	started time.Time
+
+	// Open uploads of all sessions, to refuse a second writer on a file
+	// (ROADMAP §6.2: existing data must not change behind an upload).
+	wmu     sync.Mutex
+	writing []*WriteHandle
 }
 
 // Open validates specs and opens an os.Root for every mount.

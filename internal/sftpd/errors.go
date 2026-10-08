@@ -57,6 +57,7 @@ var statusMap = []struct {
 	{vfs.ErrConflict, sftp.ErrSSHFxFailure, "file exists (on_conflict=reject)", "denied"},
 	{vfs.ErrExists, sftp.ErrSSHFxFailure, "file already exists", "error"},
 	{vfs.ErrImmutable, sftp.ErrSSHFxPermissionDenied, "existing data is immutable", "denied"},
+	{vfs.ErrBusy, sftp.ErrSSHFxFailure, "file is busy: another upload is writing it", "denied"},
 	{vfs.ErrResumeDisabled, sftp.ErrSSHFxFailure, "resume is disabled", "denied"},
 	{vfs.ErrIsDir, sftp.ErrSSHFxFailure, "is a directory", "error"},
 	{vfs.ErrNotDir, sftp.ErrSSHFxFailure, "not a directory", "error"},

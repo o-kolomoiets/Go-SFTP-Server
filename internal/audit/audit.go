@@ -146,13 +146,12 @@ func (l *Logger) Event(event string, attrs ...slog.Attr) {
 	if !l.Enabled(event) {
 		return
 	}
-	args := make([]any, 0, 4+len(attrs))
-	args = append(args, "schema", Schema, "event", event)
-	for _, a := range attrs {
-		args = append(args, a)
-	}
-	l.l.Log(context.Background(), slog.LevelInfo, "audit", args...)
-	if l.sink.failed.Load() {
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "audit", 0)
+	r.AddAttrs(slog.Int("schema", Schema), slog.String("event", event))
+	r.AddAttrs(attrs...)
+	// The handler returns this event's own write error; the shared failure
+	// flag may already have been cleared by another event's write.
+	if err := l.l.Handler().Handle(context.Background(), r); err != nil {
 		args := append(append([]any(nil), l.attrs...), slog.String("event", event))
 		for _, a := range attrs {
 			args = append(args, a)

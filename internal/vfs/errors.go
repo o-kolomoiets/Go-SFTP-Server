@@ -18,6 +18,7 @@ var (
 	ErrConflict       = errors.New("file exists and on_conflict=reject")
 	ErrResumeDisabled = errors.New("resume is disabled")
 	ErrImmutable      = errors.New("existing data is immutable")
+	ErrBusy           = errors.New("file is being written by another upload")
 	ErrUnsupported    = errors.New("operation not supported")
 	ErrNotRegular     = errors.New("not a regular file")
 	ErrIsDir          = errors.New("is a directory")

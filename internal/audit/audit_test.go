@@ -191,3 +191,63 @@ func TestFailOpen(t *testing.T) {
 		t.Error("events still go to the fallback log after recovery")
 	}
 }
+
+// failOn fails writes that contain a marker and accepts all others.
+type failOn struct {
+	mu     sync.Mutex
+	marker string
+	b      bytes.Buffer
+}
+
+func (f *failOn) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if bytes.Contains(p, []byte(f.marker)) {
+		return 0, syscall.EIO
+	}
+	return f.b.Write(p)
+}
+
+// Review finding: in fail-open mode an event whose own write failed goes to
+// the fallback log even if another write succeeded in between.
+func TestFailOpenFallbackPerEvent(t *testing.T) {
+	t.Parallel()
+
+	w := &failOn{marker: "/lost"}
+	var fallback bytes.Buffer
+	var mu sync.Mutex
+	l, err := NewWithOptions(w, slog.New(slog.NewTextHandler(lockedWriter{&mu, &fallback}, nil)), Options{FailOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Go(func() {
+			p := "/ok"
+			if i%5 == 0 {
+				p = "/lost"
+			}
+			l.Event("fs.remove", slog.String("path", p))
+		})
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if n := strings.Count(fallback.String(), "/lost"); n != 10 {
+		t.Errorf("%d of 10 failed events reached the fallback log", n)
+	}
+	if strings.Contains(fallback.String(), "/ok") {
+		t.Error("persisted events were also sent to the fallback log")
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}

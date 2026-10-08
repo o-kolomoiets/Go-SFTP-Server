@@ -40,7 +40,14 @@ Incompatible changes are prefixed with **BREAKING:**.
   append-only guard: the bytes a file had when it was opened cannot be
   changed or truncated (`resume = "append-only"`, the default, or `"off"`).
   With `on_conflict = "overwrite"` and the `overwrite` permission a resume
-  is a plain write. `fs.upload` records `start_offset`.
+  without `APPEND` is a plain write; with `APPEND` the old end is always
+  kept (offsets are used as sent, so a client that appends at offset 0 gets
+  "existing data is immutable"). `fs.upload` records `start_offset`; a
+  refused write is audited as `fs.denied` and the upload as `denied`.
+  After a renamed `put`, a `reput` of the same name in the same session
+  continues the copy.
+- A file that an upload has open cannot be opened for writing in place by
+  another upload (overwrite or resume) until it is closed: "file is busy".
 - `stat_redirect` (default on): after an upload or rename went to a new name
   under the rename policy, STAT, LSTAT and SETSTAT of the requested name in
   the same session answer for the new one for 60 seconds, so paramiko

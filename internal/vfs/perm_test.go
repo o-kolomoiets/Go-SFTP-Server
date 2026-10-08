@@ -429,10 +429,14 @@ func TestAbortedUploadKeepsDataWrittenByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := upload(t, bob, "/new.csv", put, "bob's data"); err != nil {
-		t.Fatal(err)
+	// While alice's upload is open nobody else may write the file in place.
+	if _, err := bob.OpenWrite("/new.csv", put); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second writer: %v", err)
 	}
 	if err := h.Close(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload(t, bob, "/new.csv", put, "bob's data"); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, filepath.Join(base, "inbox", "new.csv")); got != "bob's data" {

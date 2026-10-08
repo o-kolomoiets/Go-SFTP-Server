@@ -42,6 +42,13 @@ func TestResumeThroughClient(t *testing.T) {
 		t.Errorf("resumed file differs (%d bytes)", len(got))
 	}
 	waitFor(t, func() bool { return strings.Contains(e.auditLog.String(), `"start_offset":20000`) })
+	log := e.auditLog.String()
+	if !strings.Contains(log, `"event":"fs.denied","op":"fs.upload","path":"/part.bin","reason":"existing data is immutable"`) {
+		t.Errorf("refused write not audited:\n%s", log)
+	}
+	if !strings.Contains(log, `"start_offset":20000,"duration_ms"`) || !strings.Contains(log, `"result":"denied"`) {
+		t.Errorf("upload with a refused write not marked denied:\n%s", log)
+	}
 }
 
 // paramiko put(confirm=True) stats the target after the upload; with the

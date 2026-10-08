@@ -120,6 +120,7 @@ C="$WORK/cfg"
 mkdir -p "$C/public" "$C/inbox" "$C/state"
 printf 'public file\n' >"$C/public/readme.txt"
 printf 'existing report\n' >"$C/inbox/report.txt"
+printf 'existing document\n' >"$C/inbox/doc.bin"
 for u in reader partner admin; do ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$WORK/id_$u"; done
 PORT=$((20000 + RANDOM % 20000))
 cat >"$C/gosftpd.toml" <<TOML
@@ -193,6 +194,8 @@ put $WORK/local/short.txt report.txt
 -rm report.txt
 put $WORK/local/half.bin part.bin
 reput $WORK/local/upload.bin part.bin
+put $WORK/local/half.bin doc.bin
+reput $WORK/local/upload.bin doc.bin
 df -h
 ls -l
 BATCH
@@ -203,6 +206,8 @@ grep -q 'existing report' "$C/inbox/report.txt" && cmp -s "$WORK/local/short.txt
 	pass "partner: conflict kept the original" || fail "partner: conflict"
 [ ! -e "$C/report.got" ] && [ -e "$C/inbox/report.txt" ] && pass "partner: download and delete denied" || fail "partner: read or delete allowed"
 cmp -s "$WORK/local/upload.bin" "$C/inbox/part.bin" && pass "partner: reput completes a partial upload" || fail "partner: reput result differs"
+cmp -s "$WORK/local/upload.bin" "$C/inbox/doc (1).bin" && grep -qx 'existing document' "$C/inbox/doc.bin" &&
+	pass "partner: reput after a renamed put completes the copy" || fail "partner: reput after a renamed put: $(ls -l "$C/inbox")"
 grep -q 'Avail' "$C/partner.out" && pass "df -h works (statvfs)" || fail "df -h: $(grep -A2 'df -h' "$C/partner.out")"
 grep -Eq ' partner +partner ' "$C/partner.out" && ! grep -q " $(id -un) " "$C/partner.out" &&
 	pass "ls -l shows virtual owners" || fail "ls -l owners: $(grep -A3 'ls -l' "$C/partner.out")"

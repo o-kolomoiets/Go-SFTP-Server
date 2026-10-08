@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ type WriteHandle struct {
 	conflict  string
 	reserved  bool        // the file was created by this upload
 	id        fs.FileInfo // identity of the created file
+	ino       fs.FileInfo // the open file, for the table's writer registry
 	guarded   bool        // append-only resume: bytes below minOffset are immutable
 	minOffset int64
 	written   atomic.Int64
@@ -97,14 +99,50 @@ func (h *WriteHandle) removeIfUnused() bool {
 	return removeEntry(h.v.root, h.rel, false) == nil
 }
 
-// reservedHandle returns a handle for a file this upload just created.
-func reservedHandle(rel string, f *os.File, conflict string) (*WriteHandle, error) {
-	id, err := f.Stat()
+// claim registers h as the only writer of its file. A file another upload
+// (of any session) has open cannot be opened in place: the new writer would
+// change bytes the other one wrote, behind its back.
+func (t *Table) claim(h *WriteHandle) error {
+	ino, err := h.f.Stat()
 	if err != nil {
-		_ = f.Close()
-		return nil, osError(err)
+		return osError(err)
 	}
-	return &WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true, id: id}, nil
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	for _, w := range t.writing {
+		if os.SameFile(w.ino, ino) {
+			return ErrBusy
+		}
+	}
+	h.ino = ino
+	t.writing = append(t.writing, h)
+	return nil
+}
+
+func (t *Table) release(h *WriteHandle) {
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	t.writing = slices.DeleteFunc(t.writing, func(w *WriteHandle) bool { return w == h })
+}
+
+// openedHandle claims the file of a new handle; on failure the file is
+// closed.
+func (s *Session) openedHandle(h *WriteHandle) (*WriteHandle, error) {
+	if err := s.t.claim(h); err != nil {
+		_ = h.f.Close()
+		return nil, err
+	}
+	return h, nil
+}
+
+// reservedHandle returns a handle for a file this upload just created.
+func (s *Session) reservedHandle(rel string, f *os.File, conflict string) (*WriteHandle, error) {
+	h, err := s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true})
+	if err != nil {
+		return nil, err
+	}
+	h.id = h.ino
+	return h, nil
 }
 
 // Close finishes the upload. When aborted (the connection broke) and no byte
@@ -117,6 +155,7 @@ func (h *WriteHandle) Close(aborted bool) error {
 				h.s.closedCreated(h, st)
 			}
 		}
+		h.s.t.release(h)
 		h.closeErr = osError(h.f.Close())
 		h.s.unregister(h, removed)
 	})
@@ -149,7 +188,16 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	}
 
 	requested := s.virtual(v, rel)
-	s.clearRedirect(requested)
+	if final, ok := s.redirectFor(requested); ok && isResume(fl) {
+		// OpenSSH reput stats the name first and resumes at the size it
+		// got: through the redirect, the size of this session's copy. The
+		// resume must go to that copy too, never to the original.
+		if fv, frel, err := s.resolve(final); err == nil && fv == v {
+			rel = frel
+		}
+	} else {
+		s.clearRedirect(requested)
+	}
 	h, err := s.openWrite(v, rel, fl)
 	if err != nil {
 		return nil, err
@@ -179,7 +227,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 			// Lost a race, or rel is a dangling symlink: do not follow it.
 			return nil, osError(err)
 		}
-		return reservedHandle(rel, f, ConflictNone)
+		return s.reservedHandle(rel, f, ConflictNone)
 	case err != nil:
 		return nil, osError(err)
 	case fi.IsDir():
@@ -188,8 +236,8 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		return nil, ErrNotRegular
 	case fl.Excl:
 		return nil, ErrExists
-	case fl.Append || (!fl.Creat && !fl.Trunc):
-		return s.openResume(v, rel)
+	case isResume(fl):
+		return s.openResume(v, rel, fl.Append)
 	}
 
 	switch opts.OnConflict {
@@ -199,11 +247,8 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		if !v.perm.Has(PermOverwrite) {
 			return nil, ErrDenied
 		}
-		flags := os.O_WRONLY | oNonblock
-		if fl.Trunc {
-			flags |= os.O_TRUNC
-		}
-		f, err := v.root.OpenFile(rel, flags, 0)
+		// Not O_TRUNC: truncate only once this is the file's only writer.
+		f, err := v.root.OpenFile(rel, os.O_WRONLY|oNonblock, 0)
 		if err != nil {
 			return nil, osError(err)
 		}
@@ -211,7 +256,18 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 			_ = f.Close()
 			return nil, err
 		}
-		return &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, nil
+		h, err := s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
+		if err != nil {
+			return nil, err
+		}
+		if fl.Trunc {
+			if err := f.Truncate(0); err != nil {
+				s.t.release(h)
+				_ = f.Close()
+				return nil, osError(err)
+			}
+		}
+		return h, nil
 	case ConflictRename:
 		if !v.perm.Has(PermWrite) {
 			return nil, ErrDenied
@@ -225,19 +281,29 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		if err != nil {
 			return nil, err
 		}
-		return reservedHandle(final, f, ConflictRenamed)
+		return s.reservedHandle(final, f, ConflictRenamed)
 	}
 	return nil, fmt.Errorf("unknown conflict policy %q", opts.OnConflict)
 }
 
+// isResume reports whether open flags continue an existing file: APPEND, or
+// WRITE without CREAT and TRUNC (ROADMAP §6.2 rows 4 and 5).
+func isResume(fl OpenFlags) bool { return fl.Append || (!fl.Creat && !fl.Trunc) }
+
 // openResume opens an existing file to continue an upload (OpenSSH reput,
 // paramiko mode "a", Cyberduck). It may not go to another name: the client
-// writes at the offset where it stopped. With the overwrite policy and the
-// overwrite permission it is a plain write; otherwise, unless resume is
-// off, the append-only guard keeps the existing bytes unchanged.
-func (s *Session) openResume(v *view, rel string) (*WriteHandle, error) {
+// writes at the offset where it stopped. Unless resume is off, the
+// append-only guard keeps the existing bytes unchanged; only WRITE without
+// APPEND, with the overwrite policy and the overwrite permission, is a plain
+// write.
+//
+// Offsets are used as sent, also with APPEND: requests are served in
+// parallel, so "write at the end" would reorder pipelined writes (OpenSSH
+// reput sends correct offsets). A client that sends offset 0 for APPEND
+// gets "existing data is immutable" instead of overwriting the file.
+func (s *Session) openResume(v *view, rel string, appendOnly bool) (*WriteHandle, error) {
 	opts := v.opts()
-	plain := opts.OnConflict == ConflictOverwrite && v.perm.Has(PermOverwrite)
+	plain := !appendOnly && opts.OnConflict == ConflictOverwrite && v.perm.Has(PermOverwrite)
 	switch {
 	case plain:
 	case opts.Resume == ResumeOff:
@@ -259,9 +325,21 @@ func (s *Session) openResume(v *view, rel string) (*WriteHandle, error) {
 		return nil, ErrNotRegular
 	}
 	if plain {
-		return &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, nil
+		return s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
 	}
-	return &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true, minOffset: fi.Size()}, nil
+	h, err := s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true})
+	if err != nil {
+		return nil, err
+	}
+	// The size once this is the only writer: nothing below it can change.
+	st, err := f.Stat()
+	if err != nil {
+		s.t.release(h)
+		_ = f.Close()
+		return nil, osError(err)
+	}
+	h.minOffset = st.Size()
+	return h, nil
 }
 
 // freeName tries the rename template with n = 1 … MaxRenameAttempts next to

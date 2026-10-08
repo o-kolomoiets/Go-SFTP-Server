@@ -16,12 +16,12 @@ func statfs(d *os.File) (*StatFS, error) {
 	if err := unix.Fstatfs(int(d.Fd()), &st); err != nil {
 		return nil, &os.PathError{Op: "fstatfs", Path: ".", Err: err}
 	}
-	frsize := uint64(st.Frsize) //nolint:gosec // G115: a block size is positive
+	frsize := nonNegative(st.Frsize)
 	if frsize == 0 {
-		frsize = uint64(st.Bsize) //nolint:gosec // G115: a block size is positive
+		frsize = nonNegative(st.Bsize)
 	}
 	return &StatFS{
-		BlockSize:    uint64(st.Bsize), //nolint:gosec // G115: a block size is positive
+		BlockSize:    nonNegative(st.Bsize),
 		FragmentSize: frsize,
 		Blocks:       st.Blocks,
 		BlocksFree:   st.Bfree,

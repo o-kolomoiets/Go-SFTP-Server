@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,13 +71,14 @@ func TestResumeModes(t *testing.T) {
 		t.Errorf("read preset: %v", err)
 	}
 
-	// Overwrite policy: a plain write with the overwrite permission, the
-	// append-only guard without it.
+	// Overwrite policy: WRITE without APPEND is a plain write with the
+	// overwrite permission; APPEND never writes below the old end, so a
+	// client that sends offset 0 for an append cannot clobber the file.
 	ow := DefaultMountOptions()
 	ow.OnConflict = ConflictOverwrite
 	tbl, _ = permFixture(t, ow)
 	full := session(t, tbl, "f", []Grant{{Mount: "inbox", Perm: PermAll}})
-	h, err := full.OpenWrite("/a.txt", reput)
+	h, err := full.OpenWrite("/a.txt", writeOff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +87,14 @@ func TestResumeModes(t *testing.T) {
 	}
 	if _, err := h.WriteAt([]byte("O"), 0); err != nil {
 		t.Errorf("plain write: %v", err)
+	}
+	_ = h.Close(false)
+	h, err = full.OpenWrite("/a.txt", OpenFlags{Write: true, Append: true, Creat: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.WriteAt([]byte("XY"), 0); !errors.Is(err, ErrImmutable) {
+		t.Errorf("APPEND at offset 0 with overwrite: %v", err)
 	}
 	_ = h.Close(false)
 	up := session(t, tbl, "p", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
@@ -266,5 +276,127 @@ func TestStatFS(t *testing.T) {
 	none := session(t, tbl, "n", []Grant{{Mount: "inbox", Perm: PermWrite}})
 	if _, err := none.StatFS("/"); !errors.Is(err, ErrDenied) && runtime.GOOS != "windows" {
 		t.Errorf("without list: %v", err)
+	}
+}
+
+// Review finding: a resume may not run alongside another upload of the same
+// file, or it could overwrite what that upload adds after the resume opened.
+func TestSecondWriterRefused(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions())
+	alice := session(t, tbl, "alice", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	mallory := session(t, tbl, "mallory", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+
+	h, err := alice.OpenWrite("/big.bin", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.WriteAt([]byte("AAAA"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mallory.OpenWrite("/big.bin", writeOff); !errors.Is(err, ErrBusy) {
+		t.Fatalf("resume during another upload: %v", err)
+	}
+	if _, err := h.WriteAt([]byte("BBBBBBBB"), 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	// Afterwards a resume may only append.
+	m, err := mallory.OpenWrite("/big.bin", writeOff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off, _ := m.StartOffset(); off != 12 {
+		t.Errorf("start offset %d", off)
+	}
+	if _, err := m.WriteAt([]byte("XX"), 6); !errors.Is(err, ErrImmutable) {
+		t.Errorf("write inside: %v", err)
+	}
+	if err := mallory.Setstat("/big.bin", Attrs{Size: 4, HasSize: true}); !errors.Is(err, ErrImmutable) {
+		t.Errorf("truncate: %v", err)
+	}
+	_ = m.Close(false)
+	if got := readFile(t, filepath.Join(base, "inbox", "big.bin")); got != "AAAABBBBBBBB" {
+		t.Errorf("big.bin = %q", got)
+	}
+}
+
+// Review finding: with the overwrite policy, a held upload handle and an
+// overwrite of the same file cannot run at once either.
+func TestOverwriteWhileUploadOpen(t *testing.T) {
+	t.Parallel()
+
+	opts := DefaultMountOptions()
+	opts.OnConflict = ConflictOverwrite
+	tbl, _ := permFixture(t, opts)
+	mallory := session(t, tbl, "mallory", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	alice := session(t, tbl, "alice", []Grant{{Mount: "inbox", Perm: mustPerm(t, "readwrite")}})
+	h, err := mallory.OpenWrite("/r.pdf", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close(false)
+	if _, err := alice.OpenWrite("/r.pdf", put); !errors.Is(err, ErrBusy) {
+		t.Errorf("overwrite of a file being uploaded: %v", err)
+	}
+}
+
+// Review finding: reput after a renamed put in the same session continues
+// the copy (whose size the redirected STAT reported), not the original.
+func TestReputAfterRenamedPut(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	if _, err := upload(t, s, "/a.txt", put, "0123456789"); err != nil { // -> "a (1).txt", interrupted
+		t.Fatal(err)
+	}
+	fi, err := s.Stat("/a.txt")
+	if err != nil || fi.Size() != 10 {
+		t.Fatalf("redirected Stat = %v, %v", fi, err)
+	}
+	h, err := s.OpenWrite("/a.txt", reput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off, _ := h.StartOffset(); h.Path() != "/a (1).txt" || off != 10 {
+		t.Errorf("resume went to %q at %d", h.Path(), off)
+	}
+	if _, err := h.WriteAt([]byte("ABCDEF"), fi.Size()); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close(false)
+	if got := readFile(t, filepath.Join(base, "inbox", "a.txt")); got != "original" {
+		t.Errorf("original changed: %q", got)
+	}
+	if got := readFile(t, filepath.Join(base, "inbox", "a (1).txt")); got != "0123456789ABCDEF" {
+		t.Errorf("copy = %q", got)
+	}
+}
+
+// Review finding: a full redirect table drops the oldest entry, not the new.
+func TestRedirectTableFull(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions())
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: PermAll}})
+	base := time.Now()
+	for i := range maxRedirects {
+		s.now = func() time.Time { return base.Add(time.Duration(i) * time.Millisecond) }
+		s.setRedirect(fmt.Sprintf("/f%d", i), fmt.Sprintf("/f%d (1)", i))
+	}
+	s.now = func() time.Time { return base.Add(time.Second) }
+	s.setRedirect("/a.txt", "/a (1).txt")
+	if got := s.redirected("/a.txt"); got != "/a (1).txt" {
+		t.Errorf("new redirect dropped: %q", got)
+	}
+	if got := s.redirected("/f0"); got != "/f0" {
+		t.Errorf("oldest redirect kept: %q", got)
+	}
+	if len(s.redirects) != maxRedirects {
+		t.Errorf("%d redirects", len(s.redirects))
 	}
 }
