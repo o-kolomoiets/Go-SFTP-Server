@@ -40,6 +40,8 @@ type WriteHandle struct {
 	conflict  string
 	reserved  bool        // the file was created by this upload
 	id        fs.FileInfo // identity of the created file
+	guarded   bool        // append-only resume: bytes below minOffset are immutable
+	minOffset int64
 	written   atomic.Int64
 	closeOnce sync.Once
 	closeErr  error
@@ -55,14 +57,30 @@ func (h *WriteHandle) Conflict() string { return h.conflict }
 // Written returns the number of bytes written so far.
 func (h *WriteHandle) Written() int64 { return h.written.Load() }
 
-// WriteAt writes at an absolute offset.
+// StartOffset returns the size of the file when an append-only resume
+// opened it; ok is false for other uploads.
+func (h *WriteHandle) StartOffset() (offset int64, ok bool) { return h.minOffset, h.guarded }
+
+// WriteAt writes at an absolute offset. A resumed upload may not write
+// below the size the file had when it was opened.
 func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
+	if h.guarded && off < h.minOffset {
+		return 0, ErrImmutable
+	}
 	n, err := h.f.WriteAt(p, off)
 	h.written.Add(int64(n))
 	return n, osError(err)
 }
 
-func (h *WriteHandle) truncate(size int64) error { return osError(h.f.Truncate(size)) }
+// truncate sets the file size; a resumed upload may not cut existing data
+// (OpenSSH truncates to the old size after an interrupted reput, which is
+// allowed).
+func (h *WriteHandle) truncate(size int64) error {
+	if h.guarded && size < h.minOffset {
+		return ErrImmutable
+	}
+	return osError(h.f.Truncate(size))
+}
 
 // removeIfUnused deletes the file this upload created, if it is still empty
 // and still at its path: the session may have renamed it, and another user
@@ -109,7 +127,7 @@ func (h *WriteHandle) Close(aborted bool) error {
 //
 //   - a new file needs the write permission;
 //   - EXCL on an existing file always fails;
-//   - APPEND, or WRITE without CREAT and TRUNC, is a resume: refused for now;
+//   - APPEND, or WRITE without CREAT and TRUNC, is a resume: see openResume;
 //   - any other write to an existing file is a conflict: rename (write to a
 //     new name, needs write), reject, or overwrite (needs overwrite).
 //
@@ -130,6 +148,8 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 		return nil, ErrDenied
 	}
 
+	requested := s.virtual(v, rel)
+	s.clearRedirect(requested)
 	h, err := s.openWrite(v, rel, fl)
 	if err != nil {
 		return nil, err
@@ -137,6 +157,9 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	h.s, h.v = s, v
 	h.virtual = s.virtual(v, h.rel)
 	s.register(h)
+	if h.virtual != requested && v.opts().StatRedirect {
+		s.setRedirect(requested, h.virtual)
+	}
 	return h, nil
 }
 
@@ -166,7 +189,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 	case fl.Excl:
 		return nil, ErrExists
 	case fl.Append || (!fl.Creat && !fl.Trunc):
-		return nil, ErrResumeUnsupported
+		return s.openResume(v, rel)
 	}
 
 	switch opts.OnConflict {
@@ -205,6 +228,40 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		return reservedHandle(final, f, ConflictRenamed)
 	}
 	return nil, fmt.Errorf("unknown conflict policy %q", opts.OnConflict)
+}
+
+// openResume opens an existing file to continue an upload (OpenSSH reput,
+// paramiko mode "a", Cyberduck). It may not go to another name: the client
+// writes at the offset where it stopped. With the overwrite policy and the
+// overwrite permission it is a plain write; otherwise, unless resume is
+// off, the append-only guard keeps the existing bytes unchanged.
+func (s *Session) openResume(v *view, rel string) (*WriteHandle, error) {
+	opts := v.opts()
+	plain := opts.OnConflict == ConflictOverwrite && v.perm.Has(PermOverwrite)
+	switch {
+	case plain:
+	case opts.Resume == ResumeOff:
+		return nil, ErrResumeDisabled
+	case !v.perm.Has(PermWrite):
+		return nil, ErrDenied
+	}
+	f, err := v.root.OpenFile(rel, os.O_WRONLY|oNonblock, 0)
+	if err != nil {
+		return nil, osError(err)
+	}
+	fi, err := f.Stat()
+	switch {
+	case err != nil:
+		_ = f.Close()
+		return nil, osError(err)
+	case !fi.Mode().IsRegular():
+		_ = f.Close()
+		return nil, ErrNotRegular
+	}
+	if plain {
+		return &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, nil
+	}
+	return &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true, minOffset: fi.Size()}, nil
 }
 
 // freeName tries the rename template with n = 1 … MaxRenameAttempts next to

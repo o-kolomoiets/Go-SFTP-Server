@@ -27,8 +27,8 @@ legacy SCP, FTP/WebDAV, a web interface, object-storage backends. See
 
 The full plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md)
 (in Russian); progress is tracked in [TASKS.md](TASKS.md). Next up (v0.2):
-resumable uploads, `statvfs` (`df`), virtual file owners, interop with
-paramiko, rclone and lftp, release binaries.
+interop with OpenSSH 10, paramiko, rclone and lftp, documentation and
+release binaries.
 
 ## Quick start
 
@@ -128,8 +128,12 @@ What you get today:
 - shell, exec and port forwarding are refused;
 - one JSON audit line per action (`fs.upload` records the requested and the
   final path); if the audit log cannot be written, uploads and new
-  connections are refused;
-- resuming an upload into an existing file is refused for now.
+  connections are refused (or, with `on_error = "fail-open"`, logged to
+  stderr);
+- interrupted uploads can be resumed (`reput`), but the data already in a
+  file can never be changed that way;
+- `df` works, and listings show the user's own name instead of host
+  accounts.
 
 ## Contributing
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,16 +27,31 @@ const DefaultMaxHandles = 64
 
 var extensionsOnce sync.Once
 
-// setExtensions advertises only the extensions that are implemented; the
-// pkg/sftp default also lists statvfs and hardlink. SetSFTPExtensions writes
-// a package global, so it runs exactly once, before any request server.
+// setExtensions advertises only the extensions that are implemented (the
+// pkg/sftp default also lists hardlink). SetSFTPExtensions writes a package
+// global, so it runs exactly once, before any request server.
 func setExtensions() {
 	extensionsOnce.Do(func() {
-		if err := sftp.SetSFTPExtensions("posix-rename@openssh.com"); err != nil {
+		exts := []string{"posix-rename@openssh.com"}
+		if vfs.StatFSSupported {
+			exts = append(exts, "statvfs@openssh.com")
+		}
+		if err := sftp.SetSFTPExtensions(exts...); err != nil {
 			panic(err)
 		}
 	})
 }
+
+// virtualID is the uid and gid of every file as clients see it: host
+// accounts are never shown. Long listings show the user's own name.
+const virtualID = 1000
+
+// ownedInfo hides the host owner of a file.
+type ownedInfo struct{ os.FileInfo }
+
+func (ownedInfo) Uid() uint32 { return virtualID } //nolint:revive // name required by sftp.FileInfoUidGid
+func (ownedInfo) Gid() uint32 { return virtualID }
+func (ownedInfo) Sys() any    { return nil }
 
 // Handler serves one SFTP session.
 type Handler struct {
@@ -75,7 +91,7 @@ func (h *Handler) fail(op, path string, err error) error {
 	result, st := toStatus(err)
 	h.log.Debug("sftp request failed", "op", op, "path", path, "err", err)
 	if result == "denied" {
-		h.audit.Event("fs.denied", slog.String("op", op), slog.String("path", path), slog.String("reason", st.Error()))
+		h.audit.Event("fs.denied", slog.String("op", op), slog.String("path", path), slog.String("reason", st.Error()), slog.String("result", "denied"))
 	}
 	return st
 }
@@ -202,6 +218,7 @@ func (h *Handler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 			h.release()
 			return nil, h.fail("fs.list", r.Filepath, err)
 		}
+		h.audit.Event("fs.list", slog.String("path", r.Filepath), slog.String("result", "ok"))
 		return &lister{Lister: l, h: h}, nil
 	case "Stat":
 		return h.stat(r.Filepath, h.s.Stat)
@@ -220,12 +237,52 @@ func (h *Handler) RealPath(p string) (string, error) {
 	return h.s.RealPath(p), nil
 }
 
+// LookupUserName implements sftp.NameLookupFileLister for long listings.
+func (h *Handler) LookupUserName(uid string) string { return h.lookupName(uid) }
+
+// LookupGroupName implements sftp.NameLookupFileLister for long listings.
+func (h *Handler) LookupGroupName(gid string) string { return h.lookupName(gid) }
+
+func (h *Handler) lookupName(id string) string {
+	if id == strconv.Itoa(virtualID) {
+		return h.s.User()
+	}
+	return id
+}
+
+// StatVFS implements sftp.StatVFSFileCmder (statvfs@openssh.com, "df").
+func (h *Handler) StatVFS(r *sftp.Request) (*sftp.StatVFS, error) {
+	st, err := h.s.StatFS(r.Filepath)
+	if err != nil {
+		return nil, h.fail("fs.statvfs", r.Filepath, err)
+	}
+	const stRdonly, stNosuid = 0x1, 0x2 // statvfs f_flag bits
+	flag := uint64(stNosuid)
+	if st.ReadOnly {
+		flag |= stRdonly
+	}
+	return &sftp.StatVFS{
+		Bsize:   st.BlockSize,
+		Frsize:  st.FragmentSize,
+		Blocks:  st.Blocks,
+		Bfree:   st.BlocksFree,
+		Bavail:  st.BlocksAvail,
+		Files:   st.Files,
+		Ffree:   st.FilesFree,
+		Favail:  st.FilesAvail,
+		Fsid:    st.ID,
+		Flag:    flag,
+		Namemax: st.NameMax,
+	}, nil
+}
+
 func (h *Handler) stat(p string, fn func(string) (os.FileInfo, error)) (sftp.ListerAt, error) {
 	fi, err := fn(p)
 	if err != nil {
 		return nil, h.fail("fs.stat", p, err)
 	}
-	return statLister{fi}, nil
+	h.audit.Event("fs.stat", slog.String("path", p), slog.String("result", "ok"))
+	return statLister{ownedInfo{fi}}, nil
 }
 
 type statLister []os.FileInfo
@@ -245,6 +302,9 @@ type lister struct {
 
 func (l *lister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	n, err := l.Lister.ListAt(ls, offset)
+	for i := range ls[:n] {
+		ls[i] = ownedInfo{ls[i]}
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		_, st := toStatus(err)
 		return n, st

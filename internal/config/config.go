@@ -20,6 +20,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -77,6 +78,9 @@ type MountOptions struct {
 	SetstatMode        string   `toml:"setstat_mode"`
 	Umask              FileMode `toml:"umask"`
 	RequireMountpoint  bool     `toml:"require_mountpoint"`
+	Resume             string   `toml:"resume"`
+	StatRedirect       bool     `toml:"stat_redirect"`
+	Symlinks           string   `toml:"symlinks"`
 }
 
 func (o MountOptions) clone() MountOptions {
@@ -128,7 +132,16 @@ type Log struct {
 // Audit is the [audit] table.
 type Audit struct {
 	Output string `toml:"output"`
+	// Events lists the recorded categories; server events are always on.
+	Events  []string `toml:"events"`
+	OnError string   `toml:"on_error"`
 }
+
+// Audit error modes (decision D20).
+const (
+	AuditFailClosed = "fail-closed"
+	AuditFailOpen   = "fail-open"
+)
 
 // Default returns the built-in defaults.
 func Default() *Config {
@@ -149,13 +162,16 @@ func Default() *Config {
 				CompoundExtensions: o.CompoundExts,
 				SetstatMode:        string(o.SetstatMode),
 				Umask:              FileMode(o.Umask),
+				Resume:             string(o.Resume),
+				StatRedirect:       o.StatRedirect,
+				Symlinks:           string(o.Symlinks),
 			},
 			Flatten: true,
 		},
 		Mounts: map[string]*Mount{},
 		Users:  map[string]*User{},
 		Log:    Log{Level: "info", Format: "text"},
-		Audit:  Audit{Output: "stdout"},
+		Audit:  Audit{Output: "stdout", Events: slices.Clone(audit.DefaultCategories), OnError: AuditFailClosed},
 	}
 }
 

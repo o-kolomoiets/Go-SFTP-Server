@@ -753,3 +753,58 @@ func TestCheckFSAuditOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateM2bKeys(t *testing.T) {
+	t.Parallel()
+
+	c, _ := load(t, `
+config_version = 1
+[server]
+host_keys = ["k"]
+[defaults]
+resume = "always"
+[mounts.m]
+path = "{dir}/m"
+symlinks = "follow"
+[audit]
+events = ["conn", "files"]
+on_error = "ignore"
+`)
+	_, err := c.Validate()
+	for _, want := range []string{"defaults.resume", "mounts.m.symlinks", `audit.events: unknown audit category "files"`, "audit.on_error"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("errors do not mention %q: %v", want, err)
+		}
+	}
+
+	c, _ = load(t, `
+config_version = 1
+[server]
+host_keys = ["k"]
+[defaults]
+resume = "off"
+stat_redirect = false
+[mounts.m]
+path = "{dir}/m"
+symlinks = "deny"
+[audit]
+events = ["list", "stat"]
+on_error = "fail-open"
+`)
+	mustValidate(t, c)
+	specs, err := c.MountSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := specs[0].Options
+	if o.Resume != vfs.ResumeOff || o.StatRedirect || o.Symlinks != vfs.SymlinksDeny {
+		t.Errorf("mount options = %+v", o)
+	}
+	ao := c.AuditOptions()
+	if !ao.FailOpen || !reflect.DeepEqual(ao.Categories, []string{"list", "stat"}) {
+		t.Errorf("audit options = %+v", ao)
+	}
+	if d := Default().AuditOptions(); d.FailOpen || len(d.Categories) != 6 {
+		t.Errorf("default audit options = %+v", d)
+	}
+}

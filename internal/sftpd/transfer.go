@@ -109,14 +109,20 @@ func (w *writer) Close() error {
 		case err != nil:
 			result = "error"
 		}
-		w.h.audit.Event("fs.upload",
+		attrs := []slog.Attr{
 			slog.String("path", w.requested),
 			slog.String("final_path", w.wh.Path()),
 			slog.String("conflict", w.wh.Conflict()),
 			slog.String("open_flags", w.flags),
 			slog.Int64("bytes", w.wh.Written()),
+		}
+		if off, ok := w.wh.StartOffset(); ok {
+			attrs = append(attrs, slog.Int64("start_offset", off))
+		}
+		attrs = append(attrs,
 			slog.Int64("duration_ms", time.Since(w.start).Milliseconds()),
 			slog.String("result", result))
+		w.h.audit.Event("fs.upload", attrs...)
 		if err != nil {
 			_, err = toStatus(err)
 		}

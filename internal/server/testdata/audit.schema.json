@@ -1,0 +1,27 @@
+{
+  "comment": "Audit log schema 1 (ROADMAP §6.4). Within schema 1 fields are only added. Every line has the common fields; context fields appear once known; each event has its required and optional fields and nothing else.",
+  "schema": 1,
+  "common": ["time", "level", "msg", "schema", "event"],
+  "context": ["conn_id", "remote_addr", "local_addr", "user", "session_id"],
+  "events": {
+    "server.start": {"required": ["version", "listen"]},
+    "server.stop": {},
+    "server.audit_recovered": {},
+    "conn.accept": {"required": ["client_version"]},
+    "conn.close": {"required": ["duration_ms", "result"]},
+    "auth.success": {"required": ["auth_method", "key_fp", "failed_attempts"]},
+    "auth.failure": {"required": ["attempts"]},
+    "session.start": {},
+    "session.end": {"required": ["duration_ms", "exit_status"]},
+    "fs.upload": {"required": ["path", "final_path", "conflict", "open_flags", "bytes", "duration_ms", "result"], "optional": ["start_offset"]},
+    "fs.download": {"required": ["path", "bytes", "duration_ms", "result"]},
+    "fs.rename": {"required": ["path", "target_path", "final_path", "result"], "optional": ["conflict"]},
+    "fs.mkdir": {"required": ["path", "result"]},
+    "fs.rmdir": {"required": ["path", "result"]},
+    "fs.remove": {"required": ["path", "result"]},
+    "fs.setstat": {"required": ["path", "result"]},
+    "fs.list": {"required": ["path", "result"]},
+    "fs.stat": {"required": ["path", "result"]},
+    "fs.denied": {"required": ["reason", "result"], "optional": ["op", "path", "mount"]}
+  }
+}

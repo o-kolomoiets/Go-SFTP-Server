@@ -76,10 +76,11 @@ func (sliceLister) Close() error { return nil }
 
 // dirLister reads a directory lazily, in batches.
 type dirLister struct {
-	f       *os.File
-	entries []fs.FileInfo
-	done    bool
-	err     error
+	f         *os.File
+	hideLinks bool // symlinks = "deny"
+	entries   []fs.FileInfo
+	done      bool
+	err       error
 }
 
 const readDirBatch = 256
@@ -88,7 +89,7 @@ func (l *dirLister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	for !l.done && int64(len(l.entries)) < offset+int64(len(ls)) {
 		des, err := l.f.ReadDir(readDirBatch)
 		for _, de := range des {
-			if !visible(de.Type()) {
+			if !visible(de.Type()) || (l.hideLinks && de.Type()&fs.ModeSymlink != 0) {
 				continue
 			}
 			fi, err := de.Info()

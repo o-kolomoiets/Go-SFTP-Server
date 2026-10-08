@@ -122,3 +122,72 @@ func TestShortWriteFails(t *testing.T) {
 type shortWriter struct{}
 
 func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestCategories(t *testing.T) {
+	t.Parallel()
+
+	for event, want := range map[string]string{
+		"server.start": CategoryServer, "conn.accept": CategoryConn, "auth.failure": CategoryAuth,
+		"session.end": CategorySession, "fs.upload": CategoryTransfer, "fs.download": CategoryTransfer,
+		"fs.denied": CategoryDenied, "fs.list": CategoryList, "fs.stat": CategoryStat,
+		"fs.rename": CategoryModify, "fs.mkdir": CategoryModify, "fs.setstat": CategoryModify,
+	} {
+		if got := CategoryOf(event); got != want {
+			t.Errorf("CategoryOf(%q) = %q, want %q", event, got, want)
+		}
+	}
+
+	var b buffer
+	l, err := NewWithOptions(&b, slog.New(slog.DiscardHandler), Options{Categories: []string{CategoryAuth, CategoryList}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []string{"server.start", "conn.accept", "auth.success", "fs.upload", "fs.list", "fs.stat"} {
+		l.With("conn_id", "x").Event(ev)
+	}
+	var got []string
+	for _, line := range b.lines() {
+		got = append(got, line["event"].(string))
+	}
+	if strings.Join(got, ",") != "server.start,auth.success,fs.list" {
+		t.Errorf("recorded %v", got)
+	}
+	if !l.Enabled("fs.list") || l.Enabled("fs.stat") {
+		t.Error("Enabled")
+	}
+
+	// Defaults leave out list and stat.
+	d := New(io.Discard, slog.New(slog.DiscardHandler))
+	if d.Enabled("fs.list") || d.Enabled("fs.stat") || !d.Enabled("fs.denied") {
+		t.Error("default categories")
+	}
+	if _, err := NewWithOptions(io.Discard, nil, Options{Categories: []string{"files"}}); err == nil {
+		t.Error("unknown category accepted")
+	}
+}
+
+func TestFailOpen(t *testing.T) {
+	t.Parallel()
+
+	var b buffer
+	var fallback bytes.Buffer
+	l, err := NewWithOptions(&b, slog.New(slog.NewTextHandler(&fallback, nil)), Options{FailOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.setFail(true)
+	l.Event("fs.upload", slog.String("path", "/a"))
+	if !l.Healthy() {
+		t.Error("fail-open logger reports unhealthy")
+	}
+	if !strings.Contains(fallback.String(), "audit event not persisted") {
+		t.Errorf("event not in the fallback log: %q", fallback.String())
+	}
+	b.setFail(false)
+	fallback.Reset()
+	l.Event("fs.upload", slog.String("path", "/b"))
+	l.Event("fs.upload", slog.String("path", "/c"))
+	if strings.Contains(fallback.String(), "/c") {
+		t.Error("events still go to the fallback log after recovery")
+	}
+}

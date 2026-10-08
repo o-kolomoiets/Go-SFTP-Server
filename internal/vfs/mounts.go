@@ -62,6 +62,47 @@ func ParseSetstatMode(s string) (SetstatMode, error) {
 	}
 }
 
+// ResumeMode decides whether uploads may continue an existing file.
+type ResumeMode string
+
+// Resume modes.
+const (
+	// ResumeAppendOnly lets a client append to an existing file but never
+	// change the bytes that were there when it opened the file.
+	ResumeAppendOnly ResumeMode = "append-only"
+	ResumeOff        ResumeMode = "off"
+)
+
+// ParseResumeMode validates a resume mode.
+func ParseResumeMode(s string) (ResumeMode, error) {
+	switch m := ResumeMode(s); m {
+	case ResumeAppendOnly, ResumeOff:
+		return m, nil
+	default:
+		return "", fmt.Errorf("unknown resume mode %q (want append-only or off)", s)
+	}
+}
+
+// SymlinkPolicy decides how existing symlinks inside a mount are treated.
+// Clients can never create links.
+type SymlinkPolicy string
+
+// Symlink policies.
+const (
+	SymlinksInsideOnly SymlinkPolicy = "inside-only" // follow links that stay inside the mount
+	SymlinksDeny       SymlinkPolicy = "deny"        // refuse any path through a symlink
+)
+
+// ParseSymlinkPolicy validates a symlink policy.
+func ParseSymlinkPolicy(s string) (SymlinkPolicy, error) {
+	switch p := SymlinkPolicy(s); p {
+	case SymlinksInsideOnly, SymlinksDeny:
+		return p, nil
+	default:
+		return "", fmt.Errorf("unknown symlinks policy %q (want inside-only or deny)", s)
+	}
+}
+
 const (
 	maxPathLen = 4096
 	maxDepth   = 64
@@ -94,6 +135,11 @@ type MountOptions struct {
 	CompoundExts      []string
 	SetstatMode       SetstatMode
 	Umask             fs.FileMode
+	Resume            ResumeMode
+	// StatRedirect makes STAT, LSTAT and SETSTAT of a path this session
+	// uploaded under another name (rename policy) answer for that name.
+	StatRedirect bool
+	Symlinks     SymlinkPolicy
 }
 
 // DefaultMountOptions returns the documented defaults.
@@ -105,6 +151,9 @@ func DefaultMountOptions() MountOptions {
 		CompoundExts:      slices.Clone(DefaultCompoundExtensions),
 		SetstatMode:       SetstatTimes,
 		Umask:             DefaultUmask,
+		Resume:            ResumeAppendOnly,
+		StatRedirect:      true,
+		Symlinks:          SymlinksInsideOnly,
 	}
 }
 
@@ -126,6 +175,12 @@ func (o MountOptions) Validate() error {
 		}
 	}
 	if _, err := ParseSetstatMode(string(o.SetstatMode)); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := ParseResumeMode(string(o.Resume)); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := ParseSymlinkPolicy(string(o.Symlinks)); err != nil {
 		errs = append(errs, err)
 	}
 	if o.Umask&^fs.ModePerm != 0 {

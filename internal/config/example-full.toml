@@ -28,6 +28,9 @@ flatten = true                          # a user's only mount is served as /
 setstat_mode = "times"                  # times | ignore | deny
 umask = "0027"                          # octal string: files 0640, directories 0750
 require_mountpoint = false              # true: refuse to start unless the path is a mount point
+resume = "append-only"                  # append-only | off: continue uploads, never change existing bytes
+stat_redirect = true                    # after a renamed upload, STAT of the requested name shows the copy
+symlinks = "inside-only"                # inside-only | deny: follow existing links that stay in the mount
 
 [mounts.public]
 path = "/srv/sftp/public"
@@ -63,3 +66,5 @@ format = "text"                         # text | json
 
 [audit]
 output = "/var/log/gosftpd/audit.jsonl" # or "stdout"
+events = ["conn", "auth", "session", "transfer", "modify", "denied"]  # also: list, stat; server is always on
+on_error = "fail-closed"                # fail-closed: refuse uploads and logins while the log cannot be written; fail-open

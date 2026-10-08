@@ -121,7 +121,9 @@ func TestUploadPreset(t *testing.T) {
 	if err := s.Setstat("/new.txt", Attrs{Atime: now, Mtime: now, HasTimes: true}); err != nil {
 		t.Errorf("Setstat times on own file: %v", err)
 	}
-	if err := s.Setstat("/a.txt", Attrs{Atime: now, Mtime: now, HasTimes: true}); !errors.Is(err, ErrDenied) {
+	// (/a.txt itself is redirected to this session's copy: stat_redirect.)
+	mustWrite(t, filepath.Join(inbox, "other.txt"), "x")
+	if err := s.Setstat("/other.txt", Attrs{Atime: now, Mtime: now, HasTimes: true}); !errors.Is(err, ErrDenied) {
 		t.Errorf("Setstat times on another file: %v", err)
 	}
 

@@ -84,6 +84,18 @@ func signer(t *testing.T) ssh.Signer {
 // <tmp>/outside/secret.txt next to it.
 func start(t *testing.T, policy vfs.ConflictPolicy, readOnly bool) *env {
 	t.Helper()
+	return startWith(t, startOpts{policy: policy, readOnly: readOnly})
+}
+
+type startOpts struct {
+	policy     vfs.ConflictPolicy
+	readOnly   bool
+	categories []string // audit categories; nil means the defaults
+}
+
+func startWith(t *testing.T, o startOpts) *env {
+	t.Helper()
+	policy, readOnly := o.policy, o.readOnly
 	base := t.TempDir()
 	e := &env{
 		share:    filepath.Join(base, "share"),
@@ -120,7 +132,7 @@ func start(t *testing.T, policy vfs.ConflictPolicy, readOnly bool) *env {
 		HostKeys: []ssh.Signer{hk},
 		Auth:     auth.New("", keys),
 		Mounts:   mounts,
-		Audit:    audit.New(e.auditLog, slog.New(slog.DiscardHandler)),
+		Audit:    mustAudit(t, e.auditLog, o.categories),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +159,15 @@ func start(t *testing.T, policy vfs.ConflictPolicy, readOnly bool) *env {
 		mounts.Close()
 	})
 	return e
+}
+
+func mustAudit(t *testing.T, w io.Writer, categories []string) *audit.Logger {
+	t.Helper()
+	l, err := audit.NewWithOptions(w, slog.New(slog.DiscardHandler), audit.Options{Categories: categories})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
 }
 
 func (e *env) dial(t *testing.T, key ssh.Signer) (*ssh.Client, error) {

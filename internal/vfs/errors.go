@@ -13,16 +13,17 @@ import (
 // Errors returned by the VFS. Callers match them with errors.Is; the wrapped
 // OS error (with paths relative to a mount) is only for server-side logs.
 var (
-	ErrDenied            = errors.New("permission denied")
-	ErrExists            = errors.New("file already exists")
-	ErrConflict          = errors.New("file exists and on_conflict=reject")
-	ErrResumeUnsupported = errors.New("resume is not supported yet")
-	ErrUnsupported       = errors.New("operation not supported")
-	ErrNotRegular        = errors.New("not a regular file")
-	ErrIsDir             = errors.New("is a directory")
-	ErrNotDir            = errors.New("not a directory")
-	ErrNotEmpty          = errors.New("directory not empty")
-	ErrInvalidPath       = errors.New("invalid path")
+	ErrDenied         = errors.New("permission denied")
+	ErrExists         = errors.New("file already exists")
+	ErrConflict       = errors.New("file exists and on_conflict=reject")
+	ErrResumeDisabled = errors.New("resume is disabled")
+	ErrImmutable      = errors.New("existing data is immutable")
+	ErrUnsupported    = errors.New("operation not supported")
+	ErrNotRegular     = errors.New("not a regular file")
+	ErrIsDir          = errors.New("is a directory")
+	ErrNotDir         = errors.New("not a directory")
+	ErrNotEmpty       = errors.New("directory not empty")
+	ErrInvalidPath    = errors.New("invalid path")
 
 	// ErrHomeNotDir: a user's home is not a real directory (for example a
 	// symlink planted in its place); the home mount is unavailable.
