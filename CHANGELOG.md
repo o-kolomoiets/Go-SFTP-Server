@@ -44,15 +44,18 @@ Incompatible changes are prefixed with **BREAKING:**.
   kept (offsets are used as sent, so a client that appends at offset 0 gets
   "existing data is immutable"). `fs.upload` records `start_offset`; a
   refused write is audited as `fs.denied` and the upload as `denied`.
-  After a renamed `put`, a `reput` of the same name in the same session
-  continues the copy.
+  After a renamed `put`, a `reput` of the same name continues the copy.
 - A file that an upload has open cannot be opened for writing in place by
   another upload (overwrite or resume) until it is closed: "file is busy".
 - `stat_redirect` (default on): after an upload or rename went to a new name
-  under the rename policy, STAT, LSTAT and SETSTAT of the requested name in
-  the same session answer for the new one for 60 seconds, so paramiko
-  `put(confirm=True)` and rclone's size check work and never touch the
-  original.
+  under the rename policy, STAT, LSTAT and SETSTAT of the requested name by
+  the same user answer for the new one for 60 seconds, in all of the user's
+  connections, so paramiko `put(confirm=True)` and rclone's size check work
+  and never touch the original.
+- Uploaders may rename and set times on files they created with only the
+  `write` permission in any of their connections (rclone uploads on one
+  connection and moves the file on another), for an hour after their last
+  change and only while nobody else changed the file.
 - `statvfs@openssh.com` (`df` in sftp) on Linux, macOS and FreeBSD; mounts
   the user cannot change are reported read-only.
 - Listings show a virtual owner (uid/gid 1000, the user's own name in
@@ -64,6 +67,12 @@ Incompatible changes are prefixed with **BREAKING:**.
   `transfer`, `modify`, `denied`, opt-in `list` and `stat`; `server` is
   always on) and `on_error = "fail-open"` keeps serving when the audit log
   cannot be written. The format is pinned by a schema test.
+- Release binaries for Linux and macOS (amd64, arm64) with `checksums.txt`,
+  built by GoReleaser when a release is published.
+- Interop tests with OpenSSH 10.6p1, paramiko 5.0.0, rclone v1.75.0 and lftp
+  in CI.
+- Documentation: `docs/quickstart.md`, `configuration.md` (every key),
+  `audit-log.md`, `security.md`, `interop.md`, `release-checklist.md`.
 
 ### Changed
 

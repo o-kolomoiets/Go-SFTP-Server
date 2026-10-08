@@ -10,7 +10,7 @@
 |---|---|---|---|
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
-| M2 MVP | v0.2.0 | 🔄 | 14 / 18 |
+| M2 MVP | v0.2.0 | 🔄 | 17 / 18 |
 | M3 Hardening | v0.3.0 | ⬜ | 0 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
@@ -90,10 +90,10 @@
 | M2-13 | Виртуальные владельцы в листинге, `Readlink` → unsupported, политика `symlinks = "inside-only"\|"deny"` | ✅ | uid/gid 1000, в `ls -l` — имя пользователя |
 | M2-14 | Аудит: фильтр `audit.events`, `audit.on_error`, golden-схема `testdata/audit.schema.json` | ✅ | `internal/server/testdata/audit.schema.json` + `TestAuditSchema`; события `fs.list`, `fs.stat` (opt-in) |
 | **M2c** | **Interop, документация, релиз** | | |
-| M2-15 | Interop: OpenSSH 10.x, paramiko, rclone, lftp | ⬜ | |
-| M2-16 | Документация: README, quickstart, configuration (тест на каждый ключ), audit-log, security, interop, release-checklist | ⬜ | |
-| M2-17 | Минимальный GoReleaser, `release.yml`, job `goreleaser-check` | ⬜ | |
-| M2-18 | DoD M2, релиз `v0.2.0` | ⬜ | |
+| M2-15 | Interop: OpenSSH 10.x, paramiko, rclone, lftp | ✅ | CI: матрица interop (OpenSSH 9.6p1 + paramiko 5.0.0, rclone v1.75.0, lftp; OpenSSH 10.6p1 из исходников); локально 62 проверки. Найдено и исправлено: rclone работает через несколько соединений → «свои» файлы и `stat_redirect` теперь на уровне пользователя |
+| M2-16 | Документация: README, quickstart, configuration (тест на каждый ключ), audit-log, security, interop, release-checklist | ✅ | `docs/*.md`; тесты `TestConfigurationDocCoversEveryKey`, `TestAuditDocCoversSchema` |
+| M2-17 | Минимальный GoReleaser, `release.yml`, job `goreleaser-check` | ✅ | `.goreleaser.yaml` (linux, darwin × amd64, arm64), `release.yml` по публикации релиза, job `goreleaser-check` в `ci-ok` |
+| M2-18 | DoD M2, релиз `v0.2.0` | ⬜ 👤 | DoD проверен (покрытие: всего 87%, vfs 88.9%, auth 91.7%, config 87.1%, sftpd 82.9%). После мержа владелец публикует релиз по `docs/release-checklist.md` |
 
 ## M3: Hardening (v0.3.0)
 

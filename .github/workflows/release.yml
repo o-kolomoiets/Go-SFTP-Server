@@ -1,0 +1,31 @@
+name: Release
+
+# Runs when a release is published in the GitHub interface (see
+# docs/release-checklist.md) and attaches binaries and checksums to it.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # upload release assets
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.18.2
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

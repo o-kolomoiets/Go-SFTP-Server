@@ -1,0 +1,48 @@
+# GoReleaser configuration (minimal, M2): Linux and macOS binaries, archives
+# and checksums.txt. Windows follows once the isolation tests pass there
+# (M3b); packages, Docker image and signatures come in M5.
+# Check with: goreleaser check && goreleaser release --snapshot --clean
+version: 2
+project_name: gosftpd
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: gosftpd
+    main: ./cmd/gosftpd
+    binary: gosftpd
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Version={{ .Tag }}
+      - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Commit={{ .FullCommit }}
+      - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: gosftpd
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# The owner publishes the release (title and notes from CHANGELOG.md) in the
+# GitHub interface; the release workflow only attaches the files.
+release:
+  mode: keep-existing
+
+changelog:
+  disable: true

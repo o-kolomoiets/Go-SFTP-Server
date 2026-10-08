@@ -35,12 +35,6 @@ type view struct {
 
 func (v *view) opts() *MountOptions { return &v.m.opts }
 
-// createdKey identifies a file this session created.
-type createdKey struct {
-	v   *view
-	rel string
-}
-
 // fileID identifies a file across paths. The inode number alone is not
 // enough: once a file is deleted, a new file may get the same number. The
 // change time tells them apart; it moves with every change, so the session
@@ -65,25 +59,9 @@ type Session struct {
 	flatten bool
 	owned   []*os.Root // home roots, closed with the session
 
-	mu        sync.Mutex
-	writers   map[string][]*WriteHandle // open uploads by final virtual path
-	created   map[createdKey]fileID     // regular files this session created
-	redirects map[string]redirect       // stat_redirect: requested -> final path
-	now       func() time.Time
+	mu      sync.Mutex
+	writers map[string][]*WriteHandle // open uploads by final virtual path
 }
-
-// redirect points STAT, LSTAT and SETSTAT of a requested path at the name
-// an upload or rename of this session actually used.
-type redirect struct {
-	final string
-	until time.Time
-}
-
-// RedirectTTL is how long a stat redirect lasts.
-const RedirectTTL = 60 * time.Second
-
-// maxRedirects bounds the redirect table of one session.
-const maxRedirects = 1024
 
 // Session starts a session for user with the given grants. Mounts that
 // cannot be opened for this user (a home directory that is missing or not a
@@ -91,13 +69,10 @@ const maxRedirects = 1024
 // log. Grants for unknown mounts are reported the same way.
 func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 	s := &Session{
-		t:         t,
-		user:      user,
-		byName:    make(map[string]*view, len(grants)),
-		writers:   make(map[string][]*WriteHandle),
-		created:   make(map[createdKey]fileID),
-		redirects: make(map[string]redirect),
-		now:       time.Now,
+		t:       t,
+		user:    user,
+		byName:  make(map[string]*view, len(grants)),
+		writers: make(map[string][]*WriteHandle),
 	}
 	var errs []error
 	granted := map[string]bool{}
@@ -328,7 +303,6 @@ func (s *Session) ReadDir(vp string) (Lister, error) {
 
 // OpenRead opens a regular file for reading.
 func (s *Session) OpenRead(vp string) (*os.File, error) {
-	s.clearRedirect(path.Clean("/" + vp))
 	v, rel, err := s.resolve(vp)
 	switch {
 	case err != nil:
@@ -338,6 +312,7 @@ func (s *Session) OpenRead(vp string) (*os.File, error) {
 	case !v.perm.Has(PermRead):
 		return nil, ErrDenied
 	}
+	s.clearRedirect(v, rel)
 	f, err := v.root.OpenFile(rel, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
 		return nil, osError(err)
@@ -408,7 +383,7 @@ func (s *Session) Remove(vp string) error {
 		return osError(err)
 	}
 	s.forget(v, rel)
-	s.clearRedirect(s.virtual(v, rel))
+	s.clearRedirect(v, rel)
 	return nil
 }
 
@@ -479,7 +454,7 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 		return osError(err)
 	}
 	if own {
-		s.refreshCreated(v, rel, rel)
+		s.refreshCreated(v, rel)
 	}
 	return nil
 }
@@ -504,8 +479,8 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 	if sv != dv {
 		return "", ErrUnsupported // across mounts
 	}
-	s.clearRedirect(s.virtual(sv, srel))
-	s.clearRedirect(s.virtual(dv, drel))
+	s.clearRedirect(sv, srel)
+	s.clearRedirect(dv, drel)
 	fi, err := sv.root.Lstat(srel)
 	if err != nil {
 		return "", osError(err)
@@ -547,7 +522,7 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 		// rclone checks the size of the target after a move and deletes
 		// "a failed copy" at the requested name: that would be the original.
 		if sv.opts().StatRedirect {
-			s.setRedirect(s.virtual(sv, drel), s.virtual(sv, final))
+			s.setRedirect(sv, drel, final)
 		}
 		return s.virtual(sv, final), nil
 	}
@@ -598,24 +573,24 @@ func (s *Session) Link(string, string) error { return ErrUnsupported }
 
 func (s *Session) register(h *WriteHandle) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.writers[h.virtual] = append(s.writers[h.virtual], h)
+	s.mu.Unlock()
 	if h.reserved && h.id != nil {
-		s.created[createdKey{h.v, h.rel}] = identify(h.id)
+		s.own(h.v, h.rel, h.id)
 	}
 }
 
 func (s *Session) unregister(h *WriteHandle, removed bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	hs := slices.DeleteFunc(s.writers[h.virtual], func(x *WriteHandle) bool { return x == h })
 	if len(hs) == 0 {
 		delete(s.writers, h.virtual)
 	} else {
 		s.writers[h.virtual] = hs
 	}
+	s.mu.Unlock()
 	if removed {
-		delete(s.created, createdKey{h.v, h.rel})
+		s.forget(h.v, h.rel)
 	}
 }
 
@@ -626,119 +601,4 @@ func (s *Session) openWriter(vp string) *WriteHandle {
 		return hs[len(hs)-1]
 	}
 	return nil
-}
-
-// isCreated reports whether rel is a file this session created and nobody
-// has changed since: an upload of this session still open on it, or a
-// recorded file whose identity still matches.
-func (s *Session) isCreated(v *view, rel string) bool {
-	cur, err := v.root.Lstat(rel)
-	if err != nil || !cur.Mode().IsRegular() {
-		return false
-	}
-	s.mu.Lock()
-	id, ok := s.created[createdKey{v, rel}]
-	s.mu.Unlock()
-	if ok && id.matches(cur) {
-		return true
-	}
-	// While the upload is open its inode cannot be reused, so the device
-	// and inode are proof enough.
-	if h := s.openWriter(s.virtual(v, rel)); h != nil && h.reserved && h.v == v {
-		if st, err := h.f.Stat(); err == nil && os.SameFile(st, cur) {
-			return true
-		}
-	}
-	return false
-}
-
-// moveCreated follows a rename: whatever the session created at from is now
-// at to (with a new change time), and to no longer holds an earlier entry.
-func (s *Session) moveCreated(v *view, from, to string) {
-	s.mu.Lock()
-	_, ok := s.created[createdKey{v, from}]
-	delete(s.created, createdKey{v, to})
-	s.mu.Unlock()
-	if ok {
-		s.refreshCreated(v, from, to)
-	}
-}
-
-// refreshCreated re-records the entry for from under to after a change by
-// this session, if the file at to is still the same inode.
-func (s *Session) refreshCreated(v *view, from, to string) {
-	cur, err := v.root.Lstat(to)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id, ok := s.created[createdKey{v, from}]
-	delete(s.created, createdKey{v, from})
-	if ok && err == nil && os.SameFile(id.fi, cur) {
-		s.created[createdKey{v, to}] = identify(cur)
-	}
-}
-
-// closedCreated records the final identity of an upload being closed.
-func (s *Session) closedCreated(h *WriteHandle, st fs.FileInfo) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := createdKey{h.v, h.rel}
-	if id, ok := s.created[k]; ok && os.SameFile(id.fi, st) {
-		s.created[k] = identify(st)
-	}
-}
-
-// redirected returns the path STAT, LSTAT and SETSTAT should use for vp.
-func (s *Session) redirected(vp string) string {
-	p := path.Clean("/" + vp)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.redirects[p]
-	if !ok {
-		return vp
-	}
-	if s.now().After(r.until) {
-		delete(s.redirects, p)
-		return vp
-	}
-	return r.final
-}
-
-// redirectFor returns the live redirect target of a requested path.
-func (s *Session) redirectFor(p string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.redirects[p]
-	if !ok || s.now().After(r.until) {
-		return "", false
-	}
-	return r.final, true
-}
-
-func (s *Session) setRedirect(requested, final string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.redirects[requested]; !ok && len(s.redirects) >= maxRedirects {
-		// The newest redirect is the one a client is about to check: make
-		// room by dropping the one that expires first.
-		oldest := ""
-		for k, r := range s.redirects {
-			if oldest == "" || r.until.Before(s.redirects[oldest].until) {
-				oldest = k
-			}
-		}
-		delete(s.redirects, oldest)
-	}
-	s.redirects[requested] = redirect{final: final, until: s.now().Add(RedirectTTL)}
-}
-
-func (s *Session) clearRedirect(p string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.redirects, p)
-}
-
-func (s *Session) forget(v *view, rel string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.created, createdKey{v, rel})
 }

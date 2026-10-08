@@ -1,0 +1,82 @@
+# Security model (draft)
+
+What gosftpd protects, how, and where its protection ends. Report
+vulnerabilities as described in [SECURITY.md](../SECURITY.md). A full threat
+model and a hardening guide follow in v0.3.
+
+## What a client can do
+
+- **Authenticate** with a public key only. Unknown users, wrong keys,
+  disabled or expired accounts and disallowed addresses all fail the same
+  way. Identity flows only through the SSH library's permissions, never
+  through state captured during authentication (CVE-2024-45337).
+- **Open SFTP sessions**, nothing else: shell, exec, PTY, environment, agent
+  and port forwarding requests are refused.
+- **Work inside its mounts** with the permissions of its user, see
+  [configuration.md](configuration.md#permissions).
+
+## Confinement
+
+Each mount is opened as an `os.Root` at start. Every operation resolves the
+client path once (cleaned, at most 4096 bytes and 64 levels, valid UTF-8, no
+NUL) and passes only a relative name to the `os.Root`, which refuses `..`,
+absolute paths and symlinks leading out of the mount. Clients cannot create
+symlinks or hard links. FIFOs, sockets and devices are hidden and never
+opened. No response, listing or error message contains a host path, and
+listings show a virtual owner instead of host accounts.
+
+Home mounts (`{user}`) open the user's directory only if it is a real
+directory, and check that the opened directory is the one inspected; a
+symlink planted in its place, even to another user's home, makes the mount
+unavailable.
+
+## Upload integrity
+
+- Uploads never replace an existing file unless the mount's policy is
+  `overwrite` and the user has the `overwrite` permission.
+- A resumed upload can only append; the bytes the file had are immutable.
+- While an upload has a file open, nobody else can write it in place.
+- An aborted upload removes only the empty file it created itself, after
+  checking that it is still that file.
+
+## Limits of the protection
+
+`os.Root` does not protect against everything on the host:
+
+- **Bind mounts and other mounts inside a served directory** are followed.
+- **Hard links created on the host** to files outside the mount give access
+  to those files.
+- **Symlinks created by local users**: with `symlinks = "deny"`, paths through
+  existing symlinks are refused, but a local user who can create symlinks in
+  a served directory may race the check.
+- **A directory replaced after start**: a mount keeps the directory it opened.
+  If a disk is mounted over the path later, gosftpd keeps writing to the old
+  directory; `require_mountpoint = true` refuses to start without the mount.
+- **Times and sizes** set through SETSTAT act on a path and can, like
+  `chmod` in other servers, race with a local user who swaps a file for a
+  symlink.
+
+So: run gosftpd as a dedicated unprivileged user, serve directories that only
+that user and gosftpd's clients write to, and do not serve trees that contain
+mounts or hard links you do not control.
+
+## Files gosftpd trusts
+
+The configuration, included files, host keys and `authorized_keys` files must
+not be writable by group or others and must belong to root or to the user
+running gosftpd (like sshd's `StrictModes`); host keys must be private
+(`chmod 600`).
+
+## Cryptography
+
+Key exchange `mlkem768x25519-sha256` and `curve25519-sha256`; ciphers
+ChaCha20-Poly1305, AES-GCM and AES-CTR; MACs HMAC-SHA2 with encrypt-then-MAC.
+Host and user RSA keys sign with SHA-2 only, and user RSA keys need at least
+2048 bits. `verify-required` in `authorized_keys` is refused, because the SSH
+library does not check the user-verification flag of security keys.
+
+## Audit
+
+Every login, transfer and change is logged ([audit-log.md](audit-log.md)).
+By default the log is fail-closed: if it cannot be written, gosftpd refuses
+new connections and changes instead of working unaudited.

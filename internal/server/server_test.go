@@ -172,8 +172,13 @@ func mustAudit(t *testing.T, w io.Writer, categories []string) *audit.Logger {
 
 func (e *env) dial(t *testing.T, key ssh.Signer) (*ssh.Client, error) {
 	t.Helper()
+	return e.dialAs(t, "alice", key)
+}
+
+func (e *env) dialAs(t *testing.T, user string, key ssh.Signer) (*ssh.Client, error) {
+	t.Helper()
 	return ssh.Dial("tcp", e.addr, &ssh.ClientConfig{
-		User:            "alice",
+		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(key)},
 		HostKeyCallback: ssh.FixedHostKey(e.hostKey),
 		Timeout:         10 * time.Second,
@@ -182,7 +187,12 @@ func (e *env) dial(t *testing.T, key ssh.Signer) (*ssh.Client, error) {
 
 func (e *env) sftp(t *testing.T) *sftp.Client {
 	t.Helper()
-	conn, err := e.dial(t, e.userKey)
+	return e.sftpAs(t, "alice")
+}
+
+func (e *env) sftpAs(t *testing.T, user string) *sftp.Client {
+	t.Helper()
+	conn, err := e.dialAs(t, user, e.userKey)
 	if err != nil {
 		t.Fatal(err)
 	}
