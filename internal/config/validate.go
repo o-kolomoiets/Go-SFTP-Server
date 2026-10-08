@@ -13,6 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
@@ -154,6 +155,16 @@ func (o MountOptions) validate(p *problems, base *MountOptions, prefix ...string
 			p.errorf(k("setstat_mode"), "%v", err)
 		}
 	}
+	if !inherited("Resume") {
+		if _, err := vfs.ParseResumeMode(o.Resume); err != nil {
+			p.errorf(k("resume"), "%v", err)
+		}
+	}
+	if !inherited("Symlinks") {
+		if _, err := vfs.ParseSymlinkPolicy(o.Symlinks); err != nil {
+			p.errorf(k("symlinks"), "%v", err)
+		}
+	}
 }
 
 func (c *Config) validateMounts(p *problems) {
@@ -260,5 +271,15 @@ func (c *Config) validateLogs(p *problems) {
 	}
 	if c.Audit.Output == "" {
 		p.errorf("audit.output", `required: "stdout" or a file path`)
+	}
+	for _, e := range c.Audit.Events {
+		if _, err := audit.ParseCategory(e); err != nil {
+			p.errorf("audit.events", "%v", err)
+		}
+	}
+	switch c.Audit.OnError {
+	case AuditFailClosed, AuditFailOpen:
+	default:
+		p.errorf("audit.on_error", "unknown mode %q (want %s or %s)", c.Audit.OnError, AuditFailClosed, AuditFailOpen)
 	}
 }

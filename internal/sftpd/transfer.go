@@ -75,12 +75,16 @@ type writer struct {
 
 	mu      sync.Mutex
 	aborted bool
+	denied  atomic.Bool // a write was refused (append-only guard)
 	once    sync.Once
 }
 
 func (w *writer) WriteAt(p []byte, off int64) (int, error) {
 	n, err := w.wh.WriteAt(p, off)
 	if err != nil {
+		if errors.Is(err, vfs.ErrImmutable) && !w.denied.Swap(true) {
+			return n, w.h.fail("fs.upload", w.wh.Path(), err) // one fs.denied per upload
+		}
 		w.h.log.Debug("write failed", "path", w.wh.Path(), "err", err)
 		_, st := toStatus(err)
 		return n, st
@@ -106,17 +110,25 @@ func (w *writer) Close() error {
 		switch {
 		case aborted:
 			result = "aborted"
+		case w.denied.Load():
+			result = "denied"
 		case err != nil:
 			result = "error"
 		}
-		w.h.audit.Event("fs.upload",
+		attrs := []slog.Attr{
 			slog.String("path", w.requested),
 			slog.String("final_path", w.wh.Path()),
 			slog.String("conflict", w.wh.Conflict()),
 			slog.String("open_flags", w.flags),
 			slog.Int64("bytes", w.wh.Written()),
+		}
+		if off, ok := w.wh.StartOffset(); ok {
+			attrs = append(attrs, slog.Int64("start_offset", off))
+		}
+		attrs = append(attrs,
 			slog.Int64("duration_ms", time.Since(w.start).Milliseconds()),
 			slog.String("result", result))
+		w.h.audit.Event("fs.upload", attrs...)
 		if err != nil {
 			_, err = toStatus(err)
 		}

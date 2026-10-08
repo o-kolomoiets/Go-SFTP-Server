@@ -342,7 +342,10 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		return configError{err}
 	}
 	defer closeAudit()
-	al := audit.New(auditOut, log)
+	al, err := audit.NewWithOptions(auditOut, log, c.AuditOptions())
+	if err != nil {
+		return configError{err}
+	}
 
 	srv, err := server.New(server.Config{
 		HostKeys:           keys,

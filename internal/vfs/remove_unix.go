@@ -29,3 +29,11 @@ func removeEntry(root *os.Root, rel string, dir bool) error {
 	}
 	return nil
 }
+
+// parentOf returns the directory part of rel, "." for a top-level name.
+func parentOf(rel string) string {
+	if d := filepath.Dir(rel); d != "" {
+		return d
+	}
+	return "."
+}

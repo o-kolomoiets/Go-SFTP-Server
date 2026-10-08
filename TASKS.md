@@ -10,7 +10,7 @@
 |---|---|---|---|
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
-| M2 MVP | v0.2.0 | 🔄 | 9 / 18 |
+| M2 MVP | v0.2.0 | 🔄 | 14 / 18 |
 | M3 Hardening | v0.3.0 | ⬜ | 0 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
@@ -84,11 +84,11 @@
 | M2-08 | CLI: `init`, `config validate\|show\|example`, `user add\|list`, `hostkey generate`, `completion`; golden-тесты | ✅ | golden-тест `user add`; `completion` — встроенная команда cobra |
 | M2-09 | Примеры конфигов через go:embed; тест `Validate()` и e2e минимального примера | ✅ | `TestExamples`, `TestExampleFullCoversEveryKey`, `TestServeMinimalExample` |
 | **M2b** | **Протокол** | | |
-| M2-10 | Докачка: append-only guard, `resume = "append-only"\|"off"` | ⬜ | |
-| M2-11 | `stat_redirect` (в пределах сессии, TTL 60 с, цель posix-rename) | ⬜ | |
-| M2-12 | `statvfs@openssh.com` (Linux, darwin, freebsd) | ⬜ | |
-| M2-13 | Виртуальные владельцы в листинге, `Readlink` → unsupported, политика `symlinks = "inside-only"\|"deny"` | ⬜ | |
-| M2-14 | Аудит: фильтр `audit.events`, `audit.on_error`, golden-схема `testdata/audit.schema.json` | ⬜ | |
+| M2-10 | Докачка: append-only guard, `resume = "append-only"\|"off"` | ✅ | `WriteAt` и `FSETSTAT size` ниже исходного размера → `PERMISSION_DENIED` «existing data is immutable»; interop: `reput` даёт идентичный файл |
+| M2-11 | `stat_redirect` (в пределах сессии, TTL 60 с, цель posix-rename) | ✅ | STAT, LSTAT, SETSTAT; снимается при open, remove, rename этого пути |
+| M2-12 | `statvfs@openssh.com` (Linux, darwin, freebsd) | ✅ | `df -h` в interop; mount без прав на изменение — read-only |
+| M2-13 | Виртуальные владельцы в листинге, `Readlink` → unsupported, политика `symlinks = "inside-only"\|"deny"` | ✅ | uid/gid 1000, в `ls -l` — имя пользователя |
+| M2-14 | Аудит: фильтр `audit.events`, `audit.on_error`, golden-схема `testdata/audit.schema.json` | ✅ | `internal/server/testdata/audit.schema.json` + `TestAuditSchema`; события `fs.list`, `fs.stat` (opt-in) |
 | **M2c** | **Interop, документация, релиз** | | |
 | M2-15 | Interop: OpenSSH 10.x, paramiko, rclone, lftp | ⬜ | |
 | M2-16 | Документация: README, quickstart, configuration (тест на каждый ключ), audit-log, security, interop, release-checklist | ⬜ | |

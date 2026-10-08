@@ -121,7 +121,9 @@ func TestUploadPreset(t *testing.T) {
 	if err := s.Setstat("/new.txt", Attrs{Atime: now, Mtime: now, HasTimes: true}); err != nil {
 		t.Errorf("Setstat times on own file: %v", err)
 	}
-	if err := s.Setstat("/a.txt", Attrs{Atime: now, Mtime: now, HasTimes: true}); !errors.Is(err, ErrDenied) {
+	// (/a.txt itself is redirected to this session's copy: stat_redirect.)
+	mustWrite(t, filepath.Join(inbox, "other.txt"), "x")
+	if err := s.Setstat("/other.txt", Attrs{Atime: now, Mtime: now, HasTimes: true}); !errors.Is(err, ErrDenied) {
 		t.Errorf("Setstat times on another file: %v", err)
 	}
 
@@ -427,10 +429,14 @@ func TestAbortedUploadKeepsDataWrittenByOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := upload(t, bob, "/new.csv", put, "bob's data"); err != nil {
-		t.Fatal(err)
+	// While alice's upload is open nobody else may write the file in place.
+	if _, err := bob.OpenWrite("/new.csv", put); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second writer: %v", err)
 	}
 	if err := h.Close(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload(t, bob, "/new.csv", put, "bob's data"); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, filepath.Join(base, "inbox", "new.csv")); got != "bob's data" {

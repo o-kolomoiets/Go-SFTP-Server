@@ -17,14 +17,6 @@ import (
 	"unicode/utf8"
 )
 
-// parentOf returns the directory part of rel, "." for a top-level name.
-func parentOf(rel string) string {
-	if d := filepath.Dir(rel); d != "" {
-		return d
-	}
-	return "."
-}
-
 // errNoAtomicRename means the platform cannot rename without replacing.
 var errNoAtomicRename = errors.New("atomic no-replace rename unavailable")
 
@@ -73,10 +65,25 @@ type Session struct {
 	flatten bool
 	owned   []*os.Root // home roots, closed with the session
 
-	mu      sync.Mutex
-	writers map[string][]*WriteHandle // open uploads by final virtual path
-	created map[createdKey]fileID     // regular files this session created
+	mu        sync.Mutex
+	writers   map[string][]*WriteHandle // open uploads by final virtual path
+	created   map[createdKey]fileID     // regular files this session created
+	redirects map[string]redirect       // stat_redirect: requested -> final path
+	now       func() time.Time
 }
+
+// redirect points STAT, LSTAT and SETSTAT of a requested path at the name
+// an upload or rename of this session actually used.
+type redirect struct {
+	final string
+	until time.Time
+}
+
+// RedirectTTL is how long a stat redirect lasts.
+const RedirectTTL = 60 * time.Second
+
+// maxRedirects bounds the redirect table of one session.
+const maxRedirects = 1024
 
 // Session starts a session for user with the given grants. Mounts that
 // cannot be opened for this user (a home directory that is missing or not a
@@ -84,11 +91,13 @@ type Session struct {
 // log. Grants for unknown mounts are reported the same way.
 func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 	s := &Session{
-		t:       t,
-		user:    user,
-		byName:  make(map[string]*view, len(grants)),
-		writers: make(map[string][]*WriteHandle),
-		created: make(map[createdKey]fileID),
+		t:         t,
+		user:      user,
+		byName:    make(map[string]*view, len(grants)),
+		writers:   make(map[string][]*WriteHandle),
+		created:   make(map[createdKey]fileID),
+		redirects: make(map[string]redirect),
+		now:       time.Now,
 	}
 	var errs []error
 	granted := map[string]bool{}
@@ -211,7 +220,32 @@ func (s *Session) resolve(vp string) (v *view, rel string, err error) {
 	if err != nil {
 		return nil, "", ErrInvalidPath
 	}
+	if v.opts().Symlinks == SymlinksDeny {
+		if err := noSymlinks(v.root, local); err != nil {
+			return nil, "", err
+		}
+	}
 	return v, local, nil
+}
+
+// noSymlinks refuses a path if any existing component is a symlink
+// (symlinks = "deny"). Clients cannot create links, so only links made on
+// the host are affected.
+func noSymlinks(root *os.Root, rel string) error {
+	p := ""
+	for c := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		p = filepath.Join(p, c)
+		fi, err := root.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return nil // the rest does not exist yet
+		case err != nil:
+			return osError(err)
+		case fi.Mode()&fs.ModeSymlink != 0:
+			return ErrDenied
+		}
+	}
+	return nil
 }
 
 // topLevel reports whether vp names an entry directly in the synthetic root.
@@ -228,11 +262,12 @@ func (s *Session) virtual(v *view, rel string) string {
 	return path.Clean("/" + v.m.name + "/" + rel)
 }
 
-// Stat follows symlinks that stay inside the mount.
-func (s *Session) Stat(vp string) (fs.FileInfo, error) { return s.stat(vp, false) }
+// Stat follows symlinks that stay inside the mount. It honours stat
+// redirects.
+func (s *Session) Stat(vp string) (fs.FileInfo, error) { return s.stat(s.redirected(vp), false) }
 
-// Lstat does not follow a final symlink.
-func (s *Session) Lstat(vp string) (fs.FileInfo, error) { return s.stat(vp, true) }
+// Lstat does not follow a final symlink. It honours stat redirects.
+func (s *Session) Lstat(vp string) (fs.FileInfo, error) { return s.stat(s.redirected(vp), true) }
 
 func (s *Session) stat(vp string, lstat bool) (fs.FileInfo, error) {
 	v, rel, err := s.resolve(vp)
@@ -288,11 +323,12 @@ func (s *Session) ReadDir(vp string) (Lister, error) {
 		_ = f.Close()
 		return nil, ErrNotDir
 	}
-	return &dirLister{f: f}, nil
+	return &dirLister{f: f, hideLinks: v.opts().Symlinks == SymlinksDeny}, nil
 }
 
 // OpenRead opens a regular file for reading.
 func (s *Session) OpenRead(vp string) (*os.File, error) {
+	s.clearRedirect(path.Clean("/" + vp))
 	v, rel, err := s.resolve(vp)
 	switch {
 	case err != nil:
@@ -372,6 +408,7 @@ func (s *Session) Remove(vp string) error {
 		return osError(err)
 	}
 	s.forget(v, rel)
+	s.clearRedirect(s.virtual(v, rel))
 	return nil
 }
 
@@ -403,7 +440,7 @@ type Attrs struct {
 }
 
 // Setstat applies attributes (ROADMAP §6.3). Permissions and ownership are
-// not settable and are ignored.
+// not settable and are ignored. It honours stat redirects.
 //
 // A size change is allowed only on a file this session has open for writing
 // (OpenSSH scp truncates that way; the right to change it was checked when
@@ -411,7 +448,7 @@ type Attrs struct {
 // setstat_mode and need the setstat permission, except on files this
 // session created: uploaders set the mtime of what they just wrote.
 func (s *Session) Setstat(vp string, a Attrs) error {
-	v, rel, err := s.writable(vp)
+	v, rel, err := s.writable(s.redirected(vp))
 	if err != nil {
 		return err
 	}
@@ -467,6 +504,8 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 	if sv != dv {
 		return "", ErrUnsupported // across mounts
 	}
+	s.clearRedirect(s.virtual(sv, srel))
+	s.clearRedirect(s.virtual(dv, drel))
 	fi, err := sv.root.Lstat(srel)
 	if err != nil {
 		return "", osError(err)
@@ -505,6 +544,11 @@ func (s *Session) Rename(src, dst string, posix bool) (string, error) {
 			return "", err
 		}
 		s.moveCreated(sv, srel, final)
+		// rclone checks the size of the target after a move and deletes
+		// "a failed copy" at the requested name: that would be the original.
+		if sv.opts().StatRedirect {
+			s.setRedirect(s.virtual(sv, drel), s.virtual(sv, final))
+		}
 		return s.virtual(sv, final), nil
 	}
 	return "", fmt.Errorf("unknown conflict policy %q", sv.opts().OnConflict)
@@ -641,6 +685,56 @@ func (s *Session) closedCreated(h *WriteHandle, st fs.FileInfo) {
 	if id, ok := s.created[k]; ok && os.SameFile(id.fi, st) {
 		s.created[k] = identify(st)
 	}
+}
+
+// redirected returns the path STAT, LSTAT and SETSTAT should use for vp.
+func (s *Session) redirected(vp string) string {
+	p := path.Clean("/" + vp)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.redirects[p]
+	if !ok {
+		return vp
+	}
+	if s.now().After(r.until) {
+		delete(s.redirects, p)
+		return vp
+	}
+	return r.final
+}
+
+// redirectFor returns the live redirect target of a requested path.
+func (s *Session) redirectFor(p string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.redirects[p]
+	if !ok || s.now().After(r.until) {
+		return "", false
+	}
+	return r.final, true
+}
+
+func (s *Session) setRedirect(requested, final string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.redirects[requested]; !ok && len(s.redirects) >= maxRedirects {
+		// The newest redirect is the one a client is about to check: make
+		// room by dropping the one that expires first.
+		oldest := ""
+		for k, r := range s.redirects {
+			if oldest == "" || r.until.Before(s.redirects[oldest].until) {
+				oldest = k
+			}
+		}
+		delete(s.redirects, oldest)
+	}
+	s.redirects[requested] = redirect{final: final, until: s.now().Add(RedirectTTL)}
+}
+
+func (s *Session) clearRedirect(p string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.redirects, p)
 }
 
 func (s *Session) forget(v *view, rel string) {

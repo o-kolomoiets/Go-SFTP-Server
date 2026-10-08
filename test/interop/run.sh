@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interop test: real OpenSSH sftp, scp and ssh clients against a freshly
 # built gosftpd. Usage: test/interop/run.sh (from anywhere). Needs bash,
-# openssh-client and Go.
+# openssh-client and Go. KEEP_WORK=1 keeps the work directory for inspection.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -12,7 +12,7 @@ FAILED=0
 cleanup() {
 	for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
 	wait 2>/dev/null || true
-	rm -rf "$WORK"
+	[ -n "${KEEP_WORK:-}" ] || rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -120,6 +120,7 @@ C="$WORK/cfg"
 mkdir -p "$C/public" "$C/inbox" "$C/state"
 printf 'public file\n' >"$C/public/readme.txt"
 printf 'existing report\n' >"$C/inbox/report.txt"
+printf 'existing document\n' >"$C/inbox/doc.bin"
 for u in reader partner admin; do ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$WORK/id_$u"; done
 PORT=$((20000 + RANDOM % 20000))
 cat >"$C/gosftpd.toml" <<TOML
@@ -185,11 +186,18 @@ cmp -s "$C/public/readme.txt" "$C/readme.got" && pass "reader: download" || fail
 [ ! -e "$C/public/new.txt" ] && grep -q 'Permission denied' "$C/reader.out" && pass "reader: upload denied" || fail "reader: upload not denied"
 
 # partner (upload): new files and renamed copies, no download, no delete.
+head -c 1000000 "$WORK/local/upload.bin" >"$WORK/local/half.bin"
 cat >"$C/partner.batch" <<BATCH
 put $WORK/local/short.txt new.txt
 put $WORK/local/short.txt report.txt
 -get report.txt $C/report.got
 -rm report.txt
+put $WORK/local/half.bin part.bin
+reput $WORK/local/upload.bin part.bin
+put $WORK/local/half.bin doc.bin
+reput $WORK/local/upload.bin doc.bin
+df -h
+ls -l
 BATCH
 # shellcheck disable=SC2046
 sftp -P "$PORT" $(as partner) -b "$C/partner.batch" partner@127.0.0.1 >"$C/partner.out" 2>&1 && pass "partner: sftp batch" || { fail "partner batch"; cat "$C/partner.out" >&2; }
@@ -197,6 +205,12 @@ cmp -s "$WORK/local/short.txt" "$C/inbox/new.txt" && pass "partner: upload" || f
 grep -q 'existing report' "$C/inbox/report.txt" && cmp -s "$WORK/local/short.txt" "$C/inbox/report (1).txt" &&
 	pass "partner: conflict kept the original" || fail "partner: conflict"
 [ ! -e "$C/report.got" ] && [ -e "$C/inbox/report.txt" ] && pass "partner: download and delete denied" || fail "partner: read or delete allowed"
+cmp -s "$WORK/local/upload.bin" "$C/inbox/part.bin" && pass "partner: reput completes a partial upload" || fail "partner: reput result differs"
+cmp -s "$WORK/local/upload.bin" "$C/inbox/doc (1).bin" && grep -qx 'existing document' "$C/inbox/doc.bin" &&
+	pass "partner: reput after a renamed put completes the copy" || fail "partner: reput after a renamed put: $(ls -l "$C/inbox")"
+grep -q 'Avail' "$C/partner.out" && pass "df -h works (statvfs)" || fail "df -h: $(grep -A2 'df -h' "$C/partner.out")"
+grep -Eq ' partner +partner ' "$C/partner.out" && ! grep -q " $(id -un) " "$C/partner.out" &&
+	pass "ls -l shows virtual owners" || fail "ls -l owners: $(grep -A3 'ls -l' "$C/partner.out")"
 # DoD M2: scp into an upload mount works without error messages (FSETSTAT size).
 # shellcheck disable=SC2046
 if scp -q -P "$PORT" $(as partner) "$WORK/local/upload.bin" partner@127.0.0.1:report.txt 2>"$C/scp.err" && [ ! -s "$C/scp.err" ]; then

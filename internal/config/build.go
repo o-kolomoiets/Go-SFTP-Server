@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
@@ -38,6 +39,14 @@ func (o MountOptions) toVFS() (vfs.MountOptions, error) {
 	if err != nil {
 		return vfs.MountOptions{}, err
 	}
+	resume, err := vfs.ParseResumeMode(o.Resume)
+	if err != nil {
+		return vfs.MountOptions{}, err
+	}
+	links, err := vfs.ParseSymlinkPolicy(o.Symlinks)
+	if err != nil {
+		return vfs.MountOptions{}, err
+	}
 	return vfs.MountOptions{
 		OnConflict:        policy,
 		RenameTemplate:    o.RenameTemplate,
@@ -45,7 +54,15 @@ func (o MountOptions) toVFS() (vfs.MountOptions, error) {
 		CompoundExts:      slices.Clone(o.CompoundExtensions),
 		SetstatMode:       mode,
 		Umask:             fs.FileMode(o.Umask),
+		Resume:            resume,
+		StatRedirect:      o.StatRedirect,
+		Symlinks:          links,
 	}, nil
+}
+
+// AuditOptions converts the [audit] table. Call after Validate.
+func (c *Config) AuditOptions() audit.Options {
+	return audit.Options{Categories: slices.Clone(c.Audit.Events), FailOpen: c.Audit.OnError == AuditFailOpen}
 }
 
 // Authenticator builds the authenticator, reading authorized_keys files.

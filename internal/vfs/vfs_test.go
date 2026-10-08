@@ -356,19 +356,10 @@ func TestSetstat(t *testing.T) {
 	}
 }
 
-func TestResumeAndExcl(t *testing.T) {
+func TestExcl(t *testing.T) {
 	t.Parallel()
 
 	s, _ := fixture(t, ConflictOverwrite)
-	for _, fl := range []OpenFlags{
-		{Write: true, Append: true},
-		{Write: true, Creat: true, Append: true},
-		{Write: true},
-	} {
-		if _, err := s.OpenWrite("a.txt", fl); !errors.Is(err, ErrResumeUnsupported) {
-			t.Errorf("OpenWrite(%+v) error = %v, want ErrResumeUnsupported", fl, err)
-		}
-	}
 	if _, err := s.OpenWrite("a.txt", OpenFlags{Write: true, Creat: true, Excl: true}); !errors.Is(err, ErrExists) {
 		t.Errorf("EXCL error = %v, want ErrExists", err)
 	}

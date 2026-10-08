@@ -122,3 +122,132 @@ func TestShortWriteFails(t *testing.T) {
 type shortWriter struct{}
 
 func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestCategories(t *testing.T) {
+	t.Parallel()
+
+	for event, want := range map[string]string{
+		"server.start": CategoryServer, "conn.accept": CategoryConn, "auth.failure": CategoryAuth,
+		"session.end": CategorySession, "fs.upload": CategoryTransfer, "fs.download": CategoryTransfer,
+		"fs.denied": CategoryDenied, "fs.list": CategoryList, "fs.stat": CategoryStat,
+		"fs.rename": CategoryModify, "fs.mkdir": CategoryModify, "fs.setstat": CategoryModify,
+	} {
+		if got := CategoryOf(event); got != want {
+			t.Errorf("CategoryOf(%q) = %q, want %q", event, got, want)
+		}
+	}
+
+	var b buffer
+	l, err := NewWithOptions(&b, slog.New(slog.DiscardHandler), Options{Categories: []string{CategoryAuth, CategoryList}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []string{"server.start", "conn.accept", "auth.success", "fs.upload", "fs.list", "fs.stat"} {
+		l.With("conn_id", "x").Event(ev)
+	}
+	var got []string
+	for _, line := range b.lines() {
+		got = append(got, line["event"].(string))
+	}
+	if strings.Join(got, ",") != "server.start,auth.success,fs.list" {
+		t.Errorf("recorded %v", got)
+	}
+	if !l.Enabled("fs.list") || l.Enabled("fs.stat") {
+		t.Error("Enabled")
+	}
+
+	// Defaults leave out list and stat.
+	d := New(io.Discard, slog.New(slog.DiscardHandler))
+	if d.Enabled("fs.list") || d.Enabled("fs.stat") || !d.Enabled("fs.denied") {
+		t.Error("default categories")
+	}
+	if _, err := NewWithOptions(io.Discard, nil, Options{Categories: []string{"files"}}); err == nil {
+		t.Error("unknown category accepted")
+	}
+}
+
+func TestFailOpen(t *testing.T) {
+	t.Parallel()
+
+	var b buffer
+	var fallback bytes.Buffer
+	l, err := NewWithOptions(&b, slog.New(slog.NewTextHandler(&fallback, nil)), Options{FailOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.setFail(true)
+	l.Event("fs.upload", slog.String("path", "/a"))
+	if !l.Healthy() {
+		t.Error("fail-open logger reports unhealthy")
+	}
+	if !strings.Contains(fallback.String(), "audit event not persisted") {
+		t.Errorf("event not in the fallback log: %q", fallback.String())
+	}
+	b.setFail(false)
+	fallback.Reset()
+	l.Event("fs.upload", slog.String("path", "/b"))
+	l.Event("fs.upload", slog.String("path", "/c"))
+	if strings.Contains(fallback.String(), "/c") {
+		t.Error("events still go to the fallback log after recovery")
+	}
+}
+
+// failOn fails writes that contain a marker and accepts all others.
+type failOn struct {
+	mu     sync.Mutex
+	marker string
+	b      bytes.Buffer
+}
+
+func (f *failOn) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if bytes.Contains(p, []byte(f.marker)) {
+		return 0, syscall.EIO
+	}
+	return f.b.Write(p)
+}
+
+// Review finding: in fail-open mode an event whose own write failed goes to
+// the fallback log even if another write succeeded in between.
+func TestFailOpenFallbackPerEvent(t *testing.T) {
+	t.Parallel()
+
+	w := &failOn{marker: "/lost"}
+	var fallback bytes.Buffer
+	var mu sync.Mutex
+	l, err := NewWithOptions(w, slog.New(slog.NewTextHandler(lockedWriter{&mu, &fallback}, nil)), Options{FailOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Go(func() {
+			p := "/ok"
+			if i%5 == 0 {
+				p = "/lost"
+			}
+			l.Event("fs.remove", slog.String("path", p))
+		})
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if n := strings.Count(fallback.String(), "/lost"); n != 10 {
+		t.Errorf("%d of 10 failed events reached the fallback log", n)
+	}
+	if strings.Contains(fallback.String(), "/ok") {
+		t.Error("persisted events were also sent to the fallback log")
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
