@@ -10,7 +10,7 @@
 |---|---|---|---|
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
-| M2 MVP | v0.2.0 | 🔄 | 0 / 18 |
+| M2 MVP | v0.2.0 | 🔄 | 9 / 18 |
 | M3 Hardening | v0.3.0 | ⬜ | 0 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
@@ -74,15 +74,15 @@
 | ID | Задача | Статус | Где / заметка |
 |---|---|---|---|
 | **M2a** | **Конфиг, пользователи, права, CLI** | | |
-| M2-01 | `internal/config`: типы, `Default()`, загрузка TOML (неизвестный ключ — ошибка с позицией), `FileMode`, `config_version`, `include` | ⬜ | `ByteSize` — в M3 вместе с `max_file_size` |
-| M2-02 | Источники: порядок поиска файла, приоритет флаги > env > файл > умолчания; zero-config `--dir` без поиска файла | ⬜ | |
-| M2-03 | `Validate()` (все ошибки сразу, с путём ключа) и `CheckFS()` (пути mount'ов, права файлов по §6.5) | ⬜ | |
-| M2-04 | Опции mount'а: `create`, `read_only`, `on_conflict`, `rename_template`, `max_rename_attempts`, `compound_extensions`, `umask`, `require_mountpoint`, `setstat_mode`, `flatten` | ⬜ | `symlinks`, `resume`, `stat_redirect` — в M2b |
-| M2-05 | Пользователи `[users.NAME]`: `authorized_keys`, `authorized_keys_file`, `allow_from`, `expires`, `disabled`, `access`; неизвестный пользователь идёт тем же путём, что неверный ключ | ⬜ | |
-| M2-06 | Права: флаги и пресеты §6.3, temp-загрузки через `write`, `size` на writer этой сессии, `read_only` | ⬜ | |
-| M2-07 | `{user}`-home: безопасное создание и открытие (ST-12) | ⬜ | |
-| M2-08 | CLI: `init`, `config validate\|show\|example`, `user add\|list`, `hostkey generate`, `completion`; golden-тесты | ⬜ | |
-| M2-09 | Примеры конфигов через go:embed; тест `Validate()` и e2e минимального примера | ⬜ | |
+| M2-01 | `internal/config`: типы, `Default()`, загрузка TOML (неизвестный ключ — ошибка с позицией), `FileMode`, `config_version`, `include` | ✅ | `internal/config`; `ByteSize` — в M3 вместе с `max_file_size`. `include` принимает только `[users.NAME]` |
+| M2-02 | Источники: порядок поиска файла, приоритет флаги > env > файл > умолчания; zero-config `--dir` без поиска файла | ✅ | `config.Find`, `cli.buildConfig`; `--authorized-keys`, `--user`, `--state-dir` — только с `--dir` |
+| M2-03 | `Validate()` (все ошибки сразу, с путём ключа) и `CheckFS()` (пути mount'ов, права файлов по §6.5) | ✅ | Права файлов как StrictModes в sshd: не запускается, если конфиг, ключи или `authorized_keys` доступны группе на запись |
+| M2-04 | Опции mount'а: `create`, `read_only`, `on_conflict`, `rename_template`, `max_rename_attempts`, `compound_extensions`, `umask`, `require_mountpoint`, `setstat_mode`, `flatten` | ✅ | `symlinks`, `resume`, `stat_redirect` — в M2b |
+| M2-05 | Пользователи `[users.NAME]`: `authorized_keys`, `authorized_keys_file`, `allow_from`, `expires`, `disabled`, `access`; неизвестный пользователь идёт тем же путём, что неверный ключ | ✅ | `auth.NewUsers` |
+| M2-06 | Права: флаги и пресеты §6.3, temp-загрузки через `write`, `size` на writer этой сессии, `read_only` | ✅ | `vfs/perm.go`; interop: пользователи `read`, `upload`, `full` с OpenSSH |
+| M2-07 | `{user}`-home: безопасное создание и открытие (ST-12) | ✅ | `Mount.openHome`: `Lstat` + `OpenRoot` + `os.SameFile`; symlink `alice → bob` или наружу → mount недоступен, `fs.denied reason=home_not_dir` |
+| M2-08 | CLI: `init`, `config validate\|show\|example`, `user add\|list`, `hostkey generate`, `completion`; golden-тесты | ✅ | golden-тест `user add`; `completion` — встроенная команда cobra |
+| M2-09 | Примеры конфигов через go:embed; тест `Validate()` и e2e минимального примера | ✅ | `TestExamples`, `TestExampleFullCoversEveryKey`, `TestServeMinimalExample` |
 | **M2b** | **Протокол** | | |
 | M2-10 | Докачка: append-only guard, `resume = "append-only"\|"off"` | ⬜ | |
 | M2-11 | `stat_redirect` (в пределах сессии, TTL 60 с, цель posix-rename) | ⬜ | |
