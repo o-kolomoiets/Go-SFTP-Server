@@ -100,12 +100,16 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 			}
 			au.Password = h
 		}
+		keysOn := c.Auth.HasMethod(auth.MethodPublicKey) // otherwise keys are not even read
 		for i, line := range u.AuthorizedKeys {
+			if !keysOn {
+				break
+			}
 			ks, ws := auth.ParseAuthorizedKeys([]byte(line), key("users", name, "authorized_keys")+"["+strconv.Itoa(i+1)+"]")
 			au.Keys = append(au.Keys, ks...)
 			warns = append(warns, ws...)
 		}
-		if f := u.AuthorizedKeysFile; f != "" {
+		if f := u.AuthorizedKeysFile; f != "" && keysOn {
 			ks, ok := files[f]
 			if !ok {
 				var ws []string
@@ -132,6 +136,11 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 		users = append(users, au)
 	}
 	return auth.NewUsers(users), warns, nil
+}
+
+// usesKeys reports whether u has keys that may be used.
+func (c *Config) usesKeys(u *User) bool {
+	return (len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != "") && c.Auth.HasMethod(auth.MethodPublicKey)
 }
 
 // canUsePassword reports whether u has a password that may be used.

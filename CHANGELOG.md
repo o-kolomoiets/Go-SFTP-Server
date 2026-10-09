@@ -15,18 +15,20 @@ Incompatible changes are prefixed with **BREAKING:**.
   address or IPv6 /64) and `max_preauth_connections` (64). Refused
   connections are audited as `conn.reject`, at most 10 per second.
 - Bans (`[auth.ban]`): a source with 10 failures within 10 minutes is
-  refused at accept for 30 minutes. Every wrong password is a failure;
-  rejected keys count once per connection, not per offered key; loopback is
-  exempt by default; the table is bounded. New audit event `auth.ban`.
+  refused at accept for 30 minutes, and its open connections get no further
+  password checks. Every wrong password is a failure at once; rejected keys
+  count once per connection, not per offered key; loopback is exempt by
+  default; the table is bounded. New audit event `auth.ban`.
 - `server.idle_timeout` (15m) closes connections without SFTP traffic;
   `server.keepalive_interval` (30s) closes connections that leave 3
   `keepalive@openssh.com` requests unanswered. `conn.close` reports
   `idle_timeout` or `keepalive_timeout`.
 - Opt-in password login: `auth.methods = ["publickey", "password"]` and
-  `password_hash` (argon2id; bcrypt accepted for imported accounts). Every
-  attempt checks one hash of each kind and cost in use, so the response time
-  does not reveal which users exist; verifications run at most one per CPU.
-  A method missing from `auth.methods` is refused. `gosftpd user hash-password [--stdin]` prints a hash, and
+  `password_hash` (argon2id; bcrypt accepted for imported accounts). Each
+  attempt checks one hash, and a failure takes as long as the costliest
+  configured hash, so the response time does not reveal which users exist;
+  checks run at most one per CPU. A method missing from `auth.methods` is
+  refused, and its keys or passwords are not loaded. `gosftpd user hash-password [--stdin]` prints a hash, and
   `user add --password-hash` adds it to a user.
 - `server.crypto_policy`: `modern` (default, as before) or `compat`, which
   adds NIST curve and SHA-2 Diffie-Hellman key exchange and non-ETM MACs for
@@ -45,7 +47,7 @@ Incompatible changes are prefixed with **BREAKING:**.
 - A client that disconnected right after logging in left no `auth.success`
   and `conn.close` events.
 
-## [0.2.0] - 2026-10-08
+## [0.2.0] - 2026-10-09
 
 ### Added
 

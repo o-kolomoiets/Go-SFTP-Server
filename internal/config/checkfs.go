@@ -112,7 +112,7 @@ func (c *Config) checkHostKeys(p *problems) {
 func (c *Config) checkUsers(p *problems) {
 	files := map[string]string{} // path -> key, checked once
 	for _, name := range sortedKeys(c.Users) {
-		if f := c.Users[name].AuthorizedKeysFile; f != "" {
+		if f := c.Users[name].AuthorizedKeysFile; f != "" && c.Auth.HasMethod(auth.MethodPublicKey) {
 			if _, ok := files[f]; !ok {
 				files[f] = key("users", name, "authorized_keys_file")
 			}

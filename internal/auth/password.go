@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -85,6 +86,8 @@ func (h bcryptHash) class() string {
 	return "bcrypt cost=" + strconv.Itoa(cost)
 }
 
+var bcryptRE = regexp.MustCompile(`^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$`)
+
 // bcryptAlphabet is bcrypt's base64 alphabet.
 const bcryptAlphabet = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -129,6 +132,11 @@ func ParsePasswordHash(s string) (PasswordHash, error) {
 	case strings.HasPrefix(s, "$argon2id$"):
 		return parseArgon2(s)
 	case strings.HasPrefix(s, "$2a$"), strings.HasPrefix(s, "$2b$"), strings.HasPrefix(s, "$2y$"):
+		// The exact shape: bcrypt.Cost reads only the prefix, and a hash
+		// with a bad salt would fail without hashing, faster than others.
+		if !bcryptRE.MatchString(s) {
+			return nil, errors.New("invalid bcrypt hash: want $2b$<cost>$ and 53 characters of [./A-Za-z0-9]")
+		}
 		cost, err := bcrypt.Cost([]byte(s))
 		if err != nil {
 			return nil, fmt.Errorf("invalid bcrypt hash: %w", err)
@@ -178,8 +186,8 @@ func parseArgon2(s string) (PasswordHash, error) {
 		return nil, fmt.Errorf("argon2id t=%d is outside 1..%d", t, maxArgonTime)
 	case m < 8*p || m > maxArgonMemory:
 		return nil, fmt.Errorf("argon2id m=%d is outside %d..%d KiB", m, 8*p, maxArgonMemory)
-	case len(salt) < 8, len(key) < 16, len(key) > 64:
-		return nil, errors.New("invalid argon2id hash: salt must be at least 8 bytes and the hash 16 to 64 bytes")
+	case len(salt) < 8, len(salt) > 64, len(key) < 16, len(key) > 64:
+		return nil, errors.New("invalid argon2id hash: the salt must be 8 to 64 bytes and the hash 16 to 64 bytes")
 	}
 	return &argon2Hash{memory: uint32(m), time: uint32(t), threads: uint8(p), salt: salt, key: key}, nil
 }
@@ -191,10 +199,7 @@ func defaultDummy() PasswordHash {
 }
 
 // passwordClasses returns one dummy hash per class of the configured
-// hashes (at least the default class), sorted by class. Every password
-// attempt verifies one hash of each class, so that it takes equally long
-// whichever user it names, whether the user exists, has a password, or
-// has a hash with other costs.
+// hashes (at least the default class), sorted by class.
 func passwordClasses(hashes []PasswordHash) []PasswordHash {
 	byClass := map[string]PasswordHash{}
 	d := defaultDummy()

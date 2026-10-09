@@ -912,10 +912,42 @@ methods = ["password"]
 max_connections_per_ip = 64
 `)
 	warns = mustValidate(t, c)
-	for _, want := range []string{"users.bob: keys ignored", "limits.max_connections_per_ip: 64 is not below"} {
+	for _, want := range []string{"users.bob: keys not used", "limits.max_connections_per_ip: 64 is not below max_preauth_connections"} {
 		if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, want) }) {
 			t.Errorf("warnings %q lack %q", warns, want)
 		}
+	}
+
+	// Keys of a password-only server are not even read: a missing key file
+	// does not stop it.
+	c, dir := load(t, fmt.Sprintf(base, hash)+`authorized_keys_file = "missing.pub"
+[auth]
+methods = ["password"]
+`)
+	mustValidate(t, c)
+	if err := os.MkdirAll(filepath.Join(dir, "m"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CheckFS(); err != nil && strings.Contains(err.Error(), "missing.pub") {
+		t.Errorf("CheckFS checks an unused key file: %v", err)
+	}
+	if a, _, err := c.Authenticator(); err != nil || a.Len() != 0 {
+		t.Errorf("Authenticator() with keys off: %v keys, err %v", a, err)
+	}
+
+	// The per-address limit against a lower total.
+	c, _ = load(t, fmt.Sprintf(base, hash)+"[limits]\nmax_connections = 16\n")
+	warns = mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "is not below max_connections (16)") }) {
+		t.Errorf("warnings %q lack the max_connections case", warns)
+	}
+
+	// "password" without any password_hash is useless.
+	c, _ = load(t, strings.Replace(fmt.Sprintf(base, ""), `password_hash = ""`, `authorized_keys = ["`+pubKey(t)+`"]`, 1)+
+		"[auth]\nmethods = [\"publickey\", \"password\"]\n")
+	warns = mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "no user has a password_hash") }) {
+		t.Errorf("warnings %q lack the unused password method", warns)
 	}
 }
 

@@ -4,6 +4,7 @@ package server
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -531,8 +532,10 @@ func TestPinnedUser(t *testing.T) {
 	}
 }
 
-// TestPasswordFailuresBan: every wrong password counts toward a ban, also
-// in a connection that then logs in; rejected keys before a login do not.
+// TestPasswordFailuresBan: every wrong password counts toward a ban at
+// once, also in a connection that then logs in, and a connection opened
+// before the ban gets no further guesses; rejected keys before a login do
+// not count.
 func TestPasswordFailuresBan(t *testing.T) {
 	t.Parallel()
 
@@ -544,7 +547,7 @@ func TestPasswordFailuresBan(t *testing.T) {
 	key := signer(t)
 	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
 	var bans *auth.BanTable
-	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, categories: []string{audit.CategoryAuth}, tweak: func(c *Config) {
 		c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Password: ph, Keys: keys}})
 		c.Methods = []string{auth.MethodPublicKey, auth.MethodPassword}
 		bans = auth.NewBanTable(auth.BanOptions{AfterFailures: 3})
@@ -559,6 +562,13 @@ func TestPasswordFailuresBan(t *testing.T) {
 		}
 		return err
 	}
+	passwords := func(pws ...string) ssh.AuthMethod {
+		return ssh.RetryableAuthMethod(ssh.PasswordCallback(func() (string, error) {
+			pw := pws[0]
+			pws = pws[1:]
+			return pw, nil
+		}), len(pws))
+	}
 	lo := netip.MustParseAddr("127.0.0.1")
 
 	// An agent with many keys: rejected keys before the right one are free.
@@ -572,22 +582,79 @@ func TestPasswordFailuresBan(t *testing.T) {
 	}
 
 	// Two wrong passwords, then the right key: both passwords count.
-	guesses := []string{"guess1", "guess2"}
-	pw := ssh.RetryableAuthMethod(ssh.PasswordCallback(func() (string, error) {
-		g := guesses[0]
-		guesses = guesses[1:]
-		return g, nil
-	}), len(guesses))
-	if err := login(pw, ssh.PublicKeys(key)); err != nil {
+	if err := login(passwords("guess1", "guess2"), ssh.PublicKeys(key)); err != nil {
 		t.Fatal(err)
 	}
 	if bans.Banned(lo) {
 		t.Fatal("banned after two failures")
 	}
-	if err := login(ssh.Password("guess3")); err == nil {
-		t.Fatal("wrong password accepted")
+
+	// The third wrong password bans at once; the right password on the
+	// same connection is then refused unchecked.
+	if err := login(passwords("guess3", "s3cret", "s3cret")); err == nil {
+		t.Fatal("logged in after the ban")
 	}
-	waitForMsg(t, func() bool { return bans.Banned(lo) }, func() string { return "not banned after three wrong passwords" })
+	if !bans.Banned(lo) {
+		t.Fatal("not banned after three wrong passwords")
+	}
+	if n := strings.Count(e.auditLog.String(), `"event":"auth.ban"`); n != 1 {
+		t.Errorf("%d auth.ban events, want 1", n)
+	}
+}
+
+// fakeMeta is the ssh.ConnMetadata of a connection attempt.
+type fakeMeta struct {
+	ssh.ConnMetadata
+	user string
+}
+
+func (m fakeMeta) User() string         { return m.user }
+func (m fakeMeta) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1} }
+
+// TestUserNameChange: after an attempt as one user, a connection cannot
+// log in as another (x/crypto allows it; sshd does not).
+func TestUserNameChange(t *testing.T) {
+	t.Parallel()
+
+	h, err := auth.HashPassword([]byte("s3cret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph, _ := auth.ParsePasswordHash(h)
+	alice := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(alice.PublicKey()), "test")
+	authn := auth.NewUsers([]auth.User{{Name: "alice", Keys: keys}, {Name: "bob", Password: ph}})
+	srv, err := New(Config{
+		HostKeys: []ssh.Signer{signer(t)}, Auth: authn, Mounts: &vfs.Table{},
+		Methods: []string{auth.MethodPublicKey, auth.MethodPassword},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, first := range []string{"none", auth.MethodPassword} {
+		sc, cc := net.Pipe()
+		ca := srv.newConnAuth(sc, audit.Discard())
+		cfg := ca.config()
+		bob := fakeMeta{user: "bob"}
+		if first == "none" {
+			cfg.AuthLogCallback(bob, "none", errors.New("none"))
+		} else {
+			_, err := cfg.PasswordCallback(bob, []byte("wrong"))
+			cfg.AuthLogCallback(bob, auth.MethodPassword, err)
+		}
+		if _, err := cfg.PublicKeyCallback(fakeMeta{user: "alice"}, alice.PublicKey()); !errors.Is(err, errUserChanged) {
+			t.Errorf("after %s as bob, alice's key: err = %v, want errUserChanged", first, err)
+		}
+		if _, err := cfg.PasswordCallback(fakeMeta{user: "alice"}, []byte("s3cret")); !errors.Is(err, errUserChanged) {
+			t.Errorf("after %s as bob, a password as alice: err = %v", first, err)
+		}
+		if _, err := cfg.PasswordCallback(bob, []byte("s3cret")); err != nil {
+			t.Errorf("after %s as bob, bob's password: %v", first, err)
+		}
+		sc.Close()
+		cc.Close()
+	}
 }
 
 // TestMethods: auth.methods turns each method on or off.
@@ -640,12 +707,28 @@ func TestMethods(t *testing.T) {
 func TestNegativeLimits(t *testing.T) {
 	t.Parallel()
 
-	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
-		c.HandshakeTimeout, c.MaxConnections, c.MaxConnectionsPerIP, c.MaxPreauthConnections = -1, -1, -1, -1
-		c.MaxSessionsPerConn, c.MaxAuthTries, c.IdleTimeout, c.KeepaliveInterval = -1, -1, -1, -1
-	}})
-	c := e.sftp(t)
-	if _, err := c.Getwd(); err != nil {
+	srv, err := New(Config{
+		HostKeys: []ssh.Signer{signer(t)}, Auth: auth.New("", nil), Mounts: &vfs.Table{},
+		HandshakeTimeout: -1, MaxConnections: -1, MaxConnectionsPerIP: -1, MaxPreauthConnections: -1,
+		MaxSessionsPerConn: -1, MaxAuthTries: -1, IdleTimeout: -1, KeepaliveInterval: -1,
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	c := srv.cfg
+	if c.HandshakeTimeout != DefaultHandshakeTimeout || c.MaxConnections != DefaultMaxConnections ||
+		c.MaxConnectionsPerIP != DefaultMaxPerSource || c.MaxPreauthConnections != DefaultMaxPreauth ||
+		c.MaxSessionsPerConn != DefaultMaxSessions || c.MaxAuthTries != DefaultMaxAuthTries || srv.sshCfg.MaxAuthTries != DefaultMaxAuthTries {
+		t.Errorf("negative limits did not become the defaults: %+v", c)
+	}
+	if c.IdleTimeout != 0 || c.KeepaliveInterval != 0 {
+		t.Errorf("negative timeouts: idle %v, keepalive %v, want 0 (off)", c.IdleTimeout, c.KeepaliveInterval)
+	}
+	zero, err := New(Config{HostKeys: []ssh.Signer{signer(t)}, Auth: auth.New("", nil), Mounts: &vfs.Table{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero.cfg.IdleTimeout != DefaultIdleTimeout || zero.cfg.KeepaliveInterval != DefaultKeepaliveInterval {
+		t.Errorf("zero timeouts: idle %v, keepalive %v, want the defaults", zero.cfg.IdleTimeout, zero.cfg.KeepaliveInterval)
 	}
 }

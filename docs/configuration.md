@@ -105,9 +105,11 @@ another user.
 ### `[auth.ban]`
 
 Failures count against the source, the IPv4 address or the IPv6 /64:
-every wrong password is one failure, also in a connection that then logs
-in; a connection that closes without logging in after rejected keys is one
-failure, however many keys an SSH agent offered. A source with
+every wrong password is one failure as soon as it is refused, also in a
+connection that then logs in; a connection that closes without logging in
+after rejected keys is one failure, however many keys an SSH agent offered.
+Once a source is banned, its open connections get no further password
+checks. A source with
 `after_failures` failures within `within` is refused right after accept for
 `duration` (`conn.reject` with `reason=banned`; the ban itself is logged as
 `auth.ban`). Bans are kept in memory, for at most 65 536 sources.
@@ -229,15 +231,17 @@ A line with any other option, such as `command=`, `cert-authority` or
 `verify-required`, is skipped with a warning naming the file and line.
 
 Passwords are off unless `auth.methods` includes `password`. Prefer keys:
-a password can be guessed, and every attempt costs the server about 19 MiB
-and tens of milliseconds of CPU. New hashes use argon2id with m=19456,
-t=2, p=1. Imported hashes may use argon2id with up to 64 MiB, t ≤ 10 and
-p ≤ 8, or bcrypt with cost 10 to 14 (`$2a$`, `$2b$`, `$2y$`). So that the
-response time does not tell which users exist, every attempt checks one hash
-of each kind and cost in use (the user's own, and stand-ins for the others):
-with only `hash-password` hashes that is one argon2id check, while imported
-bcrypt hashes make every attempt cost one bcrypt check more. Re-hash
-imported passwords with `gosftpd user hash-password` when you can.
+a password can be guessed, and every attempt costs the server one hash
+check (about 19 MiB and tens of milliseconds of CPU with the default
+parameters). New hashes use argon2id with m=19456, t=2, p=1. Imported
+hashes may use argon2id with up to 64 MiB, t ≤ 10 and p ≤ 8, or bcrypt with
+cost 10 to 14 (`$2a$`, `$2b$`, `$2y$`). So that the response time does not
+tell which users exist, a failed attempt takes as long as checking the
+costliest hash in the configuration: unknown users and users without a
+password are checked against a default argon2id hash, and every failure
+then waits the rest of that time without using the CPU. Costly imported
+hashes therefore make every failed attempt slower; re-hash them with
+`gosftpd user hash-password` when you can.
 
 ### Permissions
 
@@ -312,7 +316,7 @@ is given: run it as a dedicated user.
 | `gosftpd config example [--full]` | Prints an example. |
 | `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append; writes nothing. `--password-hash` adds a password. |
 | `gosftpd user hash-password [--stdin]` | Asks for a password twice (or reads one line with `--stdin`) and prints its argon2id hash. |
-| `gosftpd user list` | Lists users with access, key count, expiry and status. |
+| `gosftpd user list` | Lists users with access, key count, password, expiry and status (`off` when `auth.methods` leaves the method out). |
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |
 | `gosftpd hostkey show [--known-hosts HOST:PORT]` | Prints the fingerprint and a `known_hosts` line. |
 

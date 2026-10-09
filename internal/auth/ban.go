@@ -49,17 +49,18 @@ func SourceKey(ip netip.Addr) netip.Prefix {
 
 // BanOptions configures a BanTable.
 type BanOptions struct {
-	AfterFailures int            // failed connections from a source that start a ban...
+	AfterFailures int            // failures of a source that start a ban...
 	Within        time.Duration  // ...when they happen within this window
 	Duration      time.Duration  // length of a ban
 	Exempt        []netip.Prefix // never banned
 	MaxEntries    int            // per table (failures and bans); default DefaultMaxBanEntries
 }
 
-// BanTable bans sources whose connections keep failing authentication. It
-// counts connections, not offered keys, so an agent with many keys does not
-// ban its owner. Both tables are bounded LRUs: a flood of sources evicts the
-// oldest entries instead of growing memory.
+// BanTable bans sources that keep failing authentication. The caller
+// decides what a failure is (the server counts each wrong password, and
+// rejected keys once per connection, so that an agent with many keys does
+// not ban its owner). Both tables are bounded LRUs: a flood of sources
+// evicts the oldest entries instead of growing memory.
 type BanTable struct {
 	opts  BanOptions
 	now   func() time.Time
@@ -121,8 +122,9 @@ func (b *BanTable) Banned(ip netip.Addr) bool {
 	return true
 }
 
-// Fail records a connection from ip that ended without logging in. It
-// reports whether this failure banned ip's source (SourceKey).
+// Fail records a failure of ip and reports whether it banned ip's source
+// (SourceKey). Failures of a source that is banned already are not
+// recorded, so one burst starts one ban.
 func (b *BanTable) Fail(ip netip.Addr) bool {
 	if b.exempt(ip) {
 		return false
@@ -131,6 +133,9 @@ func (b *BanTable) Fail(ip netip.Addr) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.elapsed()
+	if until, ok := b.bans.get(src); ok && now < until {
+		return false
+	}
 	times, _ := b.failures.get(src)
 	keep := 0
 	for keep < len(times) && now-times[keep] >= b.opts.Within {

@@ -28,7 +28,7 @@ max_auth_tries = 6
 [auth]
 methods = ["publickey"]                 # add "password" for users with password_hash
 
-[auth.ban]                              # failed connections (not keys) per IPv4 address or IPv6 /64
+[auth.ban]                              # per IPv4 address or IPv6 /64: each wrong password, rejected keys once per connection
 after_failures = 10                     # 0 = no bans
 within = "10m"
 duration = "30m"

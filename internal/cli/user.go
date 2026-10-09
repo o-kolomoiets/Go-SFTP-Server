@@ -224,7 +224,8 @@ func newUserListCmd() *cobra.Command {
 			}
 			slices.Sort(names)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "USER\tACCESS\tKEYS\tEXPIRES\tSTATUS")
+			fmt.Fprintln(w, "USER\tACCESS\tKEYS\tPASSWORD\tEXPIRES\tSTATUS")
+			keysOn, pwOn := c.Auth.HasMethod(auth.MethodPublicKey), c.Auth.HasMethod(auth.MethodPassword)
 			now := time.Now()
 			for _, name := range names {
 				u := c.Users[name]
@@ -242,6 +243,16 @@ func newUserListCmd() *cobra.Command {
 						keys = strconv.Itoa(len(u.AuthorizedKeys) + len(ks))
 					}
 				}
+				if !keysOn {
+					keys = "off" // auth.methods
+				}
+				password := "-"
+				if u.PasswordHash != "" {
+					password = "yes"
+					if !pwOn {
+						password = "off"
+					}
+				}
 				expires, status := "-", "active"
 				if u.Expires != nil {
 					expires = u.Expires.UTC().Format(time.RFC3339)
@@ -252,7 +263,7 @@ func newUserListCmd() *cobra.Command {
 				if u.Disabled {
 					status = "disabled"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", name, strings.Join(access, ", "), keys, expires, status)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, strings.Join(access, ", "), keys, password, expires, status)
 			}
 			return w.Flush()
 		},

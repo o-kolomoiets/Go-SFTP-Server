@@ -22,23 +22,25 @@ model and a hardening guide follow in v0.3.
 - Connections are counted right after accept, before the SSH handshake: at
   most `max_connections` in total, `max_connections_per_ip` per IPv4 address
   or IPv6 /64, and `max_preauth_connections` that have not logged in yet.
-  With the defaults (16 below 64) one source cannot take all
-  pre-authentication slots; `config validate` warns when the per-address
-  limit is not below the pre-authentication one.
-- A source whose connections fail to log in 10 times within 10 minutes is
-  refused at accept for 30 minutes (`[auth.ban]`). Every wrong password
-  counts; rejected keys count once per connection, so an SSH agent offering
-  many keys does not ban its owner. A connection cannot switch to another
-  user name after a failed attempt.
+  With the defaults (16 per address, 64 before login, 256 in total) one
+  source cannot take all pre-authentication slots; `config validate` warns
+  when the per-address limit is not below the other two.
+- A source with 10 failures within 10 minutes is refused at accept for 30
+  minutes (`[auth.ban]`). Every wrong password counts at once, and
+  connections the source still has open get no further password checks;
+  rejected keys count once per connection, so an SSH agent offering many
+  keys does not ban its owner. A connection cannot switch to another user
+  name after a failed attempt.
   Loopback is exempt by default. The ban list lives in memory and is bounded
   (65 536 sources); a restart clears it.
 - The handshake must finish within `handshake_timeout`; a connection without
   SFTP traffic for `idle_timeout` is closed, and so is one that leaves 3
   keepalive requests unanswered.
-- Password checks (argon2id, 19 MiB) run at most one per CPU at a time, so
-  pre-authentication memory stays bounded. Passwords over 1024 bytes are
-  refused without hashing. Every attempt checks one hash of each kind and
-  cost configured, so its duration does not depend on the user name.
+- A password attempt checks one hash, at most one per CPU at a time, so
+  pre-authentication memory stays bounded (19 MiB per check with the
+  default parameters). Passwords over 1024 bytes are refused without
+  hashing. A failed attempt takes as long as the costliest configured hash,
+  whichever user it names.
 - Refused connections are logged at most 10 per second.
 
 ## Confinement

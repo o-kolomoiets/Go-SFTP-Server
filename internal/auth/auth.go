@@ -84,8 +84,10 @@ type Authenticator struct {
 	// hashing bounds concurrent password verifications, and so the memory
 	// they take before authentication.
 	hashing chan struct{}
-	// classes holds one dummy hash per class of configured password hash.
-	classes []PasswordHash
+	// dummy stands in for the hash of unknown users and users without a
+	// password; pad equalizes the time of failures.
+	dummy PasswordHash
+	pad   *padder
 }
 
 func newAuthenticator(n int) *Authenticator {
@@ -93,7 +95,8 @@ func newAuthenticator(n int) *Authenticator {
 		users:   make(map[string]*account, n),
 		now:     time.Now,
 		hashing: make(chan struct{}, runtime.NumCPU()),
-		classes: passwordClasses(nil),
+		dummy:   defaultDummy(),
+		pad:     newPadder(nil),
 	}
 }
 
@@ -124,7 +127,7 @@ func NewUsers(users []User) *Authenticator {
 		acc.disabled = u.Disabled
 		a.users[u.Name] = acc
 	}
-	a.classes = passwordClasses(hashes)
+	a.pad = newPadder(hashes)
 	return a
 }
 
@@ -179,31 +182,28 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 	return perms, nil
 }
 
-// Password is an ssh.ServerConfig.PasswordCallback. Every attempt verifies
-// one hash of each configured class (the user's own hash for its class,
-// dummies for the others), so that it takes equally long whichever user it
-// names.
+// Password is an ssh.ServerConfig.PasswordCallback. It verifies one hash,
+// the user's own or a dummy, and a failure takes as long as the costliest
+// configured hash (see padder), whichever user it names.
 func (a *Authenticator) Password(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 	if len(password) == 0 || len(password) > MaxPasswordLen {
 		return nil, errDenied
 	}
+	a.pad.measure(a.hashing)
 	name := conn.User()
 	acc := a.lookup(name)
-	var own PasswordHash
-	if acc != nil {
-		own = acc.password
+	h := a.dummy
+	if acc != nil && acc.password != nil {
+		h = acc.password
 	}
-	ok := false
 	a.hashing <- struct{}{}
-	for _, d := range a.classes {
-		if own != nil && d.class() == own.class() {
-			ok = own.verify(password)
-		} else {
-			d.verify(password)
-		}
-	}
+	start := time.Now()
+	ok := h.verify(password)
+	took := time.Since(start)
 	<-a.hashing
+	a.pad.observe(took)
 	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
+		a.pad.pad(took)
 		return nil, errDenied
 	}
 	return newPermissions(name, MethodPassword), nil

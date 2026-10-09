@@ -9,6 +9,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,7 +60,10 @@ func TestParsePasswordHash(t *testing.T) {
 		{"$argon2id$v=19$m=19456,t=2,p=1$" + salt + "$" + key, true},
 		{"$argon2id$v=19$m=65536,t=3,p=4$" + salt + "$" + key, true},
 		{string(cheap), false},
-		{"$argon2id$v=19$m=2097152,t=2,p=1$" + salt + "$" + key, false}, // 2 GiB per attempt
+		{"$2b$12$" + strings.Repeat("*", 53), false}, // fails without hashing
+		{"$2b$12$" + string(bc[7:]) + "x", false},    // too long
+		{"$argon2id$v=19$m=19456,t=2,p=1$" + strings.Repeat("A", 100) + "$" + key, false}, // 75-byte salt
+		{"$argon2id$v=19$m=2097152,t=2,p=1$" + salt + "$" + key, false},                   // 2 GiB per attempt
 		{"$argon2id$v=19$m=19456,t=100,p=1$" + salt + "$" + key, false},
 		{"$argon2id$v=19$m=19456,t=2,p=64$" + salt + "$" + key, false},
 		{"$argon2id$v=19$t=2,m=19456,p=1$" + salt + "$" + key, false},
@@ -143,12 +147,12 @@ func TestPassword(t *testing.T) {
 	}
 }
 
-// TestPasswordTiming checks that a password attempt takes equally long
-// whichever user it names: unknown, without a password, or with a hash of
-// another kind or cost (M3 DoD: medians within 10%).
+// TestPasswordTiming checks that a failed password attempt takes equally
+// long whichever user it names: unknown, without a password, or with a hash
+// of another kind or cost (M3 DoD: medians within 10%).
 func TestPasswordTiming(t *testing.T) {
 	if testing.Short() || raceEnabled {
-		t.Skip("timing test; TestPasswordConstantWork checks the same without timing")
+		t.Skip("timing test; TestPasswordPadding checks the mechanism")
 	}
 	argon, err := HashPassword([]byte("pw"))
 	if err != nil {
@@ -210,51 +214,79 @@ func TestPasswordTiming(t *testing.T) {
 	t.Errorf("password attempts take different times depending on the user:%s", report.String())
 }
 
-// countingHash records which classes an attempt verifies.
-type countingHash struct {
+// slowHash takes a fixed time to verify and counts its verifications.
+type slowHash struct {
 	cls, pw string
-	calls   map[string]int
+	took    time.Duration
+	calls   *atomic.Int32
 }
 
-func (h countingHash) verify(pw []byte) bool {
-	h.calls[h.cls]++
+func (h slowHash) verify(pw []byte) bool {
+	h.calls.Add(1)
+	time.Sleep(h.took)
 	return h.pw != "" && string(pw) == h.pw
 }
-func (h countingHash) class() string       { return h.cls }
-func (h countingHash) dummy() PasswordHash { return countingHash{cls: h.cls, calls: h.calls} }
+func (h slowHash) class() string       { return h.cls }
+func (h slowHash) dummy() PasswordHash { return slowHash{cls: h.cls, took: h.took, calls: h.calls} }
 
-// TestPasswordConstantWork checks without timing that every attempt
-// verifies one hash of each configured class, whichever user it names.
-func TestPasswordConstantWork(t *testing.T) {
+// TestPasswordPadding checks the mechanism behind TestPasswordTiming with
+// hashes that sleep instead of hashing: each attempt verifies one hash, and
+// every failure lasts at least as long as the slowest kind of hash.
+func TestPasswordPadding(t *testing.T) {
 	t.Parallel()
 
-	calls := map[string]int{}
+	var calls atomic.Int32
+	fast := slowHash{cls: "fast", pw: "alice pw", took: 5 * time.Millisecond, calls: &calls}
+	slow := slowHash{cls: "slow", pw: "bob pw", took: 60 * time.Millisecond, calls: &calls}
 	a := NewUsers([]User{
-		{Name: "alice", Password: countingHash{cls: "a", pw: "alice pw", calls: calls}},
-		{Name: "bob", Password: countingHash{cls: "b", pw: "bob pw", calls: calls}},
-		{Name: "carol", Password: countingHash{cls: "a", pw: "carol pw", calls: calls}},
-		{Name: "dave", Keys: []Key{{Key: newKey(t)}}},
+		{Name: "alice", Password: fast},
+		{Name: "bob", Password: slow},
+		{Name: "carol", Keys: []Key{{Key: newKey(t)}}},
 	})
-	for _, tt := range []struct {
-		user, pw string
-		ok       bool
-	}{
-		{"alice", "alice pw", true},
-		{"alice", "wrong", false},
-		{"bob", "bob pw", true},
-		{"bob", "alice pw", false},
-		{"carol", "alice pw", false},
-		{"dave", "x", false},
-		{"mallory", "x", false},
+	var slept atomic.Int64
+	a.pad.sleep = func(d time.Duration) { slept.Store(int64(d)); time.Sleep(d) }
+	a.dummy = slowHash{cls: "default", took: time.Millisecond, calls: &calls}
+
+	attempt := func(user, pw string) (bool, time.Duration) {
+		calls.Store(0)
+		slept.Store(0)
+		start := time.Now()
+		_, err := a.Password(fakeConn{user: user}, []byte(pw))
+		if n := calls.Load(); n != 1 {
+			t.Errorf("%s: %d verifications, want 1", user, n)
+		}
+		return err == nil, time.Since(start)
+	}
+	a.pad.measure(a.hashing) // the first attempt would do this
+	target := time.Duration(a.pad.target.Load())
+	if target < 72*time.Millisecond {
+		t.Fatalf("target %v, want at least 1.2 × 60ms", target)
+	}
+	for _, tt := range []struct{ user, pw string }{
+		{"alice", "wrong"}, {"bob", "wrong"}, {"carol", "x"}, {"mallory", "x"}, {"alice", "bob pw"},
 	} {
-		clear(calls)
-		_, err := a.Password(fakeConn{user: tt.user}, []byte(tt.pw))
-		if (err == nil) != tt.ok {
-			t.Errorf("%s/%s: err = %v", tt.user, tt.pw, err)
+		ok, took := attempt(tt.user, tt.pw)
+		if ok {
+			t.Fatalf("%s/%s accepted", tt.user, tt.pw)
 		}
-		if calls["a"] != 1 || calls["b"] != 1 || len(calls) != 2 {
-			t.Errorf("%s: verified %v, want one hash of each class", tt.user, calls)
+		if took < target {
+			t.Errorf("%s: failure took %v, less than the target %v", tt.user, took, target)
 		}
+	}
+	// A success is not padded.
+	if ok, _ := attempt("alice", "alice pw"); !ok || slept.Load() != 0 {
+		t.Errorf("success: ok %v, slept %v", ok, time.Duration(slept.Load()))
+	}
+
+	// Under load the target follows slower verifications, up to twice
+	// the measured value.
+	a.pad.observe(target * 3 / 2)
+	if got := time.Duration(a.pad.target.Load()); got != target*3/2 {
+		t.Errorf("target after a slower verification = %v, want %v", got, target*3/2)
+	}
+	a.pad.observe(10 * target)
+	if got := time.Duration(a.pad.target.Load()); got != 2*target {
+		t.Errorf("target after a very slow verification = %v, want the cap %v", got, 2*target)
 	}
 }
 
