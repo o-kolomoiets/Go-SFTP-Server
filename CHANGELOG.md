@@ -103,6 +103,9 @@ without `--allow-root`, and uploads stop below 1 GiB of free space unless
 - Copy names under `on_conflict = "rename"` could exceed 255 bytes for
   names with a very long extension; a shortened name could equal the
   original.
+- A configuration file whose first line ended inside an escape sequence
+  (`a = "C:\`) made `serve` and `config validate` panic instead of
+  reporting the error (found by fuzzing).
 
 ## [0.2.0] - 2026-10-09
 

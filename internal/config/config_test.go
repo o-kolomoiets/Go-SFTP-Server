@@ -165,6 +165,15 @@ func TestSyntaxErrorHasPosition(t *testing.T) {
 			t.Errorf("umask = %s accepted", umask)
 		}
 	}
+	// FuzzParseConfig: an escape cut off by the end of the file on its first
+	// line made the TOML library report line 0, and formatting that error
+	// panicked.
+	for _, data := range []string{`"\`, `a = "C:\`, "config_version = 1\n[mounts.m]\npath = \"C:\\"} {
+		path := writeConfig(t, dir, data)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), path) {
+			t.Errorf("Load(%q) = %v, want an error naming the file", data, err)
+		}
+	}
 }
 
 func TestValidateReportsEverything(t *testing.T) {
