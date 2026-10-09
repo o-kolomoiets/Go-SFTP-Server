@@ -418,11 +418,12 @@ func (s *Session) openResume(v *view, rel string, appendOnly bool) (*WriteHandle
 func (o *MountOptions) freeName(rel string, try func(cand string) error) (string, error) {
 	dir, base := filepath.Split(rel)
 	stem, ext := splitExt(base, o.CompoundExts)
-	for n := 1; n <= o.MaxRenameAttempts; n++ {
+	for n, tried := 1, 0; tried < o.MaxRenameAttempts; n++ {
 		cand := filepath.Join(dir, candidate(o.RenameTemplate, stem, strconv.Itoa(n), ext))
 		if cand == rel {
 			continue // a shortened stem gave back the original name
 		}
+		tried++
 		err := try(cand)
 		if err == nil {
 			return cand, nil

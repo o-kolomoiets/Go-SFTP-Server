@@ -40,7 +40,7 @@ jobs:
         env:
           PKG: ${{ matrix.pkg }}
           FN: ${{ matrix.fn }}
-        run: go test -run='^$' -fuzz="^${FN}\$" -fuzztime=10m "$PKG"
+        run: go test -race -run='^$' -fuzz="^${FN}\$" -fuzztime=10m "$PKG"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

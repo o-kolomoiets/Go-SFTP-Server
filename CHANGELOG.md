@@ -87,9 +87,11 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 - A client that disconnected right after logging in left no `auth.success`
   and `conn.close` events.
-- A client that sent READ or WRITE with a guessed handle before the answer
-  to its OPEN raced with the OPEN inside `pkg/sftp`, which could crash the
-  server; such requests now wait for the answer (found by fuzzing).
+- A client that sent requests with a guessed handle while an OPEN was in
+  progress raced with the OPEN inside `pkg/sftp`, which could crash the
+  server; gosftpd now passes an OPEN on only after the earlier requests are
+  answered, and requests with a handle only after the OPEN is (found by
+  fuzzing).
 - Copy names under `on_conflict = "rename"` could exceed 255 bytes for
   names with a very long extension; a shortened name could equal the
   original.

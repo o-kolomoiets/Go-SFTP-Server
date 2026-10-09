@@ -159,6 +159,9 @@ func FuzzConflictName(f *testing.F) {
 		f.Add(s, uint8(3), DefaultRenameTemplate)
 	}
 	f.Add("a.b.c", uint8(200), "{n}-{stem}{ext}")
+	// Review finding: a skipped candidate must not use up an attempt.
+	f.Add("1", uint8(5), "{n}")
+	f.Add(strings.Repeat("a", 251)+" (1)", uint8(5), DefaultRenameTemplate)
 	f.Add("a.txt", uint8(1), "{stem}{stem}{stem}{n}{ext}")
 	f.Fuzz(func(t *testing.T, name string, fails uint8, tmpl string) {
 		if name == "" || len(name) > maxNameLen || name == "." || name == ".." || strings.ContainsAny(name, `/\`+"\x00") {

@@ -132,6 +132,26 @@ func FuzzRequestServer(f *testing.F) {
 		pkt(fxpWrite, uint32(5), "1", uint64(1<<40), "sparse"),
 	))
 	f.Add(byte(4), []byte{0xff, 0xff, 0xff, 0xff, 1})
+	// Review findings: the gate must not trust request ids (an answer to
+	// another request with the OPEN's id), and must keep a handle request
+	// sent before an OPEN from running during it.
+	f.Add(byte(1), seq(
+		pkt(fxpOpen, uint32(1), "a.txt", uint32(read), noAttrs),
+		pkt(fxpRead, uint32(9), "1", uint64(0), uint32(8)),
+		pkt(fxpOpen, uint32(9), "a.txt", uint32(write|creat), noAttrs),
+		pkt(fxpRead, uint32(10), "2", uint64(0), uint32(8)),
+		pkt(fxpWrite, uint32(11), "2", uint64(0), "x"),
+	))
+	busy := []([]byte){pkt(fxpOpen, uint32(1), "b.txt", uint32(write|creat|trunc), noAttrs)}
+	for i := range 12 {
+		busy = append(busy, pkt(fxpWrite, uint32(2+i), "1", uint64(i*4096), string(make([]byte, 4096))))
+	}
+	busy = append(busy,
+		pkt(fxpRead, uint32(20), "2", uint64(0), uint32(8)),
+		pkt(fxpWrite, uint32(21), "2", uint64(0), "x"),
+		pkt(fxpOpen, uint32(22), "a.txt", uint32(read|write), noAttrs),
+	)
+	f.Add(byte(1), seq(busy...))
 
 	f.Fuzz(func(t *testing.T, mode byte, data []byte) {
 		base := t.TempDir()
@@ -207,8 +227,9 @@ func FuzzRequestServer(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := map[bool]int{true: 1}[symlink]; links != want {
-			t.Fatalf("%d symlinks in the mount, want %d (clients cannot create links)", links, want)
+		// Clients may remove or replace the planted link, never add one.
+		if limit := map[bool]int{true: 1}[symlink]; links > limit {
+			t.Fatalf("%d symlinks in the mount, at most %d (clients cannot create links)", links, limit)
 		}
 		if n := h.open.Load(); n != 0 {
 			t.Fatalf("%d handles still open after the session", n)

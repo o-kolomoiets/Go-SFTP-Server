@@ -57,11 +57,13 @@ handlers see only parsed requests. The parsers that face clients and
 administrators are fuzzed in CI on every change and nightly: path
 resolution inside and outside a tree with symlinks, names of conflict
 copies, the configuration, `authorized_keys`, and a stream of arbitrary
-SFTP packets against the real handlers. Fuzzing found a data race in
-`pkg/sftp` v1.13: a client that sends READ or WRITE with a guessed handle
-before its OPEN is answered races with the OPEN, which could crash the
-server. gosftpd holds such requests until the OPEN is answered; clients
-learn handles from that answer, so they are not slowed down.
+SFTP packets against the real handlers, with the race detector. Fuzzing
+found a data race in `pkg/sftp` v1.13: a request with a guessed handle that
+is processed while an OPEN is in progress races with it, which could crash
+the server. gosftpd keeps them apart: an OPEN is passed on once every
+earlier request is answered, and a request with a handle once the latest
+OPEN is answered. Clients learn handles from that answer, so they are not
+slowed down.
 
 ## Confinement
 

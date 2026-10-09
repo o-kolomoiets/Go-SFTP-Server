@@ -53,7 +53,7 @@ trusted.
 | Tampering | Swapping a `{user}` home or a mount for a symlink or another mount (N4) | Parent `os.Root`, `Lstat` and `os.SameFile` for homes; `require_mountpoint` | vfs tests |
 | Tampering | Overwriting other people's data (N3) | Conflict policy (`rename` by default), `overwrite` permission, append-only resume, one writer per file | vfs tests, interop |
 | Tampering | Destroying versions under `on_conflict = "version"` (N3) | `.versions` read-only for clients, also on case-insensitive filesystems; count-based pruning only for users who may delete or overwrite | vfs tests |
-| Tampering | A crafted packet stream corrupting server state (N3) | `pkg/sftp` request server behind `sftpd.Gate`, which holds handle requests until their OPEN is answered (a data race in `pkg/sftp` v1.13) | `FuzzRequestServer` under `-race`, gate tests |
+| Tampering | A crafted packet stream corrupting server state (N3) | `pkg/sftp` request server behind `sftpd.Gate`, which keeps OPEN and requests with a handle apart (a data race in `pkg/sftp` v1.13) | `FuzzRequestServer` with the race detector (seeds on every test run, fuzzing in CI and nightly), gate tests |
 | Repudiation | "I did not upload that" | Audit log with `user`, `key_fp`, `session_id`, `path`, `final_path`, `version_path` | audit schema test |
 | Repudiation | Acting while the audit log cannot be written | `audit.on_error = "fail-closed"` | server tests |
 | Information disclosure | Host paths in errors, host accounts in listings | Fixed client messages; virtual owners | protocol tests |

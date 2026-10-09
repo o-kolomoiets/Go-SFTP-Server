@@ -16,74 +16,87 @@ type rwc struct {
 
 func (rwc) Close() error { return nil }
 
-// A WRITE that a client sends before the answer to its OPEN waits for that
-// answer (see Gate); other packets pass at once.
-func TestGateHoldsHandlePackets(t *testing.T) {
-	t.Parallel()
-
-	in := seq(
-		pkt(fxpOpen, uint32(7), "a", uint32(2), uint32(0)),
-		pkt(fxpStat, uint32(8), "a"),
-		pkt(fxpWrite, uint32(9), "1", uint64(0), "x"),
-		[]byte{0, 0, 0, 2, 99, 1}, // a short packet passes whole
-	)
-	var out bytes.Buffer
-	g := NewGate(rwc{bytes.NewReader(in), &out})
-	read := func(n int) []byte {
+// readPackets reads the next n bytes from g in a goroutine.
+func readPackets(g *Gate, n int) <-chan []byte {
+	got := make(chan []byte, 1)
+	go func() {
 		b := make([]byte, n)
 		if _, err := io.ReadFull(g, b); err != nil {
-			t.Fatal(err)
+			b = nil
 		}
-		return b
-	}
-	open := pkt(fxpOpen, uint32(7), "a", uint32(2), uint32(0))
-	stat := pkt(fxpStat, uint32(8), "a")
-	if got := read(len(open) + len(stat)); !bytes.Equal(got, seq(open, stat)) {
-		t.Fatalf("read %x", got)
-	}
-	write := pkt(fxpWrite, uint32(9), "1", uint64(0), "x")
-	got := make(chan []byte)
-	go func() {
-		b := make([]byte, len(write))
-		_, _ = io.ReadFull(g, b)
 		got <- b
 	}()
+	return got
+}
+
+func held(t *testing.T, got <-chan []byte, what string) {
+	t.Helper()
 	select {
 	case <-got:
-		t.Fatal("WRITE passed before the OPEN was answered")
+		t.Fatalf("%s passed the gate too early", what)
 	case <-time.After(50 * time.Millisecond):
 	}
-	// The answer to another request does not release it; the HANDLE
-	// answer to id 7, written in two parts, does.
-	if _, err := g.Write(pkt(101, uint32(8), uint32(0), "", "")); err != nil {
-		t.Fatal(err)
-	}
-	answer := pkt(102, uint32(7), "1")
-	_, _ = g.Write(answer[:6])
+}
+
+func passed(t *testing.T, got <-chan []byte, want []byte, what string) {
+	t.Helper()
 	select {
-	case <-got:
-		t.Fatal("WRITE passed before the OPEN was answered")
-	case <-time.After(50 * time.Millisecond):
+	case b := <-got:
+		if !bytes.Equal(b, want) {
+			t.Fatalf("%s = %x, want %x", what, b, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s is still held", what)
 	}
-	_, _ = g.Write(answer[6:])
-	if b := <-got; !bytes.Equal(b, write) {
-		t.Fatalf("WRITE = %x", b)
+}
+
+// A request with a handle waits for the answer to the latest OPEN, and an
+// OPEN for the answers to every earlier request (see Gate); other requests
+// pass at once. Answers are counted, so request ids do not matter.
+func TestGateOrdersOpens(t *testing.T) {
+	t.Parallel()
+
+	read := pkt(fxpRead, uint32(7), "1", uint64(0), uint32(10))
+	open := pkt(fxpOpen, uint32(7), "a", uint32(2), uint32(0)) // the same id
+	stat := pkt(fxpStat, uint32(8), "a")
+	write := pkt(fxpWrite, uint32(9), "2", uint64(0), "x")
+	short := []byte{0, 0, 0, 2, 99, 1} // a short packet passes whole
+	var out bytes.Buffer
+	g := NewGate(rwc{bytes.NewReader(seq(read, open, stat, write, short)), &out})
+	answer := func(id uint32) {
+		t.Helper()
+		a := pkt(101, id, uint32(0), "", "")
+		// Answers may be written in parts.
+		for _, part := range [][]byte{a[:3], a[3:7], a[7:]} {
+			if _, err := g.Write(part); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	if b := read(6); !bytes.Equal(b, []byte{0, 0, 0, 2, 99, 1}) {
-		t.Fatalf("short packet = %x", b)
-	}
-	if !bytes.HasPrefix(out.Bytes(), pkt(101, uint32(8), uint32(0), "", "")) {
-		t.Fatal("responses were not passed on")
+
+	passed(t, readPackets(g, len(read)), read, "READ")
+	got := readPackets(g, len(open))
+	held(t, got, "OPEN before the earlier READ is answered")
+	answer(7)
+	passed(t, got, open, "OPEN")
+
+	passed(t, readPackets(g, len(stat)), stat, "STAT")
+	got = readPackets(g, len(write))
+	held(t, got, "WRITE before the OPEN is answered")
+	answer(7)
+	passed(t, got, write, "WRITE")
+	passed(t, readPackets(g, len(short)), short, "short packet")
+	if out.Len() != 2*len(pkt(101, uint32(7), uint32(0), "", "")) {
+		t.Fatalf("answers were not passed on: %x", out.Bytes())
 	}
 }
 
 func TestGateCloseReleases(t *testing.T) {
 	t.Parallel()
 
-	g := NewGate(rwc{bytes.NewReader(seq(pkt(fxpOpendir, uint32(1), "/"), pkt(fxpReaddir, uint32(2), "1"))), io.Discard})
-	if _, err := io.ReadFull(g, make([]byte, len(pkt(fxpOpendir, uint32(1), "/")))); err != nil {
-		t.Fatal(err)
-	}
+	opendir := pkt(fxpOpendir, uint32(1), "/")
+	g := NewGate(rwc{bytes.NewReader(seq(opendir, pkt(fxpReaddir, uint32(2), "1"))), io.Discard})
+	passed(t, readPackets(g, len(opendir)), opendir, "OPENDIR")
 	done := make(chan error)
 	go func() {
 		_, err := g.Read(make([]byte, 64))
