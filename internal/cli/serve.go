@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -341,11 +342,6 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		return configError{err}
 	}
 	defer mounts.Close()
-	go func() {
-		if n := mounts.CleanTemp(); n > 0 {
-			log.InfoContext(ctx, "removed temporary files of interrupted uploads", "count", n, "older_than", vfs.TempMaxAge)
-		}
-	}()
 
 	auditOut, closeAudit, err := openAudit(c.Audit.Output, stdout)
 	if err != nil {
@@ -406,8 +402,11 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	al.Event("server.start", slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ",")))
 
+	var janitor sync.WaitGroup
+	defer janitor.Wait() // after cancel, before mounts.Close
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	janitor.Go(func() { cleanTemp(serveCtx, mounts, log) })
 	served := make(chan error, len(listeners))
 	for _, ln := range listeners {
 		go func() { served <- srv.Serve(serveCtx, ln) }()
@@ -602,4 +601,21 @@ func connectHost(addr net.Addr) (string, int) {
 		return "localhost", port
 	}
 	return host, port
+}
+
+// cleanTemp removes temporary files of interrupted uploads at start and
+// then every TempMaxAge/4 until ctx is done.
+func cleanTemp(ctx context.Context, mounts *vfs.Table, log *slog.Logger) {
+	tick := time.NewTicker(vfs.TempMaxAge / 4)
+	defer tick.Stop()
+	for {
+		if n := mounts.CleanTemp(); n > 0 {
+			log.InfoContext(ctx, "removed temporary files of interrupted uploads", "count", n, "older_than", vfs.TempMaxAge)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }

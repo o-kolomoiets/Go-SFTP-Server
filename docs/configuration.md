@@ -166,7 +166,7 @@ with `reason = "home_not_dir"` is written.
 | `umask` | `"0027"` | Removed from the mode of new files (0666) and directories (0777); a quoted octal string. |
 | `require_mountpoint` | `false` | Refuse to start unless the path is a mount point (on another filesystem than its parent): protects against writing to the root disk when a disk is not mounted. |
 | `max_file_size` | `"0"` | Largest file an upload may write, e.g. `"10GiB"`; `"0"` means no limit. Units: B, kB, MB, GB, TB, KiB, MiB, GiB, TiB, or a plain number of bytes. |
-| `min_free_space` | `"1GiB"` | Refuse to open files for writing while the mount's filesystem has less free space (`"0"` turns the check off). Not checked on Windows. |
+| `min_free_space` | `"1GiB"` | Refuse to open files for writing while the mount's filesystem has less free space (`"0"` turns the check off). Not checked on Windows or on filesystems that report no size (some FUSE filesystems). |
 | `atomic_uploads` | `false` | Write each upload to a hidden temporary file and give it its name only when the client closes it, see below. |
 | `fsync` | `false` | Flush an upload through a temporary file (`atomic_uploads`, or a conflict under `version`) to disk before it gets its name. |
 | `versions` | see below | Where and how long `on_conflict = "version"` keeps old versions. |
@@ -178,7 +178,7 @@ Also `[mounts.NAME.versions]`, or inline: `versions = { keep = 5 }`.
 | Key | Default | Meaning |
 |---|---|---|
 | `dir` | `".versions"` | Directory at the top of the mount that holds old versions, as `<dir>/<path of the file>/<stem>.<UTC time><ext>`, e.g. `.versions/docs/report.pdf/report.20261009T114500Z.pdf`. It is not listed, so that sync tools do not try to delete it; users with `list` and `read` open it by path (`cd .versions`) and download versions. Nobody but the server can change it. |
-| `keep` | `10` | Old versions kept per file, newest first; `0` keeps all (at most 10000). |
+| `keep` | `10` | Old versions kept per file, newest first; `0` keeps all (at most 10000). Extra versions are removed only when a user with the `delete` or `overwrite` permission saves a version: a user who may only write cannot push older versions out. |
 | `max_age` | `"720h"` | Versions older than this are removed when the next version of the file is saved; `"0s"` keeps them forever. |
 
 ### Upload conflicts
@@ -223,8 +223,9 @@ What happens when an upload targets an existing file (`on_conflict`):
 - An upload that is aborted (the connection breaks) under `version` or with
   `atomic_uploads` leaves no trace: the temporary file is removed and the
   original stays. Temporary files (`.gosftpd-*.part`) are hidden from
-  listings, and their names cannot be used by clients; at start the server
-  removes those older than 24 hours (left by a crash).
+  listings, and names starting with `.gosftpd-` (in any case) cannot be used
+  by clients. Those left by a crash are removed at start and every 6 hours
+  once they are 24 hours old, and when a client removes their directory.
 
 ### Atomic uploads
 
@@ -235,7 +236,11 @@ see a partial file, and a client killed mid-upload leaves nothing under the
 name. The conflict policy is applied when the upload is closed, to whatever
 has the name by then (with `reject`, the upload that closes second fails and
 its data is discarded). Resuming an upload is not possible
-(there is nothing to continue): clients get "resume is disabled".
+(there is nothing to continue): clients get "resume is disabled". An upload
+always starts from an empty file: a client that opens an existing file
+without truncating it to change a few bytes in place (sshfs, `dd
+conv=notrunc`) replaces the whole file with what it writes. Serve such
+clients from a mount with `overwrite` and without `atomic_uploads`.
 
 ### Size limits
 

@@ -428,7 +428,11 @@ func (s *Session) Rmdir(vp string) error {
 	if !fi.IsDir() {
 		return ErrNotDir
 	}
-	return osError(removeEntry(v.root, rel, true))
+	err = removeEntry(v.root, rel, true)
+	if err != nil && isNotEmpty(err) && s.t.removeOrphanTemp(v.root, rel) {
+		err = removeEntry(v.root, rel, true)
+	}
+	return osError(err)
 }
 
 // Attrs are the attributes a client may set.

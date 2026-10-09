@@ -38,7 +38,8 @@ Incompatible changes are prefixed with **BREAKING:**.
 - `on_conflict = "version"`: an upload or posix-rename onto an existing file
   replaces it and moves the old file to
   `.versions/<path>/<stem>.<UTC time><ext>`, keeping `versions.keep` (10)
-  versions per file for at most `versions.max_age` (30 days). The versions
+  versions per file for at most `versions.max_age` (30 days); only users who
+  may delete or overwrite files make older versions drop out. The versions
   directory is not listed (sync tools would delete it); clients can open it
   by path and read it, but not change it. Replacing a file this way
   needs only the `write` permission. `fs.upload` and `fs.rename` get
@@ -47,7 +48,8 @@ Incompatible changes are prefixed with **BREAKING:**.
   (`.gosftpd-*.part`) and take their name only when closed, by the conflict
   policy at that moment; an aborted upload leaves nothing. Resume is not
   possible then. `fsync` flushes such uploads before they are published.
-  Temporary files older than 24 hours are removed at start.
+  Temporary files left by a crash are removed once 24 hours old (checked at
+  start and every 6 hours) and when their directory is removed.
 - `max_file_size` (off by default), checked against the end of every write
   and on truncation, and `min_free_space` (1 GiB), checked when a file is
   opened for writing. Sizes accept units such as `"10GiB"`.
@@ -64,8 +66,8 @@ Incompatible changes are prefixed with **BREAKING:**.
 - `fs.rename` for a posix-rename that replaced its target under
   `on_conflict = "overwrite"` reports `conflict = "overwritten"` instead of
   `"none"`.
-- Names starting with `.gosftpd-` are reserved: hidden from listings and
-  refused in paths.
+- Names starting with `.gosftpd-` (in any case) are reserved: hidden from
+  listings and refused in paths.
 
 ### Fixed
 

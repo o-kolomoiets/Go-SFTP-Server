@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -302,6 +304,112 @@ func TestTempNamesReserved(t *testing.T) {
 	if got := readFile(t, filepath.Join(share, name)); got != "someone's upload" {
 		t.Errorf("temporary file changed: %q", got)
 	}
+	// Case-insensitive filesystems (macOS, Windows) would resolve these to
+	// the reserved names.
+	for _, p := range []string{".GOSFTPD-0123456789abcdef.part", ".Gosftpd-x", "d/.gosftpD-x"} {
+		if _, err := s.OpenWrite(p, put); !errors.Is(err, ErrDenied) {
+			t.Errorf("OpenWrite(%q) = %v, want ErrDenied", p, err)
+		}
+	}
+}
+
+// Review finding: an upload aborted or refused leaves the directory empty
+// to the client, so RMDIR must not fail on temporary files left by a crash.
+func TestRmdirRemovesOrphanTemp(t *testing.T) {
+	t.Parallel()
+
+	s, share := shareFixture(t, func(o *MountOptions) { o.AtomicUploads = true })
+	mustWrite(t, filepath.Join(share, "d", ".gosftpd-0123456789abcdef.part"), "crash")
+	if err := s.Rmdir("d"); err != nil {
+		t.Errorf("Rmdir with an orphan temporary file: %v", err)
+	}
+	if err := s.Mkdir("e"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := s.OpenWrite("e/f.txt", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rmdir("e"); !errors.Is(err, ErrNotEmpty) {
+		t.Errorf("Rmdir under an open upload: %v, want ErrNotEmpty", err)
+	}
+	if err := h.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(share, "g", ".gosftpd-1.part"), "crash")
+	mustWrite(t, filepath.Join(share, "g", "file"), "x")
+	if err := s.Rmdir("g"); !errors.Is(err, ErrNotEmpty) {
+		t.Errorf("Rmdir of a directory with a file: %v, want ErrNotEmpty", err)
+	}
+	if _, err := os.Stat(filepath.Join(share, "g", ".gosftpd-1.part")); err != nil {
+		t.Errorf("temporary file next to a real file removed: %v", err)
+	}
+}
+
+// Review finding: an inside symlink at the name is a conflict like any file
+// under rename; under version it is refused at open, not after the upload.
+func TestAtomicUploadOverSymlink(t *testing.T) {
+	t.Parallel()
+
+	for _, policy := range []ConflictPolicy{ConflictRename, ConflictVersion, ConflictOverwrite} {
+		s, share := shareFixture(t, func(o *MountOptions) {
+			o.AtomicUploads = true
+			o.OnConflict = policy
+		})
+		symlink(t, "a.txt", filepath.Join(share, "link.txt"))
+		h, err := s.OpenWrite("link.txt", put)
+		if policy != ConflictRename {
+			if !errors.Is(err, ErrNotRegular) {
+				t.Errorf("%s: OpenWrite over a symlink = %v, want ErrNotRegular", policy, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.WriteAt([]byte("x"), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Close(false); err != nil || h.Path() != "/link (1).txt" {
+			t.Errorf("rename: %v, %q", err, h.Path())
+		}
+		if got := readFile(t, filepath.Join(share, "a.txt")); got != "original" {
+			t.Errorf("rename: a.txt = %q", got)
+		}
+	}
+}
+
+// Review finding: the upload handle proves ownership after publishing, even
+// if the ownership entry was evicted while the upload was open.
+func TestAtomicOwnSurvivesEviction(t *testing.T) {
+	t.Parallel()
+
+	opts := DefaultMountOptions()
+	opts.AtomicUploads = true
+	tbl, base := permFixture(t, opts)
+	up := []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}}
+	c1, c2 := session(t, tbl, "partner", up), session(t, tbl, "partner", up)
+	big, err := c1.OpenWrite("/big.bin.abcd.partial", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := big.WriteAt([]byte("data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	v := c2.views[0]
+	fi, err := os.Stat(filepath.Join(base, "inbox", "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range maxOwned {
+		c2.own(v, fmt.Sprintf("f%d", i), fi)
+	}
+	if err := big.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Rename("/big.bin.abcd.partial", "/big.bin", true); err != nil {
+		t.Errorf("rename after eviction: %v", err)
+	}
 }
 
 // versionFixture returns a session on a mount with on_conflict = "version"
@@ -393,14 +501,46 @@ func TestVersionNeedsOnlyWrite(t *testing.T) {
 
 	opts := DefaultMountOptions()
 	opts.OnConflict = ConflictVersion
+	opts.Versions.Keep = 2
 	tbl, base := permFixture(t, opts)
 	s := session(t, tbl, "partner", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
 	h, err := upload(t, s, "/a.txt", put, "new")
 	if err != nil || h.Conflict() != ConflictVersioned {
 		t.Fatalf("replacing a file with write only: %v (%s)", err, h.Conflict())
 	}
-	if got := readFile(t, filepath.Join(base, "inbox", filepath.FromSlash(h.Version()))); got != "original" {
+	first := filepath.Join(base, "inbox", filepath.FromSlash(h.Version()))
+	if got := readFile(t, first); got != "original" {
 		t.Errorf("version = %q", got)
+	}
+
+	// Review finding: a user who may only write must not push the original
+	// out of the versions directory by uploading keep times.
+	for i := range 5 {
+		if _, err := upload(t, s, "/a.txt", put, strconv.Itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readFile(t, first); got != "original" {
+		t.Errorf("the original version is gone or changed: %q", got)
+	}
+	dir := filepath.Join(base, "inbox", ".versions", "a.txt")
+	count := func() int {
+		des, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(des)
+	}
+	if n := count(); n != 6 {
+		t.Errorf("%d versions after 6 uploads with write only, want 6", n)
+	}
+	// A user who may overwrite applies keep.
+	full := session(t, tbl, "alice", []Grant{{Mount: "inbox", Perm: PermAll}})
+	if _, err := upload(t, full, "/a.txt", put, "last"); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Errorf("%d versions after an upload with overwrite, want keep = 2", n)
 	}
 }
 
@@ -509,11 +649,14 @@ func TestMaxFileSize(t *testing.T) {
 		if err := s.Setstat("big.bin", Attrs{Size: 5, HasSize: true}); err != nil {
 			t.Errorf("atomic %v: truncate below the limit: %v", atomic, err)
 		}
-		if err := h.Close(false); err != nil {
-			t.Fatal(err)
+		if !h.Refused() {
+			t.Errorf("atomic %v: Refused() = false", atomic)
 		}
 		// A refused write leaves an incomplete file: an atomic upload is
-		// not published.
+		// not published, and closing it fails.
+		if err := h.Close(false); atomic != errors.Is(err, ErrTooLarge) {
+			t.Errorf("atomic %v: Close = %v", atomic, err)
+		}
 		got, err := os.ReadFile(filepath.Join(share, "big.bin"))
 		switch {
 		case atomic && !errors.Is(err, fs.ErrNotExist):

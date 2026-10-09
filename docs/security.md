@@ -70,7 +70,8 @@ unavailable.
 - Uploads never replace an existing file unless the mount's policy is
   `overwrite` and the user has the `overwrite` permission. With `version`
   the replaced file is kept in the versions directory, which clients can
-  read but not change.
+  read but not change, for `versions.max_age`; a user who may only write
+  cannot push it out by uploading many versions.
 - A resumed upload can only append; the bytes the file had are immutable.
 - While an upload has a file open, nobody else can write it in place.
 - An aborted upload removes only the empty file it created itself, after

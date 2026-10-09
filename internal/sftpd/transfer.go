@@ -110,7 +110,7 @@ func (w *writer) Close() error {
 		switch {
 		case aborted:
 			result = "aborted"
-		case w.denied.Load():
+		case w.denied.Load(), w.wh.Refused():
 			result = "denied"
 		case err != nil:
 			// An atomic upload is published on close, by the conflict policy.

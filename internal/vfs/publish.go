@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Uploads that get their name only when they are closed: every upload with
@@ -32,8 +33,21 @@ const tempSuffix = ".part"
 const TempMaxAge = 24 * time.Hour
 
 // isTempName reports whether a path component is reserved for temporary
-// upload files.
-func isTempName(name string) bool { return strings.HasPrefix(name, tempPrefix) }
+// upload files. Case is ignored, as on macOS and Windows filesystems.
+func isTempName(name string) bool { return hasPrefixFold(name, tempPrefix) }
+
+// hasPrefixFold reports whether s starts with prefix under Unicode case
+// folding.
+func hasPrefixFold(s, prefix string) bool {
+	for _, p := range prefix {
+		r, n := utf8.DecodeRuneInString(s)
+		if n == 0 || !strings.EqualFold(string(r), string(p)) {
+			return false
+		}
+		s = s[n:]
+	}
+	return true
+}
 
 // reservedPath reports whether a client path inside a mount names a
 // temporary upload file or something below one.
@@ -47,14 +61,15 @@ func reservedPath(rel string) bool {
 }
 
 // inVersions reports whether rel is the versions directory of a mount with
-// on_conflict = "version", or lies inside it. Clients may read it, but only
-// the server changes it.
+// on_conflict = "version", or lies inside it (ignoring case, as on macOS
+// and Windows filesystems). Clients may read it, but only the server
+// changes it.
 func inVersions(o *MountOptions, rel string) bool {
 	if o.OnConflict != ConflictVersion {
 		return false
 	}
 	first, _, _ := strings.Cut(rel, string(filepath.Separator))
-	return first == o.Versions.Dir
+	return strings.EqualFold(first, o.Versions.Dir)
 }
 
 // tempHandle starts an upload to target through a temporary file in the
@@ -78,10 +93,11 @@ func (s *Session) tempHandle(v *view, target string) (*WriteHandle, error) {
 
 // closeTemp finishes an upload written to a temporary file: it publishes
 // the file under its target name, or removes it if the upload was aborted,
-// is incomplete (a write was refused) or cannot be published.
+// is incomplete (a write was refused: ErrTooLarge) or cannot be published.
 func (h *WriteHandle) closeTemp(aborted bool) error {
 	s, v := h.s, h.v
-	aborted = aborted || h.refused.Load()
+	refused := !aborted && h.refused.Load()
+	aborted = aborted || refused
 	s.t.release(h)
 	tmp := h.rel
 	var err error
@@ -98,9 +114,17 @@ func (h *WriteHandle) closeTemp(aborted bool) error {
 	if aborted || err != nil {
 		_ = removeEntry(v.root, tmp, false)
 		s.unregister(h, true)
+		if refused && err == nil {
+			err = ErrTooLarge
+		}
 		return err
 	}
 	s.moveCreated(v, tmp, h.rel, true)
+	// The handle proves the upload created the file, even if its entry
+	// was evicted while the upload was open.
+	if st, err := v.root.Lstat(h.rel); err == nil {
+		s.closedCreated(h, st)
+	}
 	if h.rel != h.target && v.opts().StatRedirect {
 		s.setRedirect(v, h.target, h.rel)
 	}
@@ -125,15 +149,15 @@ func (s *Session) publish(h *WriteHandle) error {
 	case !errors.Is(err, fs.ErrExist):
 		return osError(err)
 	}
-	if err := regularTarget(v.root, h.target); err != nil {
-		return err
-	}
 	switch opts.OnConflict {
 	case ConflictReject:
 		return ErrConflict
 	case ConflictOverwrite:
 		if !v.perm.Has(PermOverwrite) {
 			return ErrDenied
+		}
+		if err := regularTarget(v.root, h.target); err != nil {
+			return err
 		}
 		if err := v.root.Rename(tmp, h.target); err != nil {
 			return osError(err)
@@ -222,7 +246,13 @@ func (s *Session) saveVersion(v *view, rel string) (string, error) {
 		err := noClobberRename(v.root, rel, cand)
 		if err == nil {
 			s.forget(v, rel)
-			pruneVersions(v.root, dir, ext, opts.Versions, now)
+			retention := opts.Versions
+			if !v.perm.Has(PermDelete) && !v.perm.Has(PermOverwrite) {
+				// Otherwise a user who may only write could push the
+				// original out by uploading keep times.
+				retention.Keep = 0
+			}
+			pruneVersions(v.root, dir, ext, retention, now)
 			return cand, nil
 		}
 		if !errors.Is(err, fs.ErrExist) || n >= 100 {
@@ -293,11 +323,42 @@ func checkFree(v *view) error {
 		return osError(err)
 	}
 	defer d.Close()
-	// A filesystem that cannot report its free space is not refused.
-	if st, err := statfs(d); err == nil && st.BlocksAvail*st.FragmentSize < uint64(limit) {
+	// A filesystem that cannot report its free space (an error, or no
+	// blocks at all, as FUSE filesystems without statfs) is not refused.
+	if st, err := statfs(d); err == nil && st.Blocks > 0 && st.BlocksAvail*st.FragmentSize < uint64(limit) {
 		return ErrNoSpace
 	}
 	return nil
+}
+
+// removeOrphanTemp removes the temporary upload files in dir that no open
+// upload writes (left by a crash), if they are all dir contains. Clients do
+// not see them, so to them the directory is empty.
+func (t *Table) removeOrphanTemp(root *os.Root, dir string) bool {
+	f, err := root.Open(dir)
+	if err != nil {
+		return false
+	}
+	names, err := f.Readdirnames(100)
+	_ = f.Close()
+	if err != nil || len(names) == 100 || slices.ContainsFunc(names, func(n string) bool { return !isTempName(n) }) {
+		return false
+	}
+	for _, n := range names {
+		p := filepath.Join(dir, n)
+		fi, err := root.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() || t.writingFile(fi) || removeEntry(root, p, false) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// writingFile reports whether an open upload writes fi.
+func (t *Table) writingFile(fi os.FileInfo) bool {
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	return slices.ContainsFunc(t.writing, func(h *WriteHandle) bool { return os.SameFile(h.ino, fi) })
 }
 
 // CleanTemp removes temporary upload files older than TempMaxAge from every

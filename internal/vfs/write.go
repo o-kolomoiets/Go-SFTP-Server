@@ -75,6 +75,10 @@ func (h *WriteHandle) Version() string {
 	return h.s.virtual(h.v, h.version)
 }
 
+// Refused reports whether a write or truncation was refused for
+// max_file_size: the upload is incomplete.
+func (h *WriteHandle) Refused() bool { return h.refused.Load() }
+
 // Written returns the number of bytes written so far.
 func (h *WriteHandle) Written() int64 { return h.written.Load() }
 
@@ -293,12 +297,20 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		if !v.perm.Has(PermWrite) {
 			return nil, ErrDenied
 		}
+		// Only a file is replaced, not a symlink: refuse now, not after
+		// the transfer.
+		if err := regularTarget(v.root, rel); err != nil {
+			return nil, err
+		}
 		return s.tempHandle(v, rel)
 	case ConflictOverwrite:
 		if !v.perm.Has(PermOverwrite) {
 			return nil, ErrDenied
 		}
 		if opts.AtomicUploads {
+			if err := regularTarget(v.root, rel); err != nil {
+				return nil, err
+			}
 			return s.tempHandle(v, rel)
 		}
 		// Not O_TRUNC: truncate only once this is the file's only writer.
