@@ -32,10 +32,12 @@ Incompatible changes are prefixed with **BREAKING:**.
   file, an included file, an `authorized_keys` file, a host key or the
   audit log lies inside a mount clients can write, or a host key or
   configuration file inside any mount: a client could add itself a key, or
-  read the host key. `serve --dir ~` is refused for that reason; serve a
-  subdirectory.
+  read the host key. Symlinks and, on Linux, bind mounts are followed. `serve
+  --dir ~` is refused for that reason; serve a subdirectory.
 - `serve` checks for root before anything else, so running as root without
   `--allow-root` is reported first.
+- An uploader without the `setstat` permission may set the times of its own
+  uploads only while it still has the `write` permission.
 - Every login is checked once more after the SSH handshake against the
   configuration current then: a key removed by a reload while a client was
   logging in is refused.

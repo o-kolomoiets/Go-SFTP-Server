@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,52 +132,53 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 			c.Server.HostKeys = absPaths(o.hostKeys)
 		}
 	}
-	masked := applyEnv(c, getenv)
+	// What the file says, before the environment and flags override it.
+	file := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
+	set := applyEnv(c, getenv)
 	if flags.Changed("listen") {
 		c.Server.Listen = []string{o.listen}
 	}
 	if flags.Changed("log-level") {
-		masked = override(c, masked, "log.level", "--log-level", &c.Log.Level, o.logLevel)
+		c.Log.Level = o.logLevel
+		set["log.level"] = "--log-level"
 	}
 	if flags.Changed("log-format") {
 		c.Log.Format = o.logFormat
 	}
 	if flags.Changed("audit-output") {
-		out := o.auditOutput
-		if out != "stdout" {
-			out = absPath(out)
+		c.Audit.Output = o.auditOutput
+		if o.auditOutput != "stdout" {
+			c.Audit.Output = absPath(o.auditOutput)
 		}
-		masked = override(c, masked, "audit.output", "--audit-output", &c.Audit.Output, out)
+		set["audit.output"] = "--audit-output"
 	}
-	if !reload {
-		masked = nil
+	var masked []string
+	if reload {
+		final := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
+		for _, k := range slices.Sorted(maps.Keys(set)) {
+			if c.File != "" && c.Defined(k) && file[k] != final[k] {
+				masked = append(masked, fmt.Sprintf("%s = %q in %s has no effect: %s overrides it", k, file[k], c.File, set[k]))
+			}
+		}
 	}
 	return c, masked, nil
 }
 
 // applyEnv applies the environment variables that override the file. It
-// returns where they hide a value of the file that a reload would apply.
-func applyEnv(c *config.Config, getenv func(string) string) (masked []string) {
+// returns the keys of reloadable settings it set, with the variable.
+func applyEnv(c *config.Config, getenv func(string) string) (set map[string]string) {
+	set = map[string]string{}
 	if v := getenv(config.EnvListen); v != "" {
 		c.Server.Listen = strings.Split(v, ",")
 	}
 	if v := getenv(config.EnvLogLevel); v != "" {
-		masked = override(c, masked, "log.level", "$"+config.EnvLogLevel, &c.Log.Level, v)
+		c.Log.Level = v
+		set["log.level"] = "$" + config.EnvLogLevel
 	}
 	if v := getenv(config.EnvLogFormat); v != "" {
 		c.Log.Format = v
 	}
-	return masked
-}
-
-// override sets *field to value, set by by, and notes a different value of
-// the file in masked.
-func override(c *config.Config, masked []string, key, by string, field *string, value string) []string {
-	if c.File != "" && *field != value {
-		masked = append(masked, fmt.Sprintf("%s = %q in %s has no effect: %s overrides it", key, *field, c.File, by))
-	}
-	*field = value
-	return masked
+	return set
 }
 
 // checkFlagValues reports bad flag values under the flag's name rather than
@@ -215,7 +218,7 @@ func loadConfig(explicit string, getenv func(string) string) (*config.Config, er
 func zeroConfig(o serveOptions, reload bool) (*config.Config, error) {
 	c := config.Default()
 	c.Defaults.OnConflict = o.onConflict
-	specs, err := parseDirs(o.dirs)
+	specs, err := parseDirs(o.dirs, reload)
 	if err != nil {
 		return nil, usageError{err}
 	}
@@ -336,9 +339,6 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		hup = ch
 	}
 
-	if err := checkFlagValues(flags, o); err != nil {
-		return err
-	}
 	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
 		return err
 	}
@@ -399,7 +399,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	r := &running{
 		flags: flags, opts: o, getenv: getenv, log: log, level: level, out: out, al: al, srv: srv,
-		c: c, mounts: mounts, keys: keyFiles,
+		c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
 	}
 	if c.File != "" {
 		// A reload reads this file again, not the first one found then.
@@ -539,8 +539,10 @@ func parseLevel(level string) (slog.Level, error) {
 }
 
 // parseDirs turns --dir values into mounts. "NAME=PATH" names a mount;
-// otherwise the name is the last path component.
-func parseDirs(dirs []string) ([]vfs.MountSpec, error) {
+// otherwise the name is the last path component. On reload a directory is
+// not checked here: CheckFSReload makes a missing one unavailable instead
+// of failing the reload.
+func parseDirs(dirs []string, reload bool) ([]vfs.MountSpec, error) {
 	specs := make([]vfs.MountSpec, 0, len(dirs))
 	for _, d := range dirs {
 		name, p, ok := strings.Cut(d, "=")
@@ -551,12 +553,14 @@ func parseDirs(dirs []string) ([]vfs.MountSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("--dir %q: %w", d, err)
 		}
-		fi, err := os.Stat(abs)
-		if err != nil {
-			return nil, fmt.Errorf("--dir %q: %w", d, err)
-		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("--dir %q: not a directory", d)
+		if !reload {
+			fi, err := os.Stat(abs)
+			if err != nil {
+				return nil, fmt.Errorf("--dir %q: %w", d, err)
+			}
+			if !fi.IsDir() {
+				return nil, fmt.Errorf("--dir %q: not a directory", d)
+			}
 		}
 		if name == "" {
 			name = filepath.Base(abs)

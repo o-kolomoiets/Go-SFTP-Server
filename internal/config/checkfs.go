@@ -9,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -18,8 +21,15 @@ import (
 // directories, host keys, authorized_keys files and the permissions of every
 // file gosftpd trusts (ROADMAP §6.5). Call it after Validate.
 func (c *Config) CheckFS() (warnings []string, err error) {
-	warnings, _, err = c.checkFS(false)
+	warnings, _, err = c.checkFS(false, nil)
 	return warnings, err
+}
+
+// LiveMount is a mount that connections of an earlier configuration still
+// use (see CheckFSReload).
+type LiveMount struct {
+	Name, Path string
+	ReadOnly   bool
 }
 
 // CheckFSReload is CheckFS for a configuration reload. Host keys are not
@@ -27,12 +37,13 @@ func (c *Config) CheckFS() (warnings []string, err error) {
 // left to BuildAuthenticator with Reload. A mount that fails its checks is
 // a warning and is returned in unavailable, so that one mount (a disk that
 // is not mounted, say) does not block the rest of the reload; its users
-// find it unavailable.
-func (c *Config) CheckFSReload() (warnings, unavailable []string, err error) {
-	return c.checkFS(true)
+// find it unavailable. Trusted files are also checked against live: the
+// mounts that open connections still use, since they may still write them.
+func (c *Config) CheckFSReload(live []LiveMount) (warnings, unavailable []string, err error) {
+	return c.checkFS(true, live)
 }
 
-func (c *Config) checkFS(reload bool) (warnings, unavailable []string, err error) {
+func (c *Config) checkFS(reload bool, live []LiveMount) (warnings, unavailable []string, err error) {
 	p := &problems{}
 	for _, f := range c.Files {
 		fi, err := os.Stat(f)
@@ -53,7 +64,7 @@ func (c *Config) checkFS(reload bool) (warnings, unavailable []string, err error
 		c.checkUsers(p)
 	}
 	c.checkAudit(p)
-	c.checkTrusted(p)
+	c.checkTrusted(p, live)
 	warnings, err = p.result()
 	return warnings, unavailable, err
 }
@@ -112,8 +123,9 @@ func (c *Config) checkMount(p *problems, name string) {
 // write to: a client could change the configuration, add a key or a user,
 // or rewrite the audit log, and a reload would apply it. Host keys and
 // configuration files, which can hold password hashes, must not be in any
-// mount, since clients could read them.
-func (c *Config) checkTrusted(p *problems) {
+// mount, since clients could read them. live are mounts of earlier
+// configurations that open connections still use.
+func (c *Config) checkTrusted(p *problems, live []LiveMount) {
 	type trusted struct {
 		path, what string
 		secret     bool // refused in read-only mounts too
@@ -137,31 +149,46 @@ func (c *Config) checkTrusted(p *problems) {
 	if out := c.Audit.Output; out != "" && out != "stdout" {
 		files = append(files, trusted{out, "the audit log", false, true})
 	}
+	type mount struct {
+		key, path string
+		readOnly  bool
+	}
+	var mounts []mount
 	for _, name := range sortedKeys(c.Mounts) {
-		m := c.Mounts[name]
 		k := key("mounts", name, "path")
 		if c.AnyUser != nil {
 			k = "--dir " + name
 		}
+		mounts = append(mounts, mount{k, c.Mounts[name].Path, c.Mounts[name].ReadOnly})
+	}
+	for _, l := range live {
+		same := slices.ContainsFunc(mounts, func(m mount) bool { return m.path == l.Path && m.readOnly == l.ReadOnly })
+		if !same {
+			mounts = append(mounts, mount{"mount " + strconv.Quote(l.Name) + " of open connections", l.Path, l.ReadOnly})
+		}
+	}
+	mi := readMountInfo()
+	for _, m := range mounts {
 		for _, f := range files {
-			if !insideMount(f.path, m.Path) {
+			if !insideMount(f.path, m.path, mi) {
 				continue
 			}
 			switch {
-			case !m.ReadOnly:
-				p.errorf(k, "covers %s (%s): clients could change it; serve another directory", f.what, f.path)
+			case !m.readOnly:
+				p.errorf(m.key, "covers %s (%s): clients could change it; serve another directory", f.what, f.path)
 			case f.secret:
-				p.errorf(k, "covers %s (%s): clients could read it; serve another directory", f.what, f.path)
+				p.errorf(m.key, "covers %s (%s): clients could read it; serve another directory", f.what, f.path)
 			case f.private:
-				p.warnf(k, "covers %s (%s): clients can read it", f.what, f.path)
+				p.warnf(m.key, "covers %s (%s): clients can read it", f.what, f.path)
 			}
 		}
 	}
 }
 
-// insideMount reports whether file lies in the directory of a mount, also
-// after resolving symlinks.
-func insideMount(file, mountPath string) bool {
+// insideMount reports whether file lies in the directory of a mount: by
+// path, after resolving symlinks, or by where both lie on their filesystem,
+// since a bind mount shows one directory at two paths (Linux).
+func insideMount(file, mountPath string, mi mountInfo) bool {
 	if vfs.PathsOverlap(file, mountPath) {
 		return true
 	}
@@ -175,7 +202,39 @@ func insideMount(file, mountPath string) bool {
 		rf = filepath.Join(rf, filepath.Base(file))
 	}
 	rd, derr := filepath.EvalSymlinks(dir)
-	return err == nil && derr == nil && vfs.PathsOverlap(rf, rd)
+	if err != nil || derr != nil {
+		return false
+	}
+	if vfs.PathsOverlap(rf, rd) {
+		return true
+	}
+	fdev, frel, fok := mi.locate(rf)
+	ddev, drel, dok := mi.locate(rd)
+	return fok && dok && fdev == ddev && vfs.PathsOverlap(frel, drel)
+}
+
+// mountInfo lists the mounts of the process: device, the directory of the
+// filesystem that is mounted, and where.
+type mountInfo []struct{ dev, root, point string }
+
+// locate returns the filesystem path lies on and its path within it.
+func (mi mountInfo) locate(path string) (dev, rel string, ok bool) {
+	best := -1
+	for _, m := range mi {
+		var rest string
+		switch {
+		case m.point == "/":
+			rest = path
+		case path == m.point || strings.HasPrefix(path, m.point+"/"):
+			rest = path[len(m.point):]
+		default:
+			continue
+		}
+		if len(m.point) > best {
+			best, dev, rel = len(m.point), m.dev, filepath.Join(m.root, rest)
+		}
+	}
+	return dev, rel, best >= 0
 }
 
 // checkMountpoint fails if dir is on the same filesystem as its parent:

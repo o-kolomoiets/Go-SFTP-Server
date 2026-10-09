@@ -44,10 +44,13 @@ it scans the registered connections, both under one lock: every connection
 is either scanned or pins the new snapshot (review finding).
 
 **Mount table generations.** A reload builds a new table from the old one
-(`vfs.Table.Reload`). A mount whose host directory is the one the old table
-opened (same path, and `os.SameFile` of the path against the opened root)
-shares that directory; a mount whose directory changed, for example because a
-disk was mounted over the path, opens it anew. Directories are
+(`vfs.Table.Reload`). A mount whose host directory is open in any generation
+still in use (same path, and `os.SameFile` of the path against the opened
+root) shares that directory, also when a generation in between left the
+mount out; a mount whose directory changed, for example because a disk was
+mounted over the path, opens it anew. A home mount does not share the
+directory of a plain mount (the parent of `{user}`), since registry entries
+are relative to a session's root (review finding). Directories are
 reference-counted by the tables that use them, and tables by the
 connections that pin them (`Acquire`, `Close`). A pin is taken with a
 compare-and-swap that fails once the count is zero, and the server then
@@ -60,7 +63,9 @@ one after the switch. A build that fails drops only the references it took.
 Generations share one registry of uploads (one writer per file) and of
 users' files (ownership, stat redirects). Its entries name a directory, not
 a mount: a repointed mount does not inherit the entries of its old
-directory, and nothing has to be dropped on reload (review finding).
+directory, and nothing has to be dropped on reload (review finding). An
+uploader may set the times of its own uploads without `setstat` only while
+it still has `write`, so a reload that takes `write` away ends that too.
 
 **Unavailable mounts.** On reload, a mount that fails its checks
 (`require_mountpoint`, a missing directory) or cannot be opened is left out
@@ -107,13 +112,15 @@ Everything that can fail happens in step 2, and nothing in step 2 changes
 running state; step 3 cannot fail.
 
 **Revocation does not depend on unrelated files.** On reload, an
-`authorized_keys` file that is missing, not trusted or without usable keys
-gives no keys, with a warning, instead of failing the reload: deleting a
-file revokes its keys, and one user's broken file does not block another
-user's revocation (review finding). A key file that is not a regular file
-(the pipe of `--authorized-keys <(...)`) keeps the keys read before, since a
-pipe can be read once. Host keys are not checked on reload, since they
-change only at restart.
+`authorized_keys` file that is missing, not a regular file, not trusted or
+without usable keys gives no keys, with a warning, instead of failing the
+reload: deleting a file, or linking it to `/dev/null`, revokes its keys, and
+one user's broken file does not block another user's revocation (review
+finding). Only a pipe (the one of `--authorized-keys <(...)`), which can be
+read once, keeps the keys read from it before. With `--dir`, a missing
+directory is unavailable on reload, as a mount is. Host keys are not checked
+on reload, since they change only at restart; the trusted-file check uses
+the host keys in use, not those of the edited file.
 
 **Restart-only settings** keep their running value; a change is logged as a
 warning and listed in `restart_required`: `server.listen`,
@@ -128,7 +135,11 @@ write take effect at the next routine HUP. So `CheckFS` (at start and on
 reload) refuses the configuration, included files, `authorized_keys` files,
 host keys and the audit log inside a mount clients can write, and host keys
 and configuration files (password hashes) inside any mount; an audit log in
-a read-only mount gives a warning (review finding).
+a read-only mount gives a warning (review finding). On reload, the mounts of
+every generation that connections still use count too: a connection of an
+earlier configuration may still write a directory the new one made
+read-only. "Inside" follows symlinks and, on Linux, bind mounts
+(`/proc/self/mountinfo`: one directory shown at two paths).
 
 **Signals and systemd.** SIGHUP is caught from the start of `serve` with a
 buffer of one: a HUP during startup waits for the loop, and a HUP during a

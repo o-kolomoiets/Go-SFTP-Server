@@ -1158,7 +1158,7 @@ access = { ok = "full" }
 		t.Fatal(err)
 	}
 	mustValidate(t, c)
-	warns, unavailable, err := c.CheckFSReload()
+	warns, unavailable, err := c.CheckFSReload(nil)
 	if err != nil {
 		t.Fatalf("CheckFSReload: %v", err)
 	}
@@ -1253,6 +1253,47 @@ output = "{dir}/safe/audit.jsonl"
 	}
 }
 
+// A reload also checks trusted files against the mounts that open
+// connections of an earlier configuration still use.
+func TestCheckFSReloadLiveMounts(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, d := range []string{"data/keys", "safe"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := Load(writeConfig(t, dir, `
+config_version = 1
+[server]
+host_keys = ["{dir}/safe/host_key"]
+host_key_auto_generate = true
+[mounts.data]
+path = "{dir}/data"
+read_only = true
+[users.bob]
+authorized_keys_file = "{dir}/data/keys/bob.pub"
+access = { data = "read" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustValidate(t, c)
+	if _, _, err := c.CheckFSReload(nil); err != nil {
+		t.Fatalf("a key file in a read-only mount: %v", err)
+	}
+	live := []LiveMount{{Name: "data", Path: filepath.Join(dir, "data")}}
+	_, _, err = c.CheckFSReload(live)
+	if err == nil || !strings.Contains(err.Error(), `mount "data" of open connections: covers the authorized_keys file of bob`) {
+		t.Errorf("a key file in a mount open connections can still write: %v", err)
+	}
+	live[0].ReadOnly = true
+	if _, _, err := c.CheckFSReload(live); err != nil {
+		t.Errorf("the same read-only mount: %v", err)
+	}
+}
+
 // On reload, problems of key files revoke their keys instead of failing;
 // a file that is not a regular file keeps the keys read before.
 func TestBuildAuthenticatorReload(t *testing.T) {
@@ -1282,8 +1323,8 @@ access = { m = "read" }
 	}
 	mustValidate(t, c)
 	a, files, _, err := c.BuildAuthenticator(AuthOptions{})
-	if err != nil || a.Len() != 2 || len(files[bob]) != 1 {
-		t.Fatalf("BuildAuthenticator = %d keys, %v, %v", a.Len(), files, err)
+	if err != nil || a.Len() != 2 || len(files) != 0 {
+		t.Fatalf("BuildAuthenticator = %d keys, %v, %v; want no pipes remembered", a.Len(), files, err)
 	}
 
 	if err := os.Remove(bob); err != nil {

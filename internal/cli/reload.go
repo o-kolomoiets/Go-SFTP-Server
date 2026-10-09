@@ -34,7 +34,8 @@ type running struct {
 
 	mu     sync.Mutex // serializes reloads; guards the fields below
 	c      *config.Config
-	mounts *vfs.Table // a reference to the current table
+	mounts *vfs.Table   // a reference to the current table
+	tables []*vfs.Table // every table built, until no connection uses it
 	keys   config.KeyFiles
 }
 
@@ -123,7 +124,12 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	if err != nil {
 		return nil, 0, reloadConfig, problemsError{c.File, err}
 	}
-	warns, unavailable, err := c.CheckFSReload()
+	// Before the file checks, so that they check the host keys in use.
+	restart = keepRestartOnly(r.c, c)
+	for _, k := range restart {
+		r.log.WarnContext(ctx, "this setting changes only at restart; the running value stays", "key", k)
+	}
+	warns, unavailable, err := c.CheckFSReload(r.liveMounts())
 	warn(warns)
 	if err != nil {
 		return nil, 0, reloadConfig, problemsError{c.File, err}
@@ -132,10 +138,6 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	warn(warns)
 	if err != nil {
 		return nil, 0, reloadConfig, err
-	}
-	restart = keepRestartOnly(r.c, c)
-	for _, k := range restart {
-		r.log.WarnContext(ctx, "this setting changes only at restart; the running value stays", "key", k)
 	}
 	level, err := parseLevel(c.Log.Level)
 	if err != nil {
@@ -171,11 +173,26 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 
 	if newAudit {
 		r.out.use(c.Audit.Output, auditFile)
+		r.al.Probe() // a new file may end a failure at once
 	}
 	r.level.Set(level)
 	_ = r.mounts.Close()
 	r.c, r.mounts, r.keys = c, mounts, keys
+	r.tables = append(r.tables, mounts)
 	return restart, disconnected, "", nil
+}
+
+// liveMounts returns the mounts of the tables that connections still use;
+// r.mu must be held.
+func (r *running) liveMounts() []config.LiveMount {
+	r.tables = slices.DeleteFunc(r.tables, func(t *vfs.Table) bool { return !t.Live() })
+	var live []config.LiveMount
+	for _, t := range r.tables {
+		for _, m := range t.Mounts() {
+			live = append(live, config.LiveMount{Name: m.Name(), Path: m.HostPath(), ReadOnly: m.ReadOnly()})
+		}
+	}
+	return live
 }
 
 // keepRestartOnly copies the settings that change only at restart from the

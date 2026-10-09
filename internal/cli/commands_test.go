@@ -322,9 +322,9 @@ func TestServeFlagErrorsNameTheFlag(t *testing.T) {
 
 	dir := t.TempDir()
 	for flag, args := range map[string][]string{
-		"--on-conflict": {"serve", "--dir", dir, "--on-conflict", "merge"},
-		"--log-level":   {"serve", "--dir", dir, "--log-level", "loud"},
-		"--log-format":  {"serve", "--dir", dir, "--log-format", "xml"},
+		"--on-conflict": {"serve", "--dir", dir, "--on-conflict", "merge", "--allow-root"},
+		"--log-level":   {"serve", "--dir", dir, "--log-level", "loud", "--allow-root"},
+		"--log-format":  {"serve", "--dir", dir, "--log-format", "xml", "--allow-root"},
 	} {
 		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, flag) {
 			t.Errorf("%s: exit %d: %s", flag, code, stderr)

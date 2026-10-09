@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // reloadFixture opens a table with the mounts "keep" and "move" and returns
@@ -236,5 +237,77 @@ func TestReloadValidates(t *testing.T) {
 	}
 	if _, _, err := t1.Reload([]MountSpec{spec("x", "relative", ConflictRename)}, Options{}); err == nil {
 		t.Error("reload with a relative path succeeded")
+	}
+}
+
+// A directory still used by an old generation is shared with a later one
+// even when a generation in between left the mount out.
+func TestReloadSharesSkippedDirectory(t *testing.T) {
+	t.Parallel()
+
+	t1, base := reloadFixture(t)
+	t.Cleanup(func() { t1.Close() })
+	keep := spec("keep", filepath.Join(base, "keep"), ConflictRename)
+	t2, _, err := t1.Reload([]MountSpec{spec("move", filepath.Join(base, "move"), ConflictRename)}, Options{Unavailable: []string{"keep"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t2.Close() })
+	t3, _, err := t2.Reload([]MountSpec{keep}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t3.Close() })
+	if t3.Mount("keep").dir != t1.Mount("keep").dir {
+		t.Error("a directory still in use was opened a second time")
+	}
+}
+
+// A home mount does not share its directory with a plain mount of the same
+// directory: registry entries are relative to different roots.
+func TestReloadHomeDoesNotSharePlain(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	mustWrite(t, filepath.Join(base, "h", "alice", "f.txt"), "home")
+	t1, err := Open([]MountSpec{spec("data", filepath.Join(base, "h"), ConflictRename)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t1.Close() })
+	t2, _, err := t1.Reload([]MountSpec{spec("homes", filepath.Join(base, "h", UserPlaceholder), ConflictRename)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t2.Close() })
+	if t2.Mount("homes").dir == t1.Mount("data").dir {
+		t.Error("a home mount shares the directory of a plain mount")
+	}
+}
+
+// A reload that takes the write permission away also ends the uploader's
+// right to set the times of its own uploads.
+func TestReloadRevokedWriteEndsOwnSetstat(t *testing.T) {
+	t.Parallel()
+
+	t1, base := reloadFixture(t)
+	t.Cleanup(func() { t1.Close() })
+	up := session(t, t1, "alice", []Grant{{"keep", PermList | PermWrite}})
+	if _, err := upload(t, up, "/keep/x.txt", put, "x"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	times := Attrs{Atime: now, Mtime: now, HasTimes: true}
+	if err := up.Setstat("/keep/x.txt", times); err != nil {
+		t.Fatalf("an uploader cannot set the times of its upload: %v", err)
+	}
+	t2, _, err := t1.Reload([]MountSpec{spec("keep", filepath.Join(base, "keep"), ConflictRename)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t2.Close() })
+	read := session(t, t2, "alice", []Grant{{"keep", PermList | PermRead}})
+	if err := read.Setstat("/keep/x.txt", times); !errors.Is(err, ErrDenied) {
+		t.Errorf("Setstat without write after a reload: %v", err)
 	}
 }

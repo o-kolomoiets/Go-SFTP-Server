@@ -326,9 +326,13 @@ type Mount struct {
 }
 
 // dir is an opened mount directory. Generations of a table whose mount has
-// the same host directory share it; the last one closes it.
+// the same host directory share it; the last one closes it. A home mount's
+// directory (the parent of {user}) is not shared with a plain mount of the
+// same directory: registry entries are relative to a session's root, which
+// differs between the two.
 type dir struct {
 	path string
+	home bool
 	root *os.Root
 	refs int // guarded by registry.dmu
 }
@@ -386,27 +390,29 @@ type registry struct {
 	users map[string]*userState // see users.go
 	now   func() time.Time
 
-	dmu sync.Mutex // guards dir.refs
+	dmu  sync.Mutex      // guards dir.refs and dirs
+	dirs map[string]*dir // open directories by path, for sharing
 }
 
 // Open validates specs and opens an os.Root for every mount. The caller
 // holds the one reference to the table; Close drops it.
 func Open(specs []MountSpec, opts Options) (*Table, error) {
-	t, _, err := open(specs, opts, &registry{users: map[string]*userState{}, now: time.Now}, nil)
+	reg := &registry{users: map[string]*userState{}, now: time.Now, dirs: map[string]*dir{}}
+	t, _, err := open(specs, opts, reg, false)
 	return t, err
 }
 
-// Reload returns the next generation of t for a new configuration. Mounts
-// whose directory is the one t opened, at the same host path, keep it;
-// the others are opened anew. A mount that cannot be opened is unavailable
-// in the new table, as with Options.Unavailable; the returned warnings say
-// why. t is not changed: sessions started on it keep their mounts until
-// they end. The caller must hold a reference to t.
+// Reload returns the next generation of t for a new configuration. A mount
+// whose host directory is open in any generation still in use, at the same
+// path, shares it; the others are opened anew. A mount that cannot be
+// opened is unavailable in the new table, as with Options.Unavailable; the
+// returned warnings say why. t is not changed: sessions started on it keep
+// their mounts until they end. The caller must hold a reference to t.
 func (t *Table) Reload(specs []MountSpec, opts Options) (*Table, []error, error) {
-	return open(specs, opts, t.registry, t)
+	return open(specs, opts, t.registry, true)
 }
 
-func open(specs []MountSpec, opts Options, reg *registry, prev *Table) (*Table, []error, error) {
+func open(specs []MountSpec, opts Options, reg *registry, reload bool) (*Table, []error, error) {
 	if len(specs)+len(opts.Unavailable) == 0 {
 		return nil, nil, errors.New("no directories to serve")
 	}
@@ -427,9 +433,9 @@ func open(specs []MountSpec, opts Options, reg *registry, prev *Table) (*Table, 
 	t.refs.Store(1)
 	var warns []error
 	for _, s := range specs {
-		m, err := t.openMount(s, prev)
+		m, err := t.openMount(s)
 		switch {
-		case err != nil && prev == nil:
+		case err != nil && !reload:
 			_ = t.Close()
 			return nil, nil, fmt.Errorf("mount %q: %w", s.Name, err)
 		case err != nil:
@@ -444,7 +450,7 @@ func open(specs []MountSpec, opts Options, reg *registry, prev *Table) (*Table, 
 	return t, warns, nil
 }
 
-func (t *Table) openMount(s MountSpec, prev *Table) (*Mount, error) {
+func (t *Table) openMount(s MountSpec) (*Mount, error) {
 	m := &Mount{
 		name:     s.Name,
 		hostPath: s.Path,
@@ -457,10 +463,7 @@ func (t *Table) openMount(s MountSpec, prev *Table) (*Mount, error) {
 	if m.home {
 		path = filepath.Dir(path)
 	}
-	if d := prev.dirAt(path); d != nil && d.current() {
-		t.dmu.Lock()
-		d.refs++
-		t.dmu.Unlock()
+	if d := t.share(path, m.home); d != nil {
 		m.dir, m.root = d, d.root
 		return m, nil
 	}
@@ -473,21 +476,44 @@ func (t *Table) openMount(s MountSpec, prev *Table) (*Mount, error) {
 	if err != nil {
 		return nil, err
 	}
-	m.dir, m.root = &dir{path: path, root: root, refs: 1}, root
+	d := &dir{path: path, home: m.home, root: root, refs: 1}
+	t.dmu.Lock()
+	t.dirs[path] = d
+	t.dmu.Unlock()
+	m.dir, m.root = d, root
 	return m, nil
 }
 
-// dirAt returns the directory a mount of t opened at path, or nil.
-func (t *Table) dirAt(path string) *dir {
-	if t == nil {
+// share takes a reference to the open directory at path, if some
+// generation still uses it and path still names it.
+func (t *Table) share(path string, home bool) *dir {
+	t.dmu.Lock()
+	d := t.dirs[path]
+	if d == nil || d.home != home {
+		t.dmu.Unlock()
 		return nil
 	}
-	for _, m := range t.mounts {
-		if m.dir.path == path {
-			return m.dir
-		}
+	d.refs++
+	t.dmu.Unlock()
+	if !d.current() {
+		t.dmu.Lock()
+		_ = t.releaseDir(d)
+		t.dmu.Unlock()
+		return nil
 	}
-	return nil
+	return d
+}
+
+// releaseDir drops a reference to d and closes it with the last one; t.dmu
+// must be held.
+func (t *Table) releaseDir(d *dir) error {
+	if d.refs--; d.refs > 0 {
+		return nil
+	}
+	if t.dirs[d.path] == d {
+		delete(t.dirs, d.path)
+	}
+	return d.root.Close()
 }
 
 func isHomePath(p string) bool { return filepath.Base(p) == UserPlaceholder }
@@ -605,12 +631,14 @@ func (t *Table) Close() error {
 	defer t.dmu.Unlock()
 	errs := make([]error, 0, len(t.mounts))
 	for _, m := range t.mounts {
-		if m.dir.refs--; m.dir.refs == 0 {
-			errs = append(errs, m.dir.root.Close())
-		}
+		errs = append(errs, t.releaseDir(m.dir))
 	}
 	return errors.Join(errs...)
 }
+
+// Live reports whether a reference to t is still held, so that sessions
+// may use its mounts.
+func (t *Table) Live() bool { return t.refs.Load() > 0 }
 
 // openHome opens user's directory below a home mount's parent (ROADMAP §6.1
 // item 4). The directory must be a real directory: a symlink, even one that

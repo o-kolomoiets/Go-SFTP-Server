@@ -494,7 +494,9 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 		return ErrDenied
 	case SetstatTimes:
 	}
-	own := s.isCreated(v, rel)
+	// An uploader may set the times of its own uploads, while it may
+	// still upload: a reload may have taken the write permission away.
+	own := v.perm.Has(PermWrite) && s.isCreated(v, rel)
 	if !v.perm.Has(PermSetstat) && !own {
 		return ErrDenied
 	}

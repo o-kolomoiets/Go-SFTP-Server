@@ -205,26 +205,34 @@ access = { data = "read" }
 }
 
 // TestServeReloadZeroConfig: a reload reads --authorized-keys again, so
-// removing a key from it revokes the key.
+// removing a key from it revokes the key, also while a --dir is missing.
 func TestServeReloadZeroConfig(t *testing.T) {
 	isolate(t)
 	dir := t.TempDir()
-	share := filepath.Join(dir, "share")
-	if err := os.Mkdir(share, 0o755); err != nil {
-		t.Fatal(err)
+	share, disk := filepath.Join(dir, "share"), filepath.Join(dir, "disk")
+	for _, d := range []string{share, disk} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	alice, bob := newSigner(t), newSigner(t)
 	keys := filepath.Join(dir, "keys")
 	writeFile(t, keys, authorizedKey(alice)+"\n"+authorizedKey(bob)+"\n")
-	ts := startServe(t, "--dir", share, "--authorized-keys", keys, "--state-dir", filepath.Join(dir, "state"), "--listen", "127.0.0.1:0")
+	ts := startServe(t, "--dir", share, "--dir", disk, "--authorized-keys", keys, "--state-dir", filepath.Join(dir, "state"), "--listen", "127.0.0.1:0")
 	c, err := ts.login("anyone", bob)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.Close()
+	if err := os.Remove(disk); err != nil { // an unplugged disk
+		t.Fatal(err)
+	}
 	writeFile(t, keys, authorizedKey(alice)+"\n")
 	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
-		t.Errorf("server.reload = %v", ev)
+		t.Errorf("server.reload = %v\n%s", ev, ts.stderr.String())
+	}
+	if !strings.Contains(ts.stderr.String(), "the mount is unavailable") {
+		t.Errorf("the missing --dir is not reported:\n%s", ts.stderr.String())
 	}
 	if c, err := ts.login("anyone", bob); err == nil {
 		c.Close()
@@ -239,5 +247,39 @@ func TestServeReloadZeroConfig(t *testing.T) {
 	if c, err := ts.login("anyone", alice); err == nil {
 		c.Close()
 		t.Error("a key of a deleted authorized_keys file still logs in")
+	}
+}
+
+// TestServeReloadMaskedValues: a reload warns about a value of the file
+// that a flag or the environment overrides, and only then.
+func TestServeReloadMaskedValues(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "gosftpd.toml")
+	base := `config_version = 1
+[server]
+listen = ["127.0.0.1:0"]
+host_keys = ["state/host_key"]
+host_key_auto_generate = true
+[mounts.data]
+path = "` + filepath.ToSlash(filepath.Join(dir, "data")) + `"
+[users.alice]
+authorized_keys = ["` + authorizedKey(newSigner(t)) + `"]
+access = { data = "full" }
+`
+	writeFile(t, path, base)
+	t.Setenv("GOSFTPD_LOG_LEVEL", "warn")
+	ts := startServe(t, "--config", path)
+	ts.reload(t, ts.stdout.String)
+	if strings.Contains(ts.stderr.String(), "has no effect") {
+		t.Errorf("a warning about a key the file does not set:\n%s", ts.stderr.String())
+	}
+	writeFile(t, path, base+"[log]\nlevel = \"debug\"\n")
+	ts.reload(t, ts.stdout.String)
+	if !strings.Contains(ts.stderr.String(), `log.level = \"debug\" in `+path+` has no effect: $GOSFTPD_LOG_LEVEL overrides it`) {
+		t.Errorf("no warning about the overridden log.level:\n%s", ts.stderr.String())
 	}
 }

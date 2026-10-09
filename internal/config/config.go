@@ -55,7 +55,12 @@ type Config struct {
 	// AnyUser is set in zero-config mode (serve --dir): every SSH user name
 	// is accepted with these keys and gets full access to every mount.
 	AnyUser *ZeroConfigUser `toml:"-"`
+
+	defined map[string]bool // keys set in File
 }
+
+// Defined reports whether the main file sets key, such as "log.level".
+func (c *Config) Defined(key string) bool { return c.defined[key] }
 
 // Server is the [server] table.
 type Server struct {
@@ -317,6 +322,10 @@ func Load(path string) (*Config, error) {
 		Reload:        raw.Reload,
 		File:          abs,
 		Files:         []string{abs},
+		defined:       map[string]bool{},
+	}
+	for _, k := range md.Keys() {
+		c.defined[k.String()] = true
 	}
 	if c.Users == nil {
 		c.Users = map[string]*User{}
