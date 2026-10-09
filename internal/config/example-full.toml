@@ -35,7 +35,7 @@ duration = "30m"
 exempt = ["127.0.0.0/8", "::1/128"]
 
 [defaults]                              # inherited by every mount
-on_conflict = "rename"                  # rename | reject | overwrite
+on_conflict = "rename"                  # rename | reject | overwrite | version
 rename_template = "{stem} ({n}){ext}"   # must contain {n}
 max_rename_attempts = 100               # then {n} becomes a UTC timestamp
 compound_extensions = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]
@@ -46,6 +46,11 @@ require_mountpoint = false              # true: refuse to start unless the path 
 resume = "append-only"                  # append-only | off: continue uploads, never change existing bytes
 stat_redirect = true                    # after a renamed upload, STAT of the requested name shows the copy
 symlinks = "inside-only"                # inside-only | deny: follow existing links that stay in the mount
+max_file_size = "0"                     # "0" = no limit; e.g. "10GiB"
+min_free_space = "1GiB"                 # refuse new writes below this free space; "0" = off
+atomic_uploads = false                  # true: temp file, named on close; no resume
+fsync = false                           # flush before naming (atomic_uploads, version)
+versions = { dir = ".versions", keep = 10, max_age = "720h" }   # for on_conflict = "version"
 
 [mounts.public]
 path = "/srv/sftp/public"
@@ -55,10 +60,14 @@ read_only = true
 path = "/srv/sftp/inbox"
 create = true
 on_conflict = "rename"
+atomic_uploads = true                   # no partial files under their names
+max_file_size = "10GiB"
 
 [mounts.home]
 path = "/srv/sftp/home/{user}"          # one directory per user, created as 0750
 create = true
+on_conflict = "version"                 # a new upload keeps the old file in .versions
+versions = { keep = 5 }
 
 # Permissions: read (list, read), upload (list, write, mkdir),
 # readwrite (list, read, write, overwrite, rename, mkdir, setstat), full,

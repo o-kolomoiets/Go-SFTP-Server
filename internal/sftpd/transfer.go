@@ -75,14 +75,14 @@ type writer struct {
 
 	mu      sync.Mutex
 	aborted bool
-	denied  atomic.Bool // a write was refused (append-only guard)
+	denied  atomic.Bool // a write was refused (append-only guard, max_file_size)
 	once    sync.Once
 }
 
 func (w *writer) WriteAt(p []byte, off int64) (int, error) {
 	n, err := w.wh.WriteAt(p, off)
 	if err != nil {
-		if errors.Is(err, vfs.ErrImmutable) && !w.denied.Swap(true) {
+		if (errors.Is(err, vfs.ErrImmutable) || errors.Is(err, vfs.ErrTooLarge)) && !w.denied.Swap(true) {
 			return n, w.h.fail("fs.upload", w.wh.Path(), err) // one fs.denied per upload
 		}
 		w.h.log.Debug("write failed", "path", w.wh.Path(), "err", err)
@@ -110,10 +110,15 @@ func (w *writer) Close() error {
 		switch {
 		case aborted:
 			result = "aborted"
-		case w.denied.Load():
+		case w.denied.Load(), w.wh.Refused():
 			result = "denied"
 		case err != nil:
-			result = "error"
+			// An atomic upload is published on close, by the conflict policy.
+			if r, _ := toStatus(err); r == "denied" {
+				result = "denied"
+			} else {
+				result = "error"
+			}
 		}
 		attrs := []slog.Attr{
 			slog.String("path", w.requested),
@@ -124,6 +129,9 @@ func (w *writer) Close() error {
 		}
 		if off, ok := w.wh.StartOffset(); ok {
 			attrs = append(attrs, slog.Int64("start_offset", off))
+		}
+		if v := w.wh.Version(); v != "" {
+			attrs = append(attrs, slog.String("version_path", v))
 		}
 		attrs = append(attrs,
 			slog.Int64("duration_ms", time.Since(w.start).Milliseconds()),

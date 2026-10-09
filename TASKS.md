@@ -11,7 +11,7 @@
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
 | M2 MVP | v0.2.0 | ✅ | 18 / 18 |
-| M3 Hardening | v0.3.0 | 🔄 | 5 / 12 |
+| M3 Hardening | v0.3.0 | 🔄 | 8 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
@@ -104,9 +104,9 @@
 | M3-01 | Лимиты соединений, idle timeout, keepalive | ✅ | `max_connections`, `max_connections_per_ip` (IPv6 по /64), `max_preauth_connections` проверяются сразу после accept; `conn.reject` не чаще 10/с; `idle_timeout` считает только SFTP-трафик; keepalive: 3 пропуска закрывают соединение; TCP keepalive на listener; тест 1000 «молчащих» соединений |
 | M3-02 | Ban-таблица | ✅ | Скользящее окно; каждый неверный пароль — неудача сразу (и в соединении, которое потом вошло), открытые соединения забаненного источника больше не проверяют пароли; отклонённые ключи — одна неудача на соединение; LRU по 65 536 записей для неудач и банов, `exempt` по адресу; `auth.ban`, `conn.reject reason=banned`; тест на 1 млн источников |
 | M3-03 | Пароли opt-in (argon2id), `user hash-password` | ✅ | `auth.methods` включает и выключает оба метода; `password_hash` (argon2id; bcrypt 10–14 для импорта; пределы m ≤ 64 MiB, t ≤ 10, p ≤ 8); попытка проверяет один хэш (неизвестные — заменитель самого дорогого класса), неудача дотягивается паузой до его времени без траты CPU; при хэшах одного класса время не зависит от имени при любой нагрузке, при смешанных `config validate` предупреждает; семафор по `GOMAXPROCS` с учётом потоков argon2id, тест медиан времени; имя пользователя закреплено за соединением, как в sshd; `user add --password-hash`; interop: OpenSSH (SSH_ASKPASS) и paramiko |
-| M3-04 | `max_file_size`, `min_free_space` | ⬜ | |
-| M3-05 | `atomic_uploads`, janitor | ⬜ | |
-| M3-06 | `on_conflict = "version"` | ⬜ | |
+| M3-04 | `max_file_size`, `min_free_space` | ✅ | `ByteSize` в конфиге (`"10GiB"`); `max_file_size` по концу каждой записи (sparse-трюк закрыт) и при truncate, отказ — `result=denied`; `min_free_space` (1 GiB) через statfs при открытии на запись |
+| M3-05 | `atomic_uploads`, janitor | ✅ | Временный `.gosftpd-<16hex>.part` (0600) рядом с целью, скрыт из листинга, имена `.gosftpd-*` клиентам недоступны (без учёта регистра); публикация при `Close` переименованием без перезаписи, политика конфликтов — в этот момент; обрыв или отказ записи — файл удаляется; FSTAT/FSETSTAT доходят до временного файла; `fsync`; докачка выключена; janitor при старте и каждые 6 ч (старше 24 ч, без read-only mount'ов), RMDIR убирает осиротевшие temp-файлы; interop: `kill -9` клиента не оставляет файла |
+| M3-06 | `on_conflict = "version"` | ✅ | Старый файл уходит в `.versions/<rel>/<stem>.<UTC>[-N]<ext>`, `keep` и `max_age` (лишние версии вытесняет только пользователь с `delete` или `overwrite`); posix-rename версионирует цель так же; хватает права `write`; `.versions` не листится (sync-инструменты не пытаются его удалить), читается по пути, менять его нельзя; аудит `conflict=versioned`, `version_path`; interop: `rclone sync` ×5 без лишних файлов |
 | M3-07 | Профиль `compat` и тест профилей криптографии | ✅ | `server.crypto_policy`; тест: каждое имя есть в `SupportedAlgorithms`, нет в `InsecureAlgorithms` и в списке «никогда»; клиент только с compat-алгоритмами входит лишь при `compat` |
 | M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ⬜ | |
 | M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ | |
@@ -174,3 +174,4 @@
 | 2026-10-08 | M2c: interop с OpenSSH 10.6, paramiko, rclone, lftp; документация; GoReleaser; ревью (7 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#6](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/6) |
 | 2026-10-09 | Релиз `v0.2.0` (владелец), проверен; M2 закрыт | [v0.2.0](https://github.com/o-kolomoiets/Go-SFTP-Server/releases/tag/v0.2.0) |
 | 2026-10-09 | M3a: лимиты соединений, баны, таймауты, вход по паролю, `crypto_policy`, `--allow-root`; ревью и две проверки (все находки исправлены) | [o-kolomoiets/Go-SFTP-Server#8](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/8) |
+| 2026-10-09 | M3b: `atomic_uploads`, `on_conflict = "version"`, `max_file_size`, `min_free_space`; ревью (8 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#9](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/9) |

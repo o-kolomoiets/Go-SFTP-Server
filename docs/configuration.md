@@ -155,7 +155,7 @@ with `reason = "home_not_dir"` is written.
 | Key | Default | Meaning |
 |---|---|---|
 | `flatten` | `true` | A user who can access exactly one mount sees it as `/`. Only in `[defaults]`. |
-| `on_conflict` | `"rename"` | Upload to an existing file: `rename`, `reject` or `overwrite`, see below. |
+| `on_conflict` | `"rename"` | Upload to an existing file: `rename`, `reject`, `overwrite` or `version`, see below. |
 | `rename_template` | `"{stem} ({n}){ext}"` | Name of the copy with `rename`. Must contain `{n}`; may contain `{stem}` and `{ext}`; no slashes. |
 | `max_rename_attempts` | `100` | Numbered names tried before `{n}` becomes a UTC timestamp with a random suffix (1–10000). |
 | `compound_extensions` | `[".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]` | Extensions kept whole: `a.tar.gz` becomes `a (1).tar.gz`. |
@@ -165,6 +165,21 @@ with `reason = "home_not_dir"` is written.
 | `symlinks` | `"inside-only"` | Existing symlinks on the host: `inside-only` follows those that stay inside the mount; `deny` refuses every path through a symlink and hides them from listings. |
 | `umask` | `"0027"` | Removed from the mode of new files (0666) and directories (0777); a quoted octal string. |
 | `require_mountpoint` | `false` | Refuse to start unless the path is a mount point (on another filesystem than its parent): protects against writing to the root disk when a disk is not mounted. |
+| `max_file_size` | `"0"` | Largest file an upload may write, e.g. `"10GiB"`; `"0"` means no limit. Units: B, kB, MB, GB, TB, KiB, MiB, GiB, TiB, or a plain number of bytes. |
+| `min_free_space` | `"1GiB"` | Refuse to open files for writing while the mount's filesystem has less free space (`"0"` turns the check off). Not checked on Windows or on filesystems that report no size (some FUSE filesystems). |
+| `atomic_uploads` | `false` | Write each upload to a hidden temporary file and give it its name only when the client closes it, see below. |
+| `fsync` | `false` | Flush an upload through a temporary file (`atomic_uploads`, or a conflict under `version`) to disk before it gets its name. |
+| `versions` | see below | Where and how long `on_conflict = "version"` keeps old versions. |
+
+### `[defaults.versions]`
+
+Also `[mounts.NAME.versions]`, or inline: `versions = { keep = 5 }`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dir` | `".versions"` | Directory at the top of the mount that holds old versions, as `<dir>/<path of the file>/<stem>.<UTC time><ext>`, e.g. `.versions/docs/report.pdf/report.20261009T114500Z.pdf`. It is not listed, so that sync tools do not try to delete it; users with `list` and `read` open it by path (`cd .versions`) and download versions. Nobody but the server can change it. |
+| `keep` | `10` | Old versions kept per file, newest first; `0` keeps all (at most 10000). Extra versions are removed only when a user with the `delete` or `overwrite` permission saves a version: a user who may only write cannot push older versions out. |
+| `max_age` | `"720h"` | Versions older than this are removed when the next version of the file is saved; `"0s"` keeps them forever. |
 
 ### Upload conflicts
 
@@ -175,13 +190,15 @@ What happens when an upload targets an existing file (`on_conflict`):
 | `rename` | goes to a free name from `rename_template`, e.g. `report (1).pdf` | untouched |
 | `reject` | fails with "file exists (on_conflict=reject)" | untouched |
 | `overwrite` | replaces the content (needs the `overwrite` permission) | replaced |
+| `version` | is written to a temporary file and takes the name when it is closed (needs only `write`) | moved to the versions directory |
 
 - An exclusive create (`O_EXCL`) of an existing file always fails.
 - SFTP cannot tell the client the name it got; the audit event `fs.upload`
   records `path` and `final_path`.
 - **Moves** (`posix-rename@openssh.com`, used by OpenSSH `rename`, rclone and
-  WinSCP) onto an existing name follow the same policy; the classic SFTP
-  RENAME never replaces a file.
+  WinSCP) onto an existing name follow the same policy (with `version` the
+  target is versioned first); the classic SFTP RENAME never replaces a
+  file.
 - **Resume** (OpenSSH `reput`, paramiko `open(…, "a")`, Cyberduck) writes into
   the existing file. With `resume = "append-only"` the bytes it had when it
   was opened can neither be changed nor truncated ("existing data is
@@ -200,8 +217,40 @@ What happens when an upload targets an existing file (`on_conflict`):
   Without it, paramiko `put(confirm=True)` reports a size mismatch and rclone
   may delete what it takes for a failed copy: the original.
 - `rename` plus a sync tool (`rclone sync`, `rsync`-like clients) creates a
-  copy on every run; `on_conflict = "version"` (planned for v0.3) is meant
-  for that.
+  copy on every run; use `on_conflict = "version"` for synced folders: the
+  file keeps its name and the previous content goes to the versions
+  directory (`fs.upload` and `fs.rename` record it in `version_path`).
+- An upload that is aborted (the connection breaks) under `version` or with
+  `atomic_uploads` leaves no trace: the temporary file is removed and the
+  original stays. Temporary files (`.gosftpd-*.part`) are hidden from
+  listings, and names starting with `.gosftpd-` (in any case) cannot be used
+  by clients. Those left by a crash are removed at start and every 6 hours
+  once they are 24 hours old, and when a client removes their directory.
+
+### Atomic uploads
+
+With `atomic_uploads = true` every upload is written to a temporary file in
+the same directory and appears under its name only when the client closes
+it, by a rename that never replaces a file by accident: other users never
+see a partial file, and a client killed mid-upload leaves nothing under the
+name. The conflict policy is applied when the upload is closed, to whatever
+has the name by then (with `reject`, the upload that closes second fails and
+its data is discarded). Resuming an upload is not possible
+(there is nothing to continue): clients get "resume is disabled". An upload
+always starts from an empty file: a client that opens an existing file
+without truncating it to change a few bytes in place (sshfs, `dd
+conv=notrunc`) replaces the whole file with what it writes. Serve such
+clients from a mount with `overwrite` and without `atomic_uploads`.
+
+### Size limits
+
+`max_file_size` is checked on every write against its end offset, so a
+client cannot create a larger sparse file by writing far past the end, and
+on truncation (SETSTAT size). A refused write ends the upload with
+`result = "denied"` and one `fs.denied` event; what was written stays, except
+for an upload through a temporary file, which is discarded. `min_free_space` is checked
+when a file is opened for writing: an upload that has started is not
+stopped when space runs low.
 
 ## Users
 

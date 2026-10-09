@@ -4,6 +4,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -290,5 +293,106 @@ func TestAuditDocCoversSchema(t *testing.T) {
 				t.Errorf("docs/audit-log.md does not describe the field `%s` (%s)", f, ev)
 			}
 		}
+	}
+}
+
+// TestVersionedAtomicUploads runs on_conflict = "version" with atomic uploads
+// and max_file_size through the SFTP protocol.
+func TestVersionedAtomicUploads(t *testing.T) {
+	e := startWith(t, startOpts{policy: vfs.ConflictVersion, mount: func(o *vfs.MountOptions) {
+		o.AtomicUploads = true
+		o.MaxFileSize = 100
+	}})
+	c := e.sftp(t)
+
+	writeRemote(t, c, "/a.txt", "v2")
+	if got := readFile(t, filepath.Join(e.share, "a.txt")); got != "v2" {
+		t.Errorf("a.txt = %q", got)
+	}
+	versions, err := filepath.Glob(filepath.Join(e.share, ".versions", "a.txt", "a.*.txt"))
+	if err != nil || len(versions) != 1 || readFile(t, versions[0]) != "original content" {
+		t.Fatalf("versions = %q, %v", versions, err)
+	}
+
+	// The new file appears only on close; FSTAT and FSETSTAT reach it before.
+	f, err := c.Create("/new.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("new data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(3); err != nil {
+		t.Fatalf("FSETSTAT size: %v", err)
+	}
+	if fi, err := f.Stat(); err != nil || fi.Size() != 3 {
+		t.Fatalf("FSTAT = %v, %v; want size 3", fi, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.share, "new.txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("new.txt exists before close: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(e.share, "new.txt")); got != "new" {
+		t.Errorf("new.txt = %q", got)
+	}
+
+	if err := c.PosixRename("/new.txt", "/a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(e.share, "a.txt")); got != "new" {
+		t.Errorf("a.txt after posix-rename = %q", got)
+	}
+
+	// Too large: the write fails and nothing is published.
+	f, err = c.Create("/big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, werr := f.Write(make([]byte, 101))
+	f.Close()
+	if werr == nil || !strings.Contains(werr.Error(), "max_file_size") {
+		t.Errorf("writing past max_file_size: %v", werr)
+	}
+	if _, err := os.Stat(filepath.Join(e.share, "big.bin")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("big.bin was published: %v", err)
+	}
+
+	if _, err := c.Create("/.versions/x"); statusCode(err) != 3 {
+		t.Errorf("writing into the versions directory: %v, want permission denied", err)
+	}
+	if entries, err := c.ReadDir("/"); err != nil || slices.ContainsFunc(entries, func(fi fs.FileInfo) bool { return strings.HasPrefix(fi.Name(), ".gosftpd-") }) {
+		t.Errorf("listing = %v, %v", entries, err)
+	}
+
+	var lines []map[string]any
+	waitForMsg(t, func() bool {
+		lines = auditLines(t, e.auditLog.String())
+		n := 0
+		for _, m := range lines {
+			if m["event"] == "fs.upload" || m["event"] == "fs.rename" {
+				n++
+			}
+		}
+		return n == 4
+	}, func() string { return e.auditLog.String() })
+	checkSchema(t, lines)
+	var got []string
+	for _, m := range lines {
+		switch m["event"] {
+		case "fs.upload", "fs.rename":
+			v, _ := m["version_path"].(string)
+			got = append(got, fmt.Sprintf("%s %s %s %s %v", m["event"], m["final_path"], m["conflict"], m["result"], strings.HasPrefix(v, "/.versions/a.txt/a.")))
+		}
+	}
+	want := []string{
+		"fs.upload /a.txt versioned ok true",
+		"fs.upload /new.txt none ok false",
+		"fs.rename /a.txt versioned ok true",
+		"fs.upload /big.bin none denied false",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("audit:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

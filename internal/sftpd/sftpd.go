@@ -171,16 +171,18 @@ func (h *Handler) PosixRename(r *sftp.Request) error {
 	if !h.audit.Healthy() {
 		return h.fail("fs.rename", r.Filepath, errAuditUnavailable)
 	}
-	final, err := h.s.Rename(r.Filepath, r.Target, true)
+	m, err := h.s.Move(r.Filepath, r.Target, true)
 	if err != nil {
 		return h.fail("fs.rename", r.Filepath, err)
 	}
-	conflict := vfs.ConflictNone
-	if final != r.Target {
-		conflict = vfs.ConflictRenamed
+	attrs := []slog.Attr{
+		slog.String("path", r.Filepath), slog.String("target_path", r.Target),
+		slog.String("final_path", m.Final), slog.String("conflict", m.Conflict),
 	}
-	h.audit.Event("fs.rename", slog.String("path", r.Filepath), slog.String("target_path", r.Target),
-		slog.String("final_path", final), slog.String("conflict", conflict), slog.String("result", "ok"))
+	if m.Version != "" {
+		attrs = append(attrs, slog.String("version_path", m.Version))
+	}
+	h.audit.Event("fs.rename", append(attrs, slog.String("result", "ok"))...)
 	return nil
 }
 

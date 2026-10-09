@@ -244,6 +244,13 @@ func (o MountOptions) validate(p *problems, base *MountOptions, prefix ...string
 			p.errorf(k("symlinks"), "%v", err)
 		}
 	}
+	if !inherited("Versions") {
+		vo := vfs.DefaultMountOptions()
+		vo.Versions = vfs.VersionsOptions{Dir: o.Versions.Dir, Keep: o.Versions.Keep, MaxAge: time.Duration(o.Versions.MaxAge)}
+		if err := vo.Validate(); err != nil {
+			p.errorf(k("versions"), "%v", err)
+		}
+	}
 }
 
 func (c *Config) validateMounts(p *problems) {

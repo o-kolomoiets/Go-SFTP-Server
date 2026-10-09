@@ -195,6 +195,9 @@ func (s *Session) resolve(vp string) (v *view, rel string, err error) {
 	if err != nil {
 		return nil, "", ErrInvalidPath
 	}
+	if reservedPath(local) {
+		return nil, "", ErrDenied // temporary upload files
+	}
 	if v.opts().Symlinks == SymlinksDeny {
 		if err := noSymlinks(v.root, local); err != nil {
 			return nil, "", err
@@ -256,6 +259,13 @@ func (s *Session) stat(vp string, lstat bool) (fs.FileInfo, error) {
 	case !v.perm.Has(PermList):
 		return nil, ErrDenied
 	}
+	if h := s.openWriter(s.virtual(v, rel)); h != nil && h.target != "" {
+		// This session's upload through a temporary file (FSTAT on its
+		// handle arrives as a STAT of the name): report the upload.
+		if fi, err := v.root.Lstat(h.rel); err == nil {
+			return namedInfo{fi, filepath.Base(rel)}, nil
+		}
+	}
 	var fi fs.FileInfo
 	if lstat {
 		fi, err = v.root.Lstat(rel)
@@ -298,7 +308,12 @@ func (s *Session) ReadDir(vp string) (Lister, error) {
 		_ = f.Close()
 		return nil, ErrNotDir
 	}
-	return &dirLister{f: f, hideLinks: v.opts().Symlinks == SymlinksDeny}, nil
+	l := &dirLister{f: f, hideLinks: v.opts().Symlinks == SymlinksDeny} // also hides temporary upload files
+	if rel == "." && v.opts().OnConflict == ConflictVersion {
+		// Sync tools would try to delete what they do not have locally.
+		l.hide = v.opts().Versions.Dir
+	}
+	return l, nil
 }
 
 // OpenRead opens a regular file for reading.
@@ -355,7 +370,7 @@ func (s *Session) writable(vp string) (*view, string, error) {
 		return nil, "", ErrDenied // creating entries in the virtual root
 	case err != nil:
 		return nil, "", err
-	case v == nil, rel == ".", v.m.readOnly:
+	case v == nil, rel == ".", v.m.readOnly, inVersions(v.opts(), rel):
 		return nil, "", ErrDenied
 	}
 	return v, rel, nil
@@ -413,7 +428,11 @@ func (s *Session) Rmdir(vp string) error {
 	if !fi.IsDir() {
 		return ErrNotDir
 	}
-	return osError(removeEntry(v.root, rel, true))
+	err = removeEntry(v.root, rel, true)
+	if err != nil && isNotEmpty(err) && s.t.removeOrphanTemp(v.root, rel) {
+		err = removeEntry(v.root, rel, true)
+	}
+	return osError(err)
 }
 
 // Attrs are the attributes a client may set.
@@ -437,8 +456,11 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 	if err != nil {
 		return err
 	}
+	h := s.openWriter(s.virtual(v, rel))
+	if h != nil && h.target != "" {
+		rel = h.rel // an upload through a temporary file: set its attributes
+	}
 	if a.HasSize {
-		h := s.openWriter(s.virtual(v, rel))
 		if h == nil || a.Size < 0 {
 			return ErrDenied
 		}
@@ -469,74 +491,99 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 	return nil
 }
 
-// Rename moves src to dst. With posix set (posix-rename@openssh.com) an
+// Rename moves src to dst and returns the final client path; see Move.
+func (s *Session) Rename(src, dst string, posix bool) (string, error) {
+	m, err := s.Move(src, dst, posix)
+	return m.Final, err
+}
+
+// Moved describes a completed rename.
+type Moved struct {
+	Final    string // client path the source now has
+	Conflict string // ConflictNone, ConflictRenamed, ConflictOverwritten or ConflictVersioned
+	Version  string // client path the replaced target was moved to (versioned)
+}
+
+// Move renames src to dst. With posix set (posix-rename@openssh.com) an
 // existing target is handled by the mount's conflict policy; otherwise (SFTP
-// v3 RENAME) an existing target is an error. It returns the final client
-// path.
+// v3 RENAME) an existing target is an error.
 //
 // Renaming needs the rename permission, or only write for a regular file
 // this session created (temporary upload names such as WinSCP's .filepart).
-// Replacing an existing target always needs overwrite.
-func (s *Session) Rename(src, dst string, posix bool) (string, error) {
+// Replacing an existing target needs overwrite, except under
+// on_conflict = "version", which keeps the target as a version.
+func (s *Session) Move(src, dst string, posix bool) (Moved, error) {
 	sv, srel, err := s.writable(src)
 	if err != nil {
-		return "", err
+		return Moved{}, err
 	}
 	dv, drel, err := s.writable(dst)
 	if err != nil {
-		return "", err
+		return Moved{}, err
 	}
 	if sv != dv {
-		return "", ErrUnsupported // across mounts
+		return Moved{}, ErrUnsupported // across mounts
 	}
 	s.clearRedirect(sv, srel)
 	s.clearRedirect(dv, drel)
 	fi, err := sv.root.Lstat(srel)
 	if err != nil {
-		return "", osError(err)
+		return Moved{}, osError(err)
 	}
 	own := fi.Mode().IsRegular() && s.isCreated(sv, srel)
 	if !sv.perm.Has(PermRename) && (!own || !sv.perm.Has(PermWrite)) {
-		return "", ErrDenied
+		return Moved{}, ErrDenied
+	}
+	done := func(rel, conflict string) (Moved, error) {
+		s.moveCreated(sv, srel, rel, own)
+		return Moved{Final: s.virtual(sv, rel), Conflict: conflict}, nil
 	}
 
 	err = noClobberRename(sv.root, srel, drel)
 	switch {
 	case err == nil:
-		s.moveCreated(sv, srel, drel, own)
-		return s.virtual(sv, drel), nil
+		return done(drel, ConflictNone)
 	case !errors.Is(err, fs.ErrExist):
-		return "", osError(err)
+		return Moved{}, osError(err)
 	case !posix:
-		return "", ErrExists
+		return Moved{}, ErrExists
 	}
 
 	switch sv.opts().OnConflict {
 	case ConflictOverwrite:
 		if !sv.perm.Has(PermOverwrite) {
-			return "", ErrDenied
+			return Moved{}, ErrDenied
 		}
 		if err := sv.root.Rename(srel, drel); err != nil {
-			return "", osError(err)
+			return Moved{}, osError(err)
 		}
-		s.moveCreated(sv, srel, drel, own)
-		return s.virtual(sv, drel), nil
+		return done(drel, ConflictOverwritten)
 	case ConflictReject:
-		return "", ErrConflict
+		return Moved{}, ErrConflict
+	case ConflictVersion:
+		if !fi.Mode().IsRegular() {
+			return Moved{}, ErrNotRegular // only files replace files
+		}
+		version, err := s.replaceVersioned(sv, srel, drel)
+		if err != nil {
+			return Moved{}, err
+		}
+		m, _ := done(drel, ConflictVersioned)
+		m.Version = s.virtual(sv, version)
+		return m, nil
 	case ConflictRename: // move the source next to the target under a free name
 		final, err := sv.opts().freeName(drel, func(cand string) error { return noClobberRename(sv.root, srel, cand) })
 		if err != nil {
-			return "", err
+			return Moved{}, err
 		}
-		s.moveCreated(sv, srel, final, own)
 		// rclone checks the size of the target after a move and deletes
 		// "a failed copy" at the requested name: that would be the original.
 		if sv.opts().StatRedirect {
 			s.setRedirect(sv, drel, final)
 		}
-		return s.virtual(sv, final), nil
+		return done(final, ConflictRenamed)
 	}
-	return "", fmt.Errorf("unknown conflict policy %q", sv.opts().OnConflict)
+	return Moved{}, fmt.Errorf("unknown conflict policy %q", sv.opts().OnConflict)
 }
 
 // noClobberRename renames src to dst and fails with fs.ErrExist if dst exists.
@@ -583,7 +630,7 @@ func (s *Session) Link(string, string) error { return ErrUnsupported }
 
 func (s *Session) register(h *WriteHandle) {
 	s.mu.Lock()
-	s.writers[h.virtual] = append(s.writers[h.virtual], h)
+	s.writers[h.key] = append(s.writers[h.key], h)
 	s.mu.Unlock()
 	if h.reserved && h.id != nil {
 		s.own(h.v, h.rel, h.id)
@@ -592,11 +639,11 @@ func (s *Session) register(h *WriteHandle) {
 
 func (s *Session) unregister(h *WriteHandle, removed bool) {
 	s.mu.Lock()
-	hs := slices.DeleteFunc(s.writers[h.virtual], func(x *WriteHandle) bool { return x == h })
+	hs := slices.DeleteFunc(s.writers[h.key], func(x *WriteHandle) bool { return x == h })
 	if len(hs) == 0 {
-		delete(s.writers, h.virtual)
+		delete(s.writers, h.key)
 	} else {
-		s.writers[h.virtual] = hs
+		s.writers[h.key] = hs
 	}
 	s.mu.Unlock()
 	if removed {

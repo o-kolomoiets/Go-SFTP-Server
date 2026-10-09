@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -988,8 +989,11 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 			}
 			table := ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]()
 			name := tag
-			if table && parent != "" && f.Type.Kind() != reflect.Map {
+			if table && parent != "" {
 				name = parent + "." + tag
+			}
+			if f.Type.Kind() == reflect.Map {
+				name += ".NAME" // [mounts.NAME], [users.NAME]
 			}
 			switch {
 			case table && !strings.Contains(string(doc), "`["+name):
@@ -1003,4 +1007,105 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 		}
 	}
 	walk(reflect.TypeFor[Config](), "")
+}
+
+func TestByteSize(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]ByteSize{
+		"0": 0, "1024": 1024, "500MB": 500e6, "1kB": 1000, "1KB": 1000, "2 MiB": 2 << 20,
+		"10GiB": 10 << 30, "3TB": 3e12, "1TiB": 1 << 40, "7B": 7, "9223372036854775807B": math.MaxInt64,
+	} {
+		if got, err := ParseByteSize(in); err != nil || got != want {
+			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "-1", "1.5GB", "GiB", "10 parsecs", "1gib", "10000000TiB", "9223372036854775808"} {
+		if got, err := ParseByteSize(in); err == nil {
+			t.Errorf("ParseByteSize(%q) = %d, want an error", in, got)
+		}
+	}
+	for b, want := range map[ByteSize]string{0: "0", 1 << 30: "1GiB", 3 << 20: "3MiB", 1e9: "1000000000", 1536: "1536"} {
+		got, _ := b.MarshalText()
+		if string(got) != want {
+			t.Errorf("MarshalText(%d) = %q, want %q", int64(b), got, want)
+		}
+		if back, err := ParseByteSize(string(got)); err != nil || back != b {
+			t.Errorf("round trip of %d: %d, %v", int64(b), back, err)
+		}
+	}
+}
+
+func TestM3bKeys(t *testing.T) {
+	t.Parallel()
+
+	c, _ := load(t, `
+config_version = 1
+[server]
+host_keys = ["k"]
+[defaults]
+max_file_size = "10GiB"
+min_free_space = 0
+versions = { keep = 3 }
+[mounts.a]
+path = "{dir}/a"
+[mounts.b]
+path = "{dir}/b"
+on_conflict = "version"
+atomic_uploads = true
+fsync = true
+max_file_size = 1000
+[mounts.b.versions]
+max_age = "1h"
+[users.alice]
+authorized_keys = ["`+pubKey(t)+`"]
+access = { a = "full", b = "full" }
+`)
+	mustValidate(t, c)
+	specs, err := c.MountSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := specs[0].Options, specs[1].Options
+	if a.MaxFileSize != 10<<30 || a.MinFreeSpace != 0 || a.AtomicUploads || a.Fsync ||
+		a.Versions != (vfs.VersionsOptions{Dir: ".versions", Keep: 3, MaxAge: 720 * time.Hour}) {
+		t.Errorf("mount a = %+v", a)
+	}
+	if b.MaxFileSize != 1000 || b.MinFreeSpace != 0 || !b.AtomicUploads || !b.Fsync || b.OnConflict != vfs.ConflictVersion ||
+		b.Versions != (vfs.VersionsOptions{Dir: ".versions", Keep: 3, MaxAge: time.Hour}) {
+		t.Errorf("mount b = %+v", b)
+	}
+
+	for _, bad := range []string{`max_file_size = "10 parsecs"`, `min_free_space = -1`, `max_file_size = 1.5`} {
+		dir := t.TempDir()
+		_, err := Load(writeConfig(t, dir, "config_version = 1\n[defaults]\n"+bad+"\n"))
+		if err == nil || !strings.Contains(err.Error(), strings.Fields(bad)[0]) {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+
+	c, _ = load(t, `
+config_version = 1
+[server]
+host_keys = ["k"]
+[defaults]
+versions = { dir = "a/b" }
+[mounts.m]
+path = "{dir}/m"
+versions = { dir = "v", keep = -1 }
+[mounts.n]
+path = "{dir}/n"
+[users.alice]
+authorized_keys = ["`+pubKey(t)+`"]
+access = { m = "read" }
+`)
+	_, err = c.Validate()
+	for _, want := range []string{"defaults.versions:", "mounts.m.versions:"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("errors do not mention %q: %v", want, err)
+		}
+	}
+	if err != nil && strings.Contains(err.Error(), "mounts.n.versions") {
+		t.Errorf("an inherited error is reported again: %v", err)
+	}
 }

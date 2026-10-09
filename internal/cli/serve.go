@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -78,7 +79,7 @@ $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 	f.StringArrayVar(&o.hostKeys, "host-key", nil, "host private key file (repeatable)")
 	f.StringVar(&o.listen, "listen", ":2022", "address to listen on")
 	f.BoolVar(&o.readOnly, "read-only", false, "refuse all modifications on every mount")
-	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject or overwrite")
+	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject, overwrite or version")
 	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
 	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
 	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path")
@@ -401,8 +402,11 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	al.Event("server.start", slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ",")))
 
+	var janitor sync.WaitGroup
+	defer janitor.Wait() // after cancel, before mounts.Close
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	janitor.Go(func() { cleanTemp(serveCtx, mounts, log) })
 	served := make(chan error, len(listeners))
 	for _, ln := range listeners {
 		go func() { served <- srv.Serve(serveCtx, ln) }()
@@ -571,7 +575,12 @@ func printBanner(w io.Writer, b bannerInfo) {
 		if b.mounts.Flattened() {
 			vpath = "/"
 		}
-		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s)\n", vpath, m.HostPath(), mode, m.Options().OnConflict)
+		o := m.Options()
+		atomic := ""
+		if o.AtomicUploads {
+			atomic = ", atomic_uploads"
+		}
+		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s%s)\n", vpath, m.HostPath(), mode, o.OnConflict, atomic)
 	}
 	addrs := make([]string, len(b.listeners))
 	for i, ln := range b.listeners {
@@ -592,4 +601,21 @@ func connectHost(addr net.Addr) (string, int) {
 		return "localhost", port
 	}
 	return host, port
+}
+
+// cleanTemp removes temporary files of interrupted uploads at start and
+// then every TempMaxAge/4 until ctx is done.
+func cleanTemp(ctx context.Context, mounts *vfs.Table, log *slog.Logger) {
+	tick := time.NewTicker(vfs.TempMaxAge / 4)
+	defer tick.Stop()
+	for {
+		if n := mounts.CleanTemp(); n > 0 {
+			log.InfoContext(ctx, "removed temporary files of interrupted uploads", "count", n, "older_than", vfs.TempMaxAge)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }

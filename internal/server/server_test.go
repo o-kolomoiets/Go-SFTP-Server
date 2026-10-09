@@ -92,6 +92,7 @@ type startOpts struct {
 	readOnly   bool
 	categories []string // audit categories; nil means the defaults
 	tweak      func(*Config)
+	mount      func(*vfs.MountOptions)
 }
 
 func startWith(t *testing.T, o startOpts) *env {
@@ -118,6 +119,9 @@ func startWith(t *testing.T, o startOpts) *env {
 
 	opts := vfs.DefaultMountOptions()
 	opts.OnConflict = policy
+	if o.mount != nil {
+		o.mount(&opts)
+	}
 	mounts, err := vfs.Open([]vfs.MountSpec{{Name: "share", Path: e.share, ReadOnly: readOnly, Options: opts}},
 		vfs.Options{Flatten: true})
 	if err != nil {

@@ -47,9 +47,9 @@ never host paths. Strings from clients are JSON-escaped.
 | `auth.ban` | auth | `source` (IPv4 address or IPv6 /64), `duration_ms` |
 | `session.start` | session | |
 | `session.end` | session | `duration_ms`, `exit_status` |
-| `fs.upload` | transfer | `path` (requested), `final_path`, `conflict` (`none`, `renamed`, `overwritten`), `open_flags`, `bytes`, `start_offset` (resumed uploads), `duration_ms`, `result` |
+| `fs.upload` | transfer | `path` (requested), `final_path`, `conflict` (`none`, `renamed`, `overwritten`, `versioned`), `version_path` (where the replaced file was kept, with `versioned`), `open_flags`, `bytes`, `start_offset` (resumed uploads), `duration_ms`, `result` |
 | `fs.download` | transfer | `path`, `bytes`, `duration_ms`, `result` |
-| `fs.rename` | modify | `path`, `target_path`, `final_path`, `conflict` (moves), `result` |
+| `fs.rename` | modify | `path`, `target_path`, `final_path`, `conflict` (posix-rename: `none`, `renamed`, `overwritten`, `versioned`), `version_path` (with `versioned`), `result` |
 | `fs.mkdir`, `fs.rmdir`, `fs.remove`, `fs.setstat` | modify | `path`, `result` |
 | `fs.denied` | denied | `reason`, `result`, and `op` and `path`, or `mount` for an unavailable home |
 | `fs.list` | list (opt-in) | `path`, `result` |
@@ -57,7 +57,10 @@ never host paths. Strings from clients are JSON-escaped.
 
 `result` is `ok`, `denied`, `error` or `aborted` (the connection ended during
 the transfer; an empty file the upload created is removed). An upload with a
-refused write (append-only guard) ends with `denied`.
+refused write (append-only guard, `max_file_size`) ends with `denied`, and so
+does an upload through a temporary file that the conflict policy refuses when
+it is closed (see [Atomic uploads](configuration.md#atomic-uploads)); its
+temporary file is removed.
 
 Connections that close before sending an SSH version line (health checks,
 port scanners) are not audited. Refused connections (`conn.reject`) are

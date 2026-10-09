@@ -68,11 +68,21 @@ unavailable.
 ## Upload integrity
 
 - Uploads never replace an existing file unless the mount's policy is
-  `overwrite` and the user has the `overwrite` permission.
+  `overwrite` and the user has the `overwrite` permission. With `version`
+  the replaced file is kept in the versions directory, which clients can
+  read but not change, for `versions.max_age`; a user who may only write
+  cannot push it out by uploading many versions.
 - A resumed upload can only append; the bytes the file had are immutable.
 - While an upload has a file open, nobody else can write it in place.
 - An aborted upload removes only the empty file it created itself, after
-  checking that it is still that file.
+  checking that it is still that file. With `atomic_uploads` (and for
+  conflicts under `version`) an upload is written to a hidden temporary
+  file and takes its name only when the client closes it; an aborted one
+  leaves nothing.
+- `max_file_size` bounds every write by its end offset, so sparse writes far
+  past the end are refused; `min_free_space` (1 GiB by default) refuses new
+  writes on a nearly full filesystem, which also keeps room for the audit
+  log.
 
 ## Limits of the protection
 

@@ -19,6 +19,8 @@ var (
 	ErrResumeDisabled = errors.New("resume is disabled")
 	ErrImmutable      = errors.New("existing data is immutable")
 	ErrBusy           = errors.New("file is being written by another upload")
+	ErrTooLarge       = errors.New("file too large (max_file_size)")
+	ErrNoSpace        = errors.New("not enough free space (min_free_space)")
 	ErrUnsupported    = errors.New("operation not supported")
 	ErrNotRegular     = errors.New("not a regular file")
 	ErrIsDir          = errors.New("is a directory")

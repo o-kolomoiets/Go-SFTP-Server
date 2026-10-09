@@ -35,6 +35,24 @@ Incompatible changes are prefixed with **BREAKING:**.
 - `server.crypto_policy`: `modern` (default, as before) or `compat`, which
   adds NIST curve and SHA-2 Diffie-Hellman key exchange and non-ETM MACs for
   old clients.
+- `on_conflict = "version"`: an upload or posix-rename onto an existing file
+  replaces it and moves the old file to
+  `.versions/<path>/<stem>.<UTC time><ext>`, keeping `versions.keep` (10)
+  versions per file for at most `versions.max_age` (30 days); only users who
+  may delete or overwrite files make older versions drop out. The versions
+  directory is not listed (sync tools would delete it); clients can open it
+  by path and read it, but not change it. Replacing a file this way
+  needs only the `write` permission. `fs.upload` and `fs.rename` get
+  `conflict = "versioned"` and `version_path`.
+- `atomic_uploads`: uploads are written to a hidden temporary file
+  (`.gosftpd-*.part`) and take their name only when closed, by the conflict
+  policy at that moment; an aborted upload leaves nothing. Resume is not
+  possible then. `fsync` flushes such uploads before they are published.
+  Temporary files left by a crash are removed once 24 hours old (checked at
+  start and every 6 hours) and when their directory is removed.
+- `max_file_size` (off by default), checked against the end of every write
+  and on truncation, and `min_free_space` (1 GiB), checked when a file is
+  opened for writing. Sizes accept units such as `"10GiB"`.
 
 ### Changed
 
@@ -43,6 +61,13 @@ Incompatible changes are prefixed with **BREAKING:**.
 - A connection keeps the user name of its first authentication request, as
   sshd does; attempts with another name are refused.
 - `auth.success` has `key_fp` only for public-key logins.
+- Uploads are refused while the mount's filesystem has less than 1 GiB free
+  (`min_free_space`; `"0"` turns the check off).
+- `fs.rename` for a posix-rename that replaced its target under
+  `on_conflict = "overwrite"` reports `conflict = "overwritten"` instead of
+  `"none"`.
+- Names starting with `.gosftpd-` (in any case) are reserved: hidden from
+  listings and refused in paths.
 
 ### Fixed
 

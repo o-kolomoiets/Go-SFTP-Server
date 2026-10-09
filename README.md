@@ -29,13 +29,13 @@ exchange point that you can run next to it as an ordinary user. See
 | Public-key login, OpenSSH `authorized_keys` with `from=` and `expiry-time=` | beta |
 | Mounts confined with `os.Root`, per-user home directories (`{user}`) | beta |
 | Users and permissions in one TOML file (`read`, `upload`, `readwrite`, `full`) | beta |
-| Upload conflicts: `rename` (default), `reject`, `overwrite` | beta |
+| Upload conflicts: `rename` (default), `reject`, `overwrite`, `version` (keeps old versions) | beta |
 | Resumable uploads that can only append | beta |
 | JSON audit log with a stable schema, fail-closed | beta |
 | `df` over SFTP, virtual file owners | beta |
 | Connection limits, bans after failed logins, idle and keepalive timeouts | alpha |
 | Opt-in password login (argon2id) | alpha |
-| Atomic uploads, `version` conflict mode, disk limits | planned (v0.3) |
+| Atomic uploads, file size and free space limits | alpha |
 | Reload on SIGHUP, metrics, hooks, systemd integration, SSH certificates | planned (v0.4) |
 | Docker image, deb/rpm packages, signed releases | planned (v0.5) |
 
@@ -111,7 +111,9 @@ its key path.
   it, clients cannot create links, and host paths and accounts never reach
   clients.
 - Uploads never replace a file unless the mount says `overwrite` and the user
-  has that permission; resumed uploads can only append.
+  has that permission (or `version`, which keeps the old file); resumed
+  uploads can only append. Optional atomic uploads never show partial
+  files.
 - Configuration and key files are checked like sshd's `StrictModes`.
 - If the audit log cannot be written, gosftpd stops accepting changes.
 

@@ -29,6 +29,7 @@ const (
 	ConflictNone        = "none"
 	ConflictRenamed     = "renamed"
 	ConflictOverwritten = "overwritten"
+	ConflictVersioned   = "versioned"
 )
 
 // WriteHandle is an open upload.
@@ -44,7 +45,14 @@ type WriteHandle struct {
 	ino       fs.FileInfo // the open file, for the table's writer registry
 	guarded   bool        // append-only resume: bytes below minOffset are immutable
 	minOffset int64
+	maxSize   int64 // max_file_size; 0: no limit
+	// For an upload through a temporary file (see publish.go): rel is the
+	// temporary file until Close publishes it under target.
+	target    string
+	version   string // where publishing moved the replaced file
+	key       string // the session's writers map key: the virtual path at open
 	written   atomic.Int64
+	refused   atomic.Bool // a write or truncation past max_file_size
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -53,8 +61,23 @@ type WriteHandle struct {
 // policy it differs from the requested one.
 func (h *WriteHandle) Path() string { return h.virtual }
 
-// Conflict returns ConflictNone, ConflictRenamed or ConflictOverwritten.
+// Conflict returns ConflictNone, ConflictRenamed, ConflictOverwritten or
+// ConflictVersioned. For an upload through a temporary file it is known
+// once the upload is closed.
 func (h *WriteHandle) Conflict() string { return h.conflict }
+
+// Version returns the client path the replaced file was moved to under
+// on_conflict = "version", or "".
+func (h *WriteHandle) Version() string {
+	if h.version == "" {
+		return ""
+	}
+	return h.s.virtual(h.v, h.version)
+}
+
+// Refused reports whether a write or truncation was refused for
+// max_file_size: the upload is incomplete.
+func (h *WriteHandle) Refused() bool { return h.refused.Load() }
 
 // Written returns the number of bytes written so far.
 func (h *WriteHandle) Written() int64 { return h.written.Load() }
@@ -64,10 +87,16 @@ func (h *WriteHandle) Written() int64 { return h.written.Load() }
 func (h *WriteHandle) StartOffset() (offset int64, ok bool) { return h.minOffset, h.guarded }
 
 // WriteAt writes at an absolute offset. A resumed upload may not write
-// below the size the file had when it was opened.
+// below the size the file had when it was opened, and no upload past
+// max_file_size (checked on the end of the write, so a sparse file cannot
+// slip past it).
 func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
 	if h.guarded && off < h.minOffset {
 		return 0, ErrImmutable
+	}
+	if h.maxSize > 0 && (off < 0 || off > h.maxSize-int64(len(p))) {
+		h.refused.Store(true)
+		return 0, ErrTooLarge
 	}
 	n, err := h.f.WriteAt(p, off)
 	h.written.Add(int64(n))
@@ -80,6 +109,10 @@ func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
 func (h *WriteHandle) truncate(size int64) error {
 	if h.guarded && size < h.minOffset {
 		return ErrImmutable
+	}
+	if h.maxSize > 0 && size > h.maxSize {
+		h.refused.Store(true)
+		return ErrTooLarge
 	}
 	return osError(h.f.Truncate(size))
 }
@@ -149,6 +182,10 @@ func (s *Session) reservedHandle(rel string, f *os.File, conflict string) (*Writ
 // was written to a file this upload created, the empty file is removed.
 func (h *WriteHandle) Close(aborted bool) error {
 	h.closeOnce.Do(func() {
+		if h.target != "" {
+			h.closeErr = h.closeTemp(aborted)
+			return
+		}
 		removed := aborted && h.reserved && h.written.Load() == 0 && h.removeIfUnused()
 		if h.reserved && !removed {
 			if st, err := h.f.Stat(); err == nil {
@@ -183,8 +220,11 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 		return nil, ErrDenied
 	case rel == ".":
 		return nil, ErrIsDir
-	case v.m.readOnly, v.perm&(PermWrite|PermOverwrite) == 0:
+	case v.m.readOnly, v.perm&(PermWrite|PermOverwrite) == 0, inVersions(v.opts(), rel):
 		return nil, ErrDenied
+	}
+	if err := checkFree(v); err != nil {
+		return nil, err
 	}
 
 	requested := rel
@@ -201,10 +241,16 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 		return nil, err
 	}
 	h.s, h.v = s, v
-	h.virtual = s.virtual(v, h.rel)
+	h.maxSize = v.opts().MaxFileSize
+	name := h.rel
+	if h.target != "" {
+		name = h.target // the name is given when the upload is closed
+	}
+	h.virtual = s.virtual(v, name)
+	h.key = h.virtual
 	s.register(h)
-	if h.rel != requested && v.opts().StatRedirect {
-		s.setRedirect(v, requested, h.rel)
+	if name != requested && v.opts().StatRedirect {
+		s.setRedirect(v, requested, name)
 	}
 	return h, nil
 }
@@ -220,6 +266,9 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		if !v.perm.Has(PermWrite) {
 			return nil, ErrDenied
 		}
+		if opts.AtomicUploads {
+			return s.tempHandle(v, rel)
+		}
 		f, err := v.root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, opts.filePerm())
 		if err != nil {
 			// Lost a race, or rel is a dangling symlink: do not follow it.
@@ -234,6 +283,8 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		return nil, ErrNotRegular
 	case fl.Excl:
 		return nil, ErrExists
+	case isResume(fl) && opts.AtomicUploads:
+		return nil, ErrResumeDisabled // an atomic upload has nothing to continue
 	case isResume(fl):
 		return s.openResume(v, rel, fl.Append)
 	}
@@ -241,9 +292,26 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 	switch opts.OnConflict {
 	case ConflictReject:
 		return nil, ErrConflict
+	case ConflictVersion:
+		// The old file is kept, so replacing it needs only write.
+		if !v.perm.Has(PermWrite) {
+			return nil, ErrDenied
+		}
+		// Only a file is replaced, not a symlink: refuse now, not after
+		// the transfer.
+		if err := regularTarget(v.root, rel); err != nil {
+			return nil, err
+		}
+		return s.tempHandle(v, rel)
 	case ConflictOverwrite:
 		if !v.perm.Has(PermOverwrite) {
 			return nil, ErrDenied
+		}
+		if opts.AtomicUploads {
+			if err := regularTarget(v.root, rel); err != nil {
+				return nil, err
+			}
+			return s.tempHandle(v, rel)
 		}
 		// Not O_TRUNC: truncate only once this is the file's only writer.
 		f, err := v.root.OpenFile(rel, os.O_WRONLY|oNonblock, 0)
@@ -269,6 +337,9 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 	case ConflictRename:
 		if !v.perm.Has(PermWrite) {
 			return nil, ErrDenied
+		}
+		if opts.AtomicUploads {
+			return s.tempHandle(v, rel) // the free name is chosen on Close
 		}
 		var f *os.File
 		final, err := opts.freeName(rel, func(cand string) error {
