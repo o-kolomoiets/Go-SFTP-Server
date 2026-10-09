@@ -8,6 +8,14 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
+Hardening for servers exposed to the internet. Read
+[docs/security/hardening.md](docs/security/hardening.md) before upgrading a
+public server; two changes need attention: `serve` refuses to run as root
+without `--allow-root`, and uploads stop below 1 GiB of free space unless
+`min_free_space` says otherwise.
+
 ### Added
 
 - Connection limits checked right after accept, before the SSH handshake:
@@ -202,6 +210,7 @@ Incompatible changes are prefixed with **BREAKING:**.
 - The non-functional 2023 skeleton (`main.go`, `cmd/server`, `pkg/`).
 - The JSON configuration promised by the old README; configuration will use TOML.
 
-[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.1.0-alpha...v0.2.0
 [0.1.0-alpha]: https://github.com/o-kolomoiets/go-sftp-server/releases/tag/v0.1.0-alpha
