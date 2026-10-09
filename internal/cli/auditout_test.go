@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,9 @@ import (
 // new file at the same path, and no line is lost or torn while writers run.
 func TestAuditOutputReopen(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot rename a file that is open, as logrotate does")
+	}
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -224,14 +226,18 @@ func TestServeReloadZeroConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
-	if err := os.Remove(disk); err != nil { // an unplugged disk
-		t.Fatal(err)
+	// An unplugged disk; Windows cannot remove a directory that is open.
+	diskGone := runtime.GOOS != "windows"
+	if diskGone {
+		if err := os.Remove(disk); err != nil {
+			t.Fatal(err)
+		}
 	}
 	writeFile(t, keys, authorizedKey(alice)+"\n")
 	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
 		t.Errorf("server.reload = %v\n%s", ev, ts.stderr.String())
 	}
-	if !strings.Contains(ts.stderr.String(), "the mount is unavailable") {
+	if diskGone && !strings.Contains(ts.stderr.String(), "the mount is unavailable") {
 		t.Errorf("the missing --dir is not reported:\n%s", ts.stderr.String())
 	}
 	if c, err := ts.login("anyone", bob); err == nil {
@@ -279,7 +285,8 @@ access = { data = "full" }
 	}
 	writeFile(t, path, base+"[log]\nlevel = \"debug\"\n")
 	ts.reload(t, ts.stdout.String)
-	if !strings.Contains(ts.stderr.String(), `log.level = \"debug\" in `+path+` has no effect: $GOSFTPD_LOG_LEVEL overrides it`) {
+	want := strconv.Quote(`log.level = "debug" in ` + path + ` has no effect: $GOSFTPD_LOG_LEVEL overrides it`)
+	if !strings.Contains(ts.stderr.String(), want[1:len(want)-1]) {
 		t.Errorf("no warning about the overridden log.level:\n%s", ts.stderr.String())
 	}
 }

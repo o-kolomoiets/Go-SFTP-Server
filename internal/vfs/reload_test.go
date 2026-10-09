@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,9 @@ func TestReloadGenerations(t *testing.T) {
 // opened anew; the old generation keeps the old one.
 func TestReloadReplacedDirectory(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot rename a directory that is open")
+	}
 
 	t1, base := reloadFixture(t)
 	t.Cleanup(func() { t1.Close() })

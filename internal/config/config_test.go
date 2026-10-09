@@ -1162,7 +1162,11 @@ access = { ok = "full" }
 	if err != nil {
 		t.Fatalf("CheckFSReload: %v", err)
 	}
-	if !slices.Equal(unavailable, []string{"disk", "gone"}) {
+	want := []string{"disk", "gone"}
+	if runtime.GOOS == "windows" { // require_mountpoint cannot be checked there
+		want = []string{"gone"}
+	}
+	if !slices.Equal(unavailable, want) {
 		t.Errorf("unavailable = %q", unavailable)
 	}
 	all := strings.Join(warns, "\n")

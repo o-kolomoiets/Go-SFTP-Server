@@ -135,6 +135,11 @@ func TestReloadMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	// The server pins a connection's configuration after the handshake,
+	// a moment after the client returns: a session that works is proof.
+	if got, err := readRemote(t, newSFTP(t, conn), "a.txt"); err != nil || got != "original content" {
+		t.Fatalf("before the reload: %q, %v", got, err)
+	}
 	other := t.TempDir()
 	if err := os.WriteFile(filepath.Join(other, "b.txt"), []byte("other"), 0o644); err != nil {
 		t.Fatal(err)
