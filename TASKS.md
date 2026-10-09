@@ -175,3 +175,4 @@
 | 2026-10-09 | Релиз `v0.2.0` (владелец), проверен; M2 закрыт | [v0.2.0](https://github.com/o-kolomoiets/Go-SFTP-Server/releases/tag/v0.2.0) |
 | 2026-10-09 | M3a: лимиты соединений, баны, таймауты, вход по паролю, `crypto_policy`, `--allow-root`; ревью и две проверки (все находки исправлены) | [o-kolomoiets/Go-SFTP-Server#8](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/8) |
 | 2026-10-09 | M3b: `atomic_uploads`, `on_conflict = "version"`, `max_file_size`, `min_free_space`; ревью (8 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#9](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/9) |
+| 2026-10-09 | M3c: 6 fuzz-целей и `fuzz-smoke`/`fuzz.yml`, гонка в `pkg/sftp` закрыта `sftpd.Gate`, пороги покрытия, ssh-audit, Scorecard, actions по SHA, threat model, hardening, ADR 0004; ревью (5 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#10](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/10) |
