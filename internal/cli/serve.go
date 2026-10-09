@@ -43,6 +43,7 @@ type serveOptions struct {
 	logLevel       string
 	logFormat      string
 	auditOutput    string
+	allowRoot      bool
 }
 
 func newServeCmd() *cobra.Command {
@@ -81,6 +82,7 @@ $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
 	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
 	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path")
+	f.BoolVar(&o.allowRoot, "allow-root", false, "run even as root (not recommended: run as a dedicated user)")
 	return cmd
 }
 
@@ -308,6 +310,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return err
 	}
+	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
+		return err
+	}
 	log, err := newLogger(stderr, c.Log.Level, c.Log.Format)
 	if err != nil {
 		return configError{err}
@@ -348,16 +353,24 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 
 	srv, err := server.New(server.Config{
-		HostKeys:           keys,
-		Auth:               authn,
-		Mounts:             mounts,
-		Grants:             c.Grants,
-		Audit:              al,
-		Log:                log,
-		HandshakeTimeout:   time.Duration(c.Server.HandshakeTimeout),
-		MaxSessionsPerConn: c.Limits.MaxSessionsPerConn,
-		MaxOpenHandles:     c.Limits.MaxOpenHandles,
-		MaxAuthTries:       c.Limits.MaxAuthTries,
+		HostKeys:              keys,
+		Auth:                  authn,
+		Mounts:                mounts,
+		Grants:                c.Grants,
+		Audit:                 al,
+		Log:                   log,
+		Methods:               c.Auth.Methods,
+		Bans:                  c.Bans(),
+		CryptoPolicy:          c.Server.CryptoPolicy,
+		HandshakeTimeout:      time.Duration(c.Server.HandshakeTimeout),
+		IdleTimeout:           offIfZero(c.Server.IdleTimeout),
+		KeepaliveInterval:     offIfZero(c.Server.KeepaliveInterval),
+		MaxConnections:        c.Limits.MaxConnections,
+		MaxConnectionsPerIP:   c.Limits.MaxConnectionsPerIP,
+		MaxPreauthConnections: c.Limits.MaxPreauthConnections,
+		MaxSessionsPerConn:    c.Limits.MaxSessionsPerConn,
+		MaxOpenHandles:        c.Limits.MaxOpenHandles,
+		MaxAuthTries:          c.Limits.MaxAuthTries,
 	})
 	if err != nil {
 		return err
@@ -367,10 +380,10 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	defer stop()
 	signal.Ignore(syscall.SIGHUP) // reload comes in v0.4; until then HUP must not kill the server
 
-	var (
-		lc        net.ListenConfig
-		listeners []net.Listener
-	)
+	var listeners []net.Listener
+	// TCP keepalive finds dead peers before the SSH handshake too; after it,
+	// keepalive@openssh.com requests do (keepalive_interval).
+	lc := net.ListenConfig{KeepAliveConfig: net.KeepAliveConfig{Enable: true, Idle: time.Minute, Interval: 15 * time.Second, Count: 4}}
 	for _, addr := range c.Server.Listen {
 		ln, err := lc.Listen(ctx, "tcp", addr)
 		if err != nil {
@@ -415,6 +428,23 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	al.Event("server.stop")
 	return serveErr
+}
+
+// checkRoot refuses to serve as root unless allowed: a confinement bug
+// would then expose the whole host.
+func checkRoot(allow bool, euid int) error {
+	if euid != 0 || allow {
+		return nil
+	}
+	return usageError{errors.New("refusing to run as root: run gosftpd as a dedicated unprivileged user (for example 'gosftpd'), or pass --allow-root if you really mean it")}
+}
+
+// offIfZero maps a configured 0 ("off") to the server's negative "off".
+func offIfZero(d config.Duration) time.Duration {
+	if d == 0 {
+		return -1
+	}
+	return time.Duration(d)
 }
 
 func newLogger(w io.Writer, level, format string) (*slog.Logger, error) {
@@ -530,7 +560,7 @@ func printBanner(w io.Writer, b bannerInfo) {
 			user = z.Name
 		}
 	} else {
-		fmt.Fprintf(w, "auth:    publickey, %d users, %d keys\n", len(b.c.Users), b.auth.Len())
+		fmt.Fprintf(w, "auth:    %s, %d users, %d keys\n", strings.Join(b.c.Auth.Methods, ", "), len(b.c.Users), b.auth.Len())
 	}
 	for _, m := range b.mounts.Mounts() {
 		mode := "rw"

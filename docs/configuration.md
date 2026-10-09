@@ -57,16 +57,69 @@ everyone gives a warning. `gosftpd init` writes its file with mode 0600.
 | `listen` | `[":2022"]` | Addresses to listen on; `:2022` is IPv4 and IPv6. |
 | `host_keys` | required | Host private key files (OpenSSH format). RSA keys sign with SHA-2 only. |
 | `host_key_auto_generate` | `false` | Create a missing host key as ed25519 (0600) on start. |
+| `crypto_policy` | `"modern"` | Algorithm set: `modern` or `compat`, see below. |
 | `handshake_timeout` | `"30s"` | Time a client has to finish the SSH handshake and authentication (1s–10m). |
+| `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
+| `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
 | `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`. |
+
+The crypto policies offer these algorithms; there is no way to list
+algorithms one by one.
+
+| | `modern` | `compat` adds |
+|---|---|---|
+| Key exchange | `mlkem768x25519-sha256`, `curve25519-sha256` | `ecdh-sha2-nistp256`, `-nistp384`, `-nistp521`, `diffie-hellman-group16-sha512`, `diffie-hellman-group14-sha256` |
+| Ciphers | ChaCha20-Poly1305, AES-GCM, AES-CTR | — |
+| MACs | `hmac-sha2-256-etm`, `hmac-sha2-512-etm` | `hmac-sha2-256`, `hmac-sha2-512` |
+
+Use `compat` only for clients that cannot connect otherwise; ssh-audit and
+similar scanners flag its additions. SHA-1, CBC and DSA are never offered.
 
 ## `[limits]`
 
+Connections over a limit are closed right after they are accepted, before
+the SSH handshake, and logged as `conn.reject`. Behind a TCP proxy or load
+balancer every client has the proxy's address, so per-address limits and
+bans apply to all of them together; raise `max_connections_per_ip` and add
+the proxy to `auth.ban.exempt`.
+
 | Key | Default | Meaning |
 |---|---|---|
+| `max_connections` | `256` | Open connections in total (1–100000). |
+| `max_connections_per_ip` | `16` | Open connections from one IPv4 address or one IPv6 /64 (1–100000). Each `rclone --transfers`/`--checkers` worker is a connection. |
+| `max_preauth_connections` | `64` | Connections that have not logged in yet (1–10000), like sshd's `MaxStartups`. |
 | `max_sessions_per_conn` | `4` | SFTP sessions (channels) per SSH connection (1–64). |
 | `max_open_handles` | `64` | Open files and directories per SFTP session (1–4096). |
 | `max_auth_tries` | `6` | Authentication attempts per connection (1–20). Lower values break SSH agents that offer many keys. |
+
+## `[auth]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `methods` | `["publickey"]` | Login methods: `publickey`, and `password` for users with `password_hash`. Either one is enough to log in; a method that is not listed is refused. Without a configuration file only `publickey` is possible. |
+
+A connection keeps the user name of its first authentication request, as
+sshd does: a client cannot try one user's password and then log in as
+another user.
+
+### `[auth.ban]`
+
+Failures count against the source, the IPv4 address or the IPv6 /64:
+every wrong password is one failure as soon as it is refused, also in a
+connection that then logs in; a connection that closes without logging in
+after rejected keys is one failure, however many keys an SSH agent offered.
+Once a source is banned, its open connections get no further password
+checks. A source with
+`after_failures` failures within `within` is refused right after accept for
+`duration` (`conn.reject` with `reason=banned`; the ban itself is logged as
+`auth.ban`). Bans are kept in memory, for at most 65 536 sources.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `after_failures` | `10` | Failures that start a ban (0 turns bans off, at most 100). |
+| `within` | `"10m"` | Window in which they must happen (1s–24h). |
+| `duration` | `"30m"` | Length of a ban (1s–720h). |
+| `exempt` | `["127.0.0.0/8", "::1/128"]` | Addresses and CIDR blocks that are never banned. |
 
 ## Mounts
 
@@ -162,6 +215,7 @@ same way as a wrong key.
 |---|---|---|
 | `authorized_keys` | none | Public keys, one OpenSSH `authorized_keys` line each. |
 | `authorized_keys_file` | none | A file with more keys, read at start. |
+| `password_hash` | none | argon2id (or imported bcrypt) hash from `gosftpd user hash-password`; used only when `auth.methods` includes `password`. |
 | `allow_from` | any | Client addresses or CIDR blocks the user may log in from. |
 | `expires` | never | TOML date-time after which logins are refused, e.g. `2026-12-31T23:59:59Z`. |
 | `disabled` | `false` | Refuse all logins of this user. |
@@ -175,6 +229,23 @@ Supported key types: ed25519, ECDSA (P-256, P-384, P-521), RSA with at least
 `no-agent-forwarding`, `no-x11-forwarding`, `no-user-rc` (always in effect).
 A line with any other option, such as `command=`, `cert-authority` or
 `verify-required`, is skipped with a warning naming the file and line.
+
+Passwords are off unless `auth.methods` includes `password`. Prefer keys:
+a password can be guessed, and every attempt costs the server one hash
+check (about 19 MiB and tens of milliseconds of CPU with the default
+parameters). New hashes use argon2id with m=19456, t=2, p=1. Imported
+hashes may use argon2id with up to 64 MiB, t ≤ 10 and p ≤ 8, or bcrypt with
+cost 10 to 14 (`$2a$`, `$2b$`, `$2y$`). So that the response time does not
+tell which users exist, unknown users and users without a password are
+checked against a stand-in of the costliest hash in the configuration, and
+every failed attempt then waits, without using the CPU, until checking that
+hash would have finished. With hashes of one kind and cost (all made by
+`gosftpd user hash-password`) unknown and real users do exactly the same
+work, under any load. With several kinds or costs, attempts made one at a
+time still take equally long, but parallel attempts can tell users of the
+cheaper hashes apart, and every failed attempt takes as long as the
+costliest hash; `config validate` warns about this. Re-hash imported
+passwords with `gosftpd user hash-password` when you can.
 
 ### Permissions
 
@@ -234,7 +305,10 @@ unless `NAME=` is given) and one implicit user: every SSH user name (or only
 `--user`) is accepted with the keys of `--authorized-keys` (default
 `~/.ssh/authorized_keys`) and has full access. The host key is generated in
 `--state-dir` (default `<user config dir>/gosftpd`). `--read-only` and
-`--on-conflict` apply to every mount.
+`--on-conflict` apply to every mount. Every other setting has its default.
+
+`gosftpd serve` refuses to run as root (exit code 2) unless `--allow-root`
+is given: run it as a dedicated user.
 
 ## Commands
 
@@ -244,8 +318,9 @@ unless `NAME=` is given) and one implicit user: every SSH user name (or only
 | `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions. |
 | `gosftpd config show` | Prints the effective configuration. |
 | `gosftpd config example [--full]` | Prints an example. |
-| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append; writes nothing. |
-| `gosftpd user list` | Lists users with access, key count, expiry and status. |
+| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append; writes nothing. `--password-hash` adds a password. |
+| `gosftpd user hash-password [--stdin]` | Asks for a password twice (or reads one line with `--stdin`) and prints its argon2id hash. |
+| `gosftpd user list` | Lists users with access, key count, password, expiry and status (`off` when `auth.methods` leaves the method out). |
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |
 | `gosftpd hostkey show [--known-hosts HOST:PORT]` | Prints the fingerprint and a `known_hosts` line. |
 

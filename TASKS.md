@@ -10,8 +10,8 @@
 |---|---|---|---|
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
-| M2 MVP | v0.2.0 | 🔄 | 17 / 18 |
-| M3 Hardening | v0.3.0 | ⬜ | 0 / 12 |
+| M2 MVP | v0.2.0 | ✅ | 18 / 18 |
+| M3 Hardening | v0.3.0 | 🔄 | 5 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
@@ -93,24 +93,26 @@
 | M2-15 | Interop: OpenSSH 10.x, paramiko, rclone, lftp | ✅ | CI: матрица interop (OpenSSH 9.6p1 + paramiko 5.0.0, rclone v1.75.0, lftp; OpenSSH 10.6p1 из исходников); локально 62 проверки. Найдено и исправлено: rclone работает через несколько соединений → «свои» файлы и `stat_redirect` теперь на уровне пользователя |
 | M2-16 | Документация: README, quickstart, configuration (тест на каждый ключ), audit-log, security, interop, release-checklist | ✅ | `docs/*.md`; тесты `TestConfigurationDocCoversEveryKey`, `TestAuditDocCoversSchema` |
 | M2-17 | Минимальный GoReleaser, `release.yml`, job `goreleaser-check` | ✅ | `.goreleaser.yaml` (linux, darwin × amd64, arm64), `release.yml` по публикации релиза, job `goreleaser-check` в `ci-ok` |
-| M2-18 | DoD M2, релиз `v0.2.0` | ⬜ 👤 | DoD проверен (покрытие: всего 87%, vfs 88.9%, auth 91.7%, config 87.1%, sftpd 82.9%). После мержа владелец публикует релиз по `docs/release-checklist.md` |
+| M2-18 | DoD M2, релиз `v0.2.0` | ✅ | DoD проверен (покрытие: всего 87%, vfs 88.9%, auth 91.7%, config 87.1%, sftpd 82.9%). Релиз опубликован владельцем 2026-10-09: 4 архива и `checksums.txt` сходятся, `gosftpd version` = `v0.2.0` (коммит `ae4b125`), версия есть в Go proxy, проверочная загрузка через OpenSSH `sftp` |
 
 ## M3: Hardening (v0.3.0)
 
-| ID | Блок | Статус |
-|---|---|---|
-| M3-01 | Лимиты соединений, idle timeout, keepalive | ⬜ |
-| M3-02 | Ban-таблица | ⬜ |
-| M3-03 | Пароли opt-in (argon2id), `user hash-password` | ⬜ |
-| M3-04 | `max_file_size`, `min_free_space` | ⬜ |
-| M3-05 | `atomic_uploads`, janitor | ⬜ |
-| M3-06 | `on_conflict = "version"` | ⬜ |
-| M3-07 | Профиль `compat` и тест профилей криптографии | ⬜ |
-| M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ⬜ |
-| M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ |
-| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | ⬜ |
-| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ⬜ |
-| M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ⬜ |
+Три PR: M3a — сеть и вход (01–03, 07, 10, 12), M3b — диск и загрузки (04–06), M3c — fuzzing, CI, документы и релиз (08, 09, 11).
+
+| ID | Блок | Статус | Детали |
+|---|---|---|---|
+| M3-01 | Лимиты соединений, idle timeout, keepalive | ✅ | `max_connections`, `max_connections_per_ip` (IPv6 по /64), `max_preauth_connections` проверяются сразу после accept; `conn.reject` не чаще 10/с; `idle_timeout` считает только SFTP-трафик; keepalive: 3 пропуска закрывают соединение; TCP keepalive на listener; тест 1000 «молчащих» соединений |
+| M3-02 | Ban-таблица | ✅ | Скользящее окно; каждый неверный пароль — неудача сразу (и в соединении, которое потом вошло), открытые соединения забаненного источника больше не проверяют пароли; отклонённые ключи — одна неудача на соединение; LRU по 65 536 записей для неудач и банов, `exempt` по адресу; `auth.ban`, `conn.reject reason=banned`; тест на 1 млн источников |
+| M3-03 | Пароли opt-in (argon2id), `user hash-password` | ✅ | `auth.methods` включает и выключает оба метода; `password_hash` (argon2id; bcrypt 10–14 для импорта; пределы m ≤ 64 MiB, t ≤ 10, p ≤ 8); попытка проверяет один хэш (неизвестные — заменитель самого дорогого класса), неудача дотягивается паузой до его времени без траты CPU; при хэшах одного класса время не зависит от имени при любой нагрузке, при смешанных `config validate` предупреждает; семафор по `GOMAXPROCS` с учётом потоков argon2id, тест медиан времени; имя пользователя закреплено за соединением, как в sshd; `user add --password-hash`; interop: OpenSSH (SSH_ASKPASS) и paramiko |
+| M3-04 | `max_file_size`, `min_free_space` | ⬜ | |
+| M3-05 | `atomic_uploads`, janitor | ⬜ | |
+| M3-06 | `on_conflict = "version"` | ⬜ | |
+| M3-07 | Профиль `compat` и тест профилей криптографии | ✅ | `server.crypto_policy`; тест: каждое имя есть в `SupportedAlgorithms`, нет в `InsecureAlgorithms` и в списке «никогда»; клиент только с compat-алгоритмами входит лишь при `compat` |
+| M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ⬜ | |
+| M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ | |
+| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | 🔄 | `--allow-root` сделан (M3a); WinSCP и `limits@openssh.com` — в M3c |
+| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ⬜ | |
+| M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ✅ | `internal/testutil.AsyncConn`; idle и keepalive проверяются в `testing/synctest` на `net.Pipe` |
 
 ## M3b: Windows (можно после v1.0)
 
@@ -170,3 +172,5 @@
 | 2026-10-08 | M2a: конфиг TOML, пользователи и права, `{user}`-home, команды `init`, `config`, `user`, `hostkey generate`; ревью (22 находки, исправлены) | [o-kolomoiets/Go-SFTP-Server#4](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/4) |
 | 2026-10-08 | M2b: докачка только дописыванием, `stat_redirect`, `statvfs`, виртуальные владельцы, фильтр категорий аудита; ревью (9 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#5](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/5) |
 | 2026-10-08 | M2c: interop с OpenSSH 10.6, paramiko, rclone, lftp; документация; GoReleaser; ревью (7 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#6](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/6) |
+| 2026-10-09 | Релиз `v0.2.0` (владелец), проверен; M2 закрыт | [v0.2.0](https://github.com/o-kolomoiets/Go-SFTP-Server/releases/tag/v0.2.0) |
+| 2026-10-09 | M3a: лимиты соединений, баны, таймауты, вход по паролю, `crypto_policy`, `--allow-root`; ревью и две проверки (все находки исправлены) | [o-kolomoiets/Go-SFTP-Server#8](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/8) |

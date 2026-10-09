@@ -4,14 +4,17 @@
 
 Usage: paramiko_check.py PORT KNOWN_HOSTS KEYDIR INBOX LOCAL_FILE
 KEYDIR holds id_reader, id_partner and id_admin; INBOX is the host path of
-the "inbox" mount (partner: upload preset, on_conflict=rename).
+the "inbox" mount (partner: upload preset, on_conflict=rename). The
+environment variable COURIER_PASSWORD is the password of the user courier.
 """
 
 import io
 import os
 import sys
+import threading
 
 import paramiko
+from paramiko.message import Message
 
 port, known_hosts, keydir, inbox, local = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 failed = False
@@ -89,5 +92,52 @@ except IOError:
     check(True, "upload refused for the read preset")
 sftp.close()
 ssh.close()
+
+# courier: password login (COURIER_PASSWORD), uploads only.
+client = paramiko.SSHClient()
+client.load_host_keys(known_hosts)
+client.set_missing_host_key_policy(paramiko.RejectPolicy())
+client.connect("127.0.0.1", port=int(port), username="courier", password=os.environ["COURIER_PASSWORD"],
+               allow_agent=False, look_for_keys=False, timeout=10)
+sftp = client.open_sftp()
+sftp.putfo(io.BytesIO(b"by password\n"), "paramiko-courier.txt")
+check(open(os.path.join(inbox, "paramiko-courier.txt"), "rb").read() == b"by password\n", "password login and upload")
+sftp.close()
+client.close()
+try:
+    client = paramiko.SSHClient()
+    client.load_host_keys(known_hosts)
+    client.connect("127.0.0.1", port=int(port), username="courier", password="wrong",
+                   allow_agent=False, look_for_keys=False, timeout=10)
+    client.close()
+    check(False, "wrong password accepted")
+except paramiko.AuthenticationException:
+    check(True, "wrong password refused")
+
+# A change of user name within one connection is refused, as sshd does: a
+# wrong password for courier, then admin's key on the same connection.
+# This drives paramiko's auth handler directly (no public API for it).
+t = paramiko.Transport(("127.0.0.1", int(port)))
+t.start_client(timeout=10)
+try:
+    t.auth_password("courier", "wrong", fallback=False)
+except paramiko.AuthenticationException:
+    pass
+ah = t.auth_handler
+event = threading.Event()
+ah.auth_event = event
+ah.username = "admin"
+ah.auth_method = "publickey"
+ah.private_key = paramiko.Ed25519Key.from_private_key_file(os.path.join(keydir, "id_admin"))
+accept = Message()
+accept.add_string("ssh-userauth")
+accept.rewind()
+ah._parse_service_accept(accept)
+try:
+    ah.wait_for_response(event)
+    check(False, "user name changed within a connection")
+except paramiko.AuthenticationException:
+    check(True, "user name change within a connection refused")
+t.close()
 
 sys.exit(1 if failed else 0)

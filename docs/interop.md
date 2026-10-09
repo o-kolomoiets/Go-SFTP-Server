@@ -5,8 +5,8 @@ change. Tested:
 
 | Client | Version | What is checked |
 |---|---|---|
-| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; refused: symlink escape, `ln`, `ln -s`, shell and exec |
-| paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users |
+| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; refused: symlink escape, `ln`, `ln -s`, shell and exec |
+| paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users, password login, user name change within a connection refused |
 | rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about` |
 | lftp | 4.9.2 | put, get, listing |
 
@@ -35,7 +35,9 @@ rclone copy ./reports :sftp,host=sftp.example.org,port=2022,user=partner,key_fil
 ```
 
 rclone uploads to a temporary `NAME.XXXX.partial` and then moves it into
-place, over several connections; the `upload` permission covers this. With
+place, over several connections; the `upload` permission covers this. Each
+transfer and checker is a connection: keep `limits.max_connections_per_ip`
+above `--transfers` plus `--checkers` (4 + 8 by default). With
 `on_conflict = "rename"` a changed file becomes a copy (`a (1).txt`) and the
 original stays; `rclone sync` and repeated `copy` runs therefore add a copy
 each time the content differs. Use `--inplace` to upload directly to the

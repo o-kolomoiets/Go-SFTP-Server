@@ -6,16 +6,20 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -255,7 +259,7 @@ path = "{dir}/m"
 expires = 2001-01-01T00:00:00Z
 `)
 	warns := strings.Join(mustValidate(t, c), "\n")
-	for _, want := range []string{"users.bob.access: no mounts", "users.bob.expires: already expired", "users.bob: no authorized_keys"} {
+	for _, want := range []string{"users.bob.access: no mounts", "users.bob.expires: already expired", "users.bob: no usable authorized_keys"} {
 		if !strings.Contains(warns, want) {
 			t.Errorf("warnings do not mention %q:\n%s", want, warns)
 		}
@@ -629,7 +633,7 @@ func TestExampleFullCoversEveryKey(t *testing.T) {
 				walk(f.Type)
 				continue
 			}
-			if !strings.Contains(full, tag+" =") && !strings.Contains(full, "["+tag) {
+			if !strings.Contains(full, tag+" =") && !strings.Contains(full, "["+tag) && !strings.Contains(full, "."+tag+"]") {
 				t.Errorf("example-full.toml does not show %q", tag)
 			}
 			ft := f.Type
@@ -809,6 +813,156 @@ on_error = "fail-open"
 	}
 }
 
+func TestValidateM3aKeys(t *testing.T) {
+	t.Parallel()
+
+	c, _ := load(t, `
+config_version = 1
+[server]
+host_keys = ["k"]
+crypto_policy = "legacy"
+idle_timeout = "500ms"
+keepalive_interval = "2h"
+[limits]
+max_connections = 0
+max_connections_per_ip = -1
+max_preauth_connections = 20000
+[auth]
+methods = ["publickey", "keyboard-interactive"]
+[auth.ban]
+after_failures = 1000
+within = "0s"
+duration = "1000h"
+exempt = ["example.org"]
+[mounts.m]
+path = "{dir}/m"
+[users.alice]
+password_hash = "secret"
+access = { m = "read" }
+`)
+	_, err := c.Validate()
+	for _, want := range []string{
+		"server.crypto_policy", "server.idle_timeout", "server.keepalive_interval",
+		"limits.max_connections:", "limits.max_connections_per_ip", "limits.max_preauth_connections",
+		`auth.methods: unknown method "keyboard-interactive"`, "auth.ban.after_failures", "auth.ban.within",
+		"auth.ban.duration", "auth.ban.exempt", "users.alice.password_hash: not an argon2id or bcrypt hash",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("errors do not mention %q: %v", want, err)
+		}
+	}
+
+	hash, err := auth.HashPassword([]byte("pw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const base = `
+config_version = 1
+[server]
+host_keys = ["k"]
+idle_timeout = "0s"
+keepalive_interval = "0s"
+crypto_policy = "compat"
+[mounts.m]
+path = "{dir}/m"
+[users.bob]
+password_hash = "%s"
+access = { m = "read" }
+`
+	// Without "password" in auth.methods the hash is ignored with a warning.
+	c, _ = load(t, fmt.Sprintf(base, hash))
+	warns := mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "password_hash: ignored") }) {
+		t.Errorf("warnings = %q", warns)
+	}
+	if a, _, err := c.Authenticator(); err != nil || a.Len() != 0 {
+		t.Errorf("Authenticator() = %v, %v", a, err)
+	}
+	if b := c.Bans(); b == nil || b.Duration() != auth.DefaultBanDuration {
+		t.Errorf("default bans = %+v", b)
+	}
+
+	c, _ = load(t, fmt.Sprintf(base, hash)+"[auth]\nmethods = [\"publickey\", \"password\"]\n[auth.ban]\nafter_failures = 0\n")
+	warns = mustValidate(t, c)
+	if slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "users.bob") }) {
+		t.Errorf("warnings about a user with a password: %q", warns)
+	}
+	if _, warns, err := c.Authenticator(); err != nil || len(warns) != 0 {
+		t.Errorf("Authenticator() warnings %q, err %v", warns, err)
+	}
+	if c.Bans() != nil {
+		t.Error("after_failures = 0 did not turn bans off")
+	}
+
+	// Zero-config has public keys only.
+	for _, methods := range [][]string{{"password"}, {"publickey", "password"}} {
+		zero := Default()
+		zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: "k"}
+		zero.Auth.Methods = methods
+		if _, err := zero.Validate(); err == nil || !strings.Contains(err.Error(), "auth.methods") {
+			t.Errorf("zero-config with methods %v: %v", methods, err)
+		}
+	}
+
+	// Keys of a password-only server are ignored, and one address that may
+	// hold every pre-authentication slot is worth a warning.
+	c, _ = load(t, fmt.Sprintf(base, hash)+`authorized_keys = ["`+pubKey(t)+`"]
+[auth]
+methods = ["password"]
+[limits]
+max_connections_per_ip = 64
+`)
+	warns = mustValidate(t, c)
+	for _, want := range []string{"users.bob: keys not used", "limits.max_connections_per_ip: 64 is not below max_preauth_connections"} {
+		if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, want) }) {
+			t.Errorf("warnings %q lack %q", warns, want)
+		}
+	}
+
+	// Keys of a password-only server are not even read: a missing key file
+	// does not stop it.
+	c, dir := load(t, fmt.Sprintf(base, hash)+`authorized_keys_file = "missing.pub"
+[auth]
+methods = ["password"]
+`)
+	mustValidate(t, c)
+	if err := os.MkdirAll(filepath.Join(dir, "m"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CheckFS(); err != nil && strings.Contains(err.Error(), "missing.pub") {
+		t.Errorf("CheckFS checks an unused key file: %v", err)
+	}
+	if a, _, err := c.Authenticator(); err != nil || a.Len() != 0 {
+		t.Errorf("Authenticator() with keys off: %v keys, err %v", a, err)
+	}
+
+	// The per-address limit against a lower total.
+	c, _ = load(t, fmt.Sprintf(base, hash)+"[limits]\nmax_connections = 16\n")
+	warns = mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "is not below max_connections (16)") }) {
+		t.Errorf("warnings %q lack the max_connections case", warns)
+	}
+
+	// Hashes of several kinds or costs.
+	bc, err := bcrypt.GenerateFromPassword([]byte("pw"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ = load(t, fmt.Sprintf(base, hash)+"[users.carol]\npassword_hash = \""+string(bc)+"\"\naccess = { m = \"read\" }\n[auth]\nmethods = [\"password\"]\n")
+	warns = mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "password hashes of 2 different kinds") }) {
+		t.Errorf("warnings %q lack the mixed hash kinds", warns)
+	}
+
+	// "password" without any password_hash is useless.
+	c, _ = load(t, strings.Replace(fmt.Sprintf(base, ""), `password_hash = ""`, `authorized_keys = ["`+pubKey(t)+`"]`, 1)+
+		"[auth]\nmethods = [\"publickey\", \"password\"]\n")
+	warns = mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "no user has a password_hash") }) {
+		t.Errorf("warnings %q lack the unused password method", warns)
+	}
+}
+
 // TestConfigurationDocCoversEveryKey keeps docs/configuration.md complete.
 func TestConfigurationDocCoversEveryKey(t *testing.T) {
 	t.Parallel()
@@ -817,15 +971,15 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var walk func(reflect.Type)
-	walk = func(typ reflect.Type) {
+	var walk func(typ reflect.Type, table string)
+	walk = func(typ reflect.Type, parent string) {
 		for f := range typ.Fields() {
 			tag, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
 			switch {
 			case tag == "-":
 				continue
 			case f.Anonymous:
-				walk(f.Type)
+				walk(f.Type, parent)
 				continue
 			}
 			ft := f.Type
@@ -833,16 +987,20 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 				ft = ft.Elem()
 			}
 			table := ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]()
+			name := tag
+			if table && parent != "" && f.Type.Kind() != reflect.Map {
+				name = parent + "." + tag
+			}
 			switch {
-			case table && !strings.Contains(string(doc), "`["+tag):
-				t.Errorf("docs/configuration.md has no section for [%s]", tag)
+			case table && !strings.Contains(string(doc), "`["+name):
+				t.Errorf("docs/configuration.md has no section for [%s]", name)
 			case !table && !strings.Contains(string(doc), "`"+tag+"`"):
 				t.Errorf("docs/configuration.md does not describe `%s`", tag)
 			}
 			if table {
-				walk(ft)
+				walk(ft, name)
 			}
 		}
 	}
-	walk(reflect.TypeFor[Config]())
+	walk(reflect.TypeFor[Config](), "")
 }

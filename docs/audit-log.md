@@ -39,10 +39,12 @@ never host paths. Strings from clients are JSON-escaped.
 | `server.start` | server | `version`, `listen` |
 | `server.stop` | server | |
 | `server.audit_recovered` | server | written when the log works again after a failure |
+| `conn.reject` | conn | `reason`: `banned`, `max_connections`, `max_connections_per_ip` or `max_preauth_connections`; `suppressed` (see below) |
 | `conn.accept` | conn | `client_version` (after the client sent its version line) |
-| `conn.close` | conn | `duration_ms`, `result` |
-| `auth.success` | auth | `auth_method`, `key_fp` (SHA256 fingerprint), `failed_attempts` |
-| `auth.failure` | auth | `attempts`; written when a connection ends without login |
+| `conn.close` | conn | `duration_ms`, `result` (`ok`, `error`, `idle_timeout`, `keepalive_timeout`) |
+| `auth.success` | auth | `auth_method` (`publickey` or `password`), `key_fp` (SHA256 fingerprint, public keys only), `failed_attempts` |
+| `auth.failure` | auth | `attempts`, `user` (the last name tried); written when a connection ends without login |
+| `auth.ban` | auth | `source` (IPv4 address or IPv6 /64), `duration_ms` |
 | `session.start` | session | |
 | `session.end` | session | `duration_ms`, `exit_status` |
 | `fs.upload` | transfer | `path` (requested), `final_path`, `conflict` (`none`, `renamed`, `overwritten`), `open_flags`, `bytes`, `start_offset` (resumed uploads), `duration_ms`, `result` |
@@ -58,7 +60,9 @@ the transfer; an empty file the upload created is removed). An upload with a
 refused write (append-only guard) ends with `denied`.
 
 Connections that close before sending an SSH version line (health checks,
-port scanners) are not audited.
+port scanners) are not audited. Refused connections (`conn.reject`) are
+logged at most 10 per second; the next `conn.reject` written reports how
+many were left out in `suppressed`.
 
 ## When the log cannot be written
 

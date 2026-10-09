@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -91,12 +93,23 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 		if u.Expires != nil {
 			au.Expires = *u.Expires
 		}
+		if c.canUsePassword(u) {
+			h, err := auth.ParsePasswordHash(u.PasswordHash)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s: %w", key("users", name, "password_hash"), err)
+			}
+			au.Password = h
+		}
+		keysOn := c.Auth.HasMethod(auth.MethodPublicKey) // otherwise keys are not even read
 		for i, line := range u.AuthorizedKeys {
+			if !keysOn {
+				break
+			}
 			ks, ws := auth.ParseAuthorizedKeys([]byte(line), key("users", name, "authorized_keys")+"["+strconv.Itoa(i+1)+"]")
 			au.Keys = append(au.Keys, ks...)
 			warns = append(warns, ws...)
 		}
-		if f := u.AuthorizedKeysFile; f != "" {
+		if f := u.AuthorizedKeysFile; f != "" && keysOn {
 			ks, ok := files[f]
 			if !ok {
 				var ws []string
@@ -117,12 +130,43 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 			}
 			au.AllowFrom = append(au.AllowFrom, p)
 		}
-		if len(au.Keys) == 0 && !u.Disabled {
+		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled {
 			warns = append(warns, key("users", name)+": no usable keys, the user cannot log in")
 		}
 		users = append(users, au)
 	}
 	return auth.NewUsers(users), warns, nil
+}
+
+// usesKeys reports whether u has keys that may be used.
+func (c *Config) usesKeys(u *User) bool {
+	return (len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != "") && c.Auth.HasMethod(auth.MethodPublicKey)
+}
+
+// canUsePassword reports whether u has a password that may be used.
+func (c *Config) canUsePassword(u *User) bool {
+	return u.PasswordHash != "" && c.Auth.HasMethod(auth.MethodPassword)
+}
+
+// Bans builds the ban table, or returns nil when bans are off. Call after
+// Validate.
+func (c *Config) Bans() *auth.BanTable {
+	b := c.Auth.Ban
+	if b.AfterFailures == 0 {
+		return nil
+	}
+	exempt := make([]netip.Prefix, 0, len(b.Exempt))
+	for _, e := range b.Exempt {
+		if p, err := auth.ParsePrefix(e); err == nil {
+			exempt = append(exempt, p)
+		}
+	}
+	return auth.NewBanTable(auth.BanOptions{
+		AfterFailures: b.AfterFailures,
+		Within:        time.Duration(b.Within),
+		Duration:      time.Duration(b.Duration),
+		Exempt:        exempt,
+	})
 }
 
 // Grants returns the mounts user may access. In zero-config mode every user

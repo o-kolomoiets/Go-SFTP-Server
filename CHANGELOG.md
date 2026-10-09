@@ -8,7 +8,48 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-08
+### Added
+
+- Connection limits checked right after accept, before the SSH handshake:
+  `limits.max_connections` (256), `max_connections_per_ip` (16, per IPv4
+  address or IPv6 /64) and `max_preauth_connections` (64). Refused
+  connections are audited as `conn.reject`, at most 10 per second.
+- Bans (`[auth.ban]`): a source with 10 failures within 10 minutes is
+  refused at accept for 30 minutes, and its open connections get no further
+  password checks. Every wrong password is a failure at once; rejected keys
+  count once per connection, not per offered key; loopback is exempt by
+  default; the table is bounded. New audit event `auth.ban`.
+- `server.idle_timeout` (15m) closes connections without SFTP traffic;
+  `server.keepalive_interval` (30s) closes connections that leave 3
+  `keepalive@openssh.com` requests unanswered. `conn.close` reports
+  `idle_timeout` or `keepalive_timeout`.
+- Opt-in password login: `auth.methods = ["publickey", "password"]` and
+  `password_hash` (argon2id; bcrypt accepted for imported accounts). Each
+  attempt checks one hash; unknown users are checked against a stand-in of
+  the costliest configured hash, and failures wait until it would have
+  finished, so the response time does not reveal which users exist (fully
+  with one kind of hash; `config validate` warns about mixed ones). Checks
+  run at most one per available CPU. A method missing from `auth.methods` is
+  refused, and its keys or passwords are not loaded. `gosftpd user hash-password [--stdin]` prints a hash, and
+  `user add --password-hash` adds it to a user.
+- `server.crypto_policy`: `modern` (default, as before) or `compat`, which
+  adds NIST curve and SHA-2 Diffie-Hellman key exchange and non-ETM MACs for
+  old clients.
+
+### Changed
+
+- **BREAKING:** `gosftpd serve` refuses to run as root unless `--allow-root`
+  is given.
+- A connection keeps the user name of its first authentication request, as
+  sshd does; attempts with another name are refused.
+- `auth.success` has `key_fp` only for public-key logins.
+
+### Fixed
+
+- A client that disconnected right after logging in left no `auth.success`
+  and `conn.close` events.
+
+## [0.2.0] - 2026-10-09
 
 ### Added
 

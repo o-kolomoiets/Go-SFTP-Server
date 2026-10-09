@@ -21,6 +21,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
+	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -36,6 +37,7 @@ type Config struct {
 	Include       []string          `toml:"include,omitempty"`
 	Server        Server            `toml:"server"`
 	Limits        Limits            `toml:"limits"`
+	Auth          Auth              `toml:"auth"`
 	Defaults      Defaults          `toml:"defaults"`
 	Mounts        map[string]*Mount `toml:"mounts"`
 	Users         map[string]*User  `toml:"users"`
@@ -57,15 +59,38 @@ type Server struct {
 	Listen              []string `toml:"listen"`
 	HostKeys            []string `toml:"host_keys"`
 	HostKeyAutoGenerate bool     `toml:"host_key_auto_generate"`
+	CryptoPolicy        string   `toml:"crypto_policy"`
 	HandshakeTimeout    Duration `toml:"handshake_timeout"`
+	IdleTimeout         Duration `toml:"idle_timeout"`
+	KeepaliveInterval   Duration `toml:"keepalive_interval"`
 	ShutdownTimeout     Duration `toml:"shutdown_timeout"`
 }
 
 // Limits is the [limits] table.
 type Limits struct {
-	MaxSessionsPerConn int `toml:"max_sessions_per_conn"`
-	MaxOpenHandles     int `toml:"max_open_handles"`
-	MaxAuthTries       int `toml:"max_auth_tries"`
+	MaxConnections        int `toml:"max_connections"`
+	MaxConnectionsPerIP   int `toml:"max_connections_per_ip"`
+	MaxPreauthConnections int `toml:"max_preauth_connections"`
+	MaxSessionsPerConn    int `toml:"max_sessions_per_conn"`
+	MaxOpenHandles        int `toml:"max_open_handles"`
+	MaxAuthTries          int `toml:"max_auth_tries"`
+}
+
+// Auth is the [auth] table.
+type Auth struct {
+	Methods []string `toml:"methods"`
+	Ban     Ban      `toml:"ban"`
+}
+
+// HasMethod reports whether login method m is enabled.
+func (a Auth) HasMethod(m string) bool { return slices.Contains(a.Methods, m) }
+
+// Ban is the [auth.ban] table.
+type Ban struct {
+	AfterFailures int      `toml:"after_failures"` // 0 disables bans
+	Within        Duration `toml:"within"`
+	Duration      Duration `toml:"duration"`
+	Exempt        []string `toml:"exempt"`
 }
 
 // MountOptions are the per-mount options; [defaults] provides the values a
@@ -108,6 +133,7 @@ type Mount struct {
 type User struct {
 	AuthorizedKeys     []string          `toml:"authorized_keys,omitempty"`
 	AuthorizedKeysFile string            `toml:"authorized_keys_file,omitempty"`
+	PasswordHash       string            `toml:"password_hash,omitempty"`
 	AllowFrom          []string          `toml:"allow_from,omitempty"`
 	Expires            *time.Time        `toml:"expires,omitempty"`
 	Disabled           bool              `toml:"disabled,omitempty"`
@@ -149,11 +175,30 @@ func Default() *Config {
 	return &Config{
 		ConfigVersion: Version,
 		Server: Server{
-			Listen:           []string{":2022"},
-			HandshakeTimeout: Duration(30 * time.Second),
-			ShutdownTimeout:  Duration(30 * time.Second),
+			Listen:            []string{":2022"},
+			CryptoPolicy:      "modern",
+			HandshakeTimeout:  Duration(30 * time.Second),
+			IdleTimeout:       Duration(15 * time.Minute),
+			KeepaliveInterval: Duration(30 * time.Second),
+			ShutdownTimeout:   Duration(30 * time.Second),
 		},
-		Limits: Limits{MaxSessionsPerConn: 4, MaxOpenHandles: 64, MaxAuthTries: 6},
+		Limits: Limits{
+			MaxConnections:        256,
+			MaxConnectionsPerIP:   16,
+			MaxPreauthConnections: 64,
+			MaxSessionsPerConn:    4,
+			MaxOpenHandles:        64,
+			MaxAuthTries:          6,
+		},
+		Auth: Auth{
+			Methods: []string{auth.MethodPublicKey},
+			Ban: Ban{
+				AfterFailures: auth.DefaultBanAfterFailures,
+				Within:        Duration(auth.DefaultBanWithin),
+				Duration:      Duration(auth.DefaultBanDuration),
+				Exempt:        []string{"127.0.0.0/8", "::1/128"},
+			},
+		},
 		Defaults: Defaults{
 			MountOptions: MountOptions{
 				OnConflict:         string(o.OnConflict),
@@ -189,6 +234,7 @@ type fileConfig struct {
 	Include       []string                  `toml:"include"`
 	Server        Server                    `toml:"server"`
 	Limits        Limits                    `toml:"limits"`
+	Auth          Auth                      `toml:"auth"`
 	Defaults      Defaults                  `toml:"defaults"`
 	Mounts        map[string]toml.Primitive `toml:"mounts"`
 	Users         map[string]*User          `toml:"users"`
@@ -218,6 +264,7 @@ func Load(path string) (*Config, error) {
 	raw := fileConfig{
 		Server:   d.Server,
 		Limits:   d.Limits,
+		Auth:     d.Auth,
 		Defaults: d.Defaults,
 		Log:      d.Log,
 		Audit:    d.Audit,
@@ -232,6 +279,7 @@ func Load(path string) (*Config, error) {
 		Include:       raw.Include,
 		Server:        raw.Server,
 		Limits:        raw.Limits,
+		Auth:          raw.Auth,
 		Defaults:      raw.Defaults,
 		Mounts:        make(map[string]*Mount, len(raw.Mounts)),
 		Users:         raw.Users,

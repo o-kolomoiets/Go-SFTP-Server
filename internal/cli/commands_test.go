@@ -22,6 +22,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
 
@@ -138,6 +139,7 @@ func TestUserAddErrors(t *testing.T) {
 		{"user", "add", "alice", "--key", `command="sh" ` + key, "--access", "a=read"},
 		{"user", "add", "alice", "--key", key, "--access", "a=read", "--expires", "-1h"},
 		{"user", "add", "alice", "--key", key, "--access", "a=read", "--allow-from", "example.org"},
+		{"user", "add", "alice", "--password-hash", "plaintext", "--access", "a=read"},
 		{"user", "add"},
 	} {
 		if code, _, errOut := execute(t, args...); code != exitUsage {
@@ -219,7 +221,7 @@ func TestConfigValidateErrors(t *testing.T) {
 	if code != exitUsage {
 		t.Errorf("exit %d", code)
 	}
-	for _, want := range []string{"4 problems:", "server.listen", "server.host_keys", "mounts.m.path", `users.a.access: unknown mount "x"`, "warning: users.a: no authorized_keys"} {
+	for _, want := range []string{"4 problems:", "server.listen", "server.host_keys", "mounts.m.path", `users.a.access: unknown mount "x"`, "warning: users.a: no usable authorized_keys"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}
@@ -365,6 +367,10 @@ func TestConfigShowAndExample(t *testing.T) {
 
 func TestUserList(t *testing.T) {
 	isolate(t)
+	hash, err := auth.HashPassword([]byte("pw"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	keys := filepath.Join(dir, "bob.pub")
 	writeFile(t, keys, authorizedKey(newSigner(t))+"\n"+authorizedKey(newSigner(t))+"\n")
@@ -384,6 +390,9 @@ access = { m = "upload" }
 [users.carol]
 disabled = true
 access = { m = "read" }
+[users.dave]
+password_hash = "`+hash+`"
+access = { m = "upload" }
 `)
 	code, stdout, stderr := execute(t, "user", "list", "--config", path)
 	if code != exitOK {
@@ -396,13 +405,27 @@ access = { m = "read" }
 		got[i] = space.ReplaceAllString(strings.TrimSpace(l), " ")
 	}
 	want := []string{
-		"USER ACCESS KEYS EXPIRES STATUS",
-		"alice m=full 1 - active",
-		"bob m=upload 2 2001-01-01T00:00:00Z expired",
-		"carol m=read 0 - disabled",
+		"USER ACCESS KEYS PASSWORD EXPIRES STATUS",
+		"alice m=full 1 - - active",
+		"bob m=upload 2 - 2001-01-01T00:00:00Z expired",
+		"carol m=read 0 - - disabled",
+		"dave m=upload 0 off - active",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("user list:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// With passwords only, keys are off.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(data)+"[auth]\nmethods = [\"password\"]\n")
+	_, stdout, _ = execute(t, "user", "list", "--config", path)
+	for _, want := range []string{"alice m=full off - - active", "dave m=upload off yes - active"} {
+		if !strings.Contains(space.ReplaceAllString(stdout, " "), want) {
+			t.Errorf("password-only user list lacks %q:\n%s", want, stdout)
+		}
 	}
 }
 
@@ -484,7 +507,7 @@ func TestServeMinimalExample(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var stdout, stderr lockedBuffer
 	done := make(chan int, 1)
-	go func() { done <- run(ctx, []string{"serve", "--config", path}, &stdout, &stderr) }()
+	go func() { done <- run(ctx, []string{"serve", "--config", path, "--allow-root"}, &stdout, &stderr) }()
 
 	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+)`)
 	var addr string

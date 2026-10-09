@@ -121,15 +121,6 @@ type auditSchema struct {
 // TestAuditSchema pins the audit format: every line of a session that uses
 // every operation must match testdata/audit.schema.json.
 func TestAuditSchema(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "audit.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schema auditSchema
-	if err := json.Unmarshal(data, &schema); err != nil {
-		t.Fatal(err)
-	}
-
 	all := []string{
 		audit.CategoryConn, audit.CategoryAuth, audit.CategorySession, audit.CategoryTransfer,
 		audit.CategoryModify, audit.CategoryDenied, audit.CategoryList, audit.CategoryStat,
@@ -214,6 +205,40 @@ func TestAuditSchema(t *testing.T) {
 		return true
 	}, func() string { return "missing " + missing })
 
+	checkSchema(t, lines)
+}
+
+func loadSchema(t *testing.T) auditSchema {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "audit.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema auditSchema
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	return schema
+}
+
+// auditLines parses the audit log.
+func auditLines(t *testing.T, log string) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for l := range strings.SplitSeq(strings.TrimSpace(log), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("not JSON: %q", l)
+		}
+		lines = append(lines, m)
+	}
+	return lines
+}
+
+// checkSchema checks audit lines against testdata/audit.schema.json.
+func checkSchema(t *testing.T, lines []map[string]any) {
+	t.Helper()
+	schema := loadSchema(t)
 	for _, m := range lines {
 		ev, _ := m["event"].(string)
 		spec, ok := schema.Events[ev]
@@ -251,14 +276,7 @@ func waitForMsg(t *testing.T, cond func() bool, msg func() string) {
 
 // TestAuditDocCoversSchema keeps docs/audit-log.md in step with the schema.
 func TestAuditDocCoversSchema(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "audit.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schema auditSchema
-	if err := json.Unmarshal(data, &schema); err != nil {
-		t.Fatal(err)
-	}
+	schema := loadSchema(t)
 	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "audit-log.md"))
 	if err != nil {
 		t.Fatal(err)

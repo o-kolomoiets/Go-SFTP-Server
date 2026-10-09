@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
+	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -40,10 +42,17 @@ func key(parts ...string) string { return toml.Key(parts).String() }
 // Limits for numeric settings.
 const (
 	maxHandshakeTimeout = 10 * time.Minute
+	maxIdleTimeout      = 7 * 24 * time.Hour
+	maxKeepalive        = time.Hour
 	maxShutdownTimeout  = time.Hour
+	maxConnections      = 100000
+	maxPreauth          = 10000
 	maxSessions         = 64
 	maxHandles          = 4096
 	maxAuthTries        = 20
+	maxBanFailures      = 100
+	maxBanWindow        = 24 * time.Hour
+	maxBanDuration      = 30 * 24 * time.Hour
 )
 
 // Validate checks the configuration without touching the filesystem and
@@ -59,6 +68,7 @@ func (c *Config) Validate() (warnings []string, err error) {
 	}
 	c.validateServer(p)
 	c.validateLimits(p)
+	c.validateAuth(p)
 	c.Defaults.validate(p, nil, "defaults")
 	c.validateMounts(p)
 	c.validateUsers(p)
@@ -84,8 +94,17 @@ func (c *Config) validateServer(p *problems) {
 			p.errorf("server.host_keys", "empty path")
 		}
 	}
+	if !slices.Contains(server.CryptoPolicies, s.CryptoPolicy) {
+		p.errorf("server.crypto_policy", "unknown policy %q (want %s)", s.CryptoPolicy, strings.Join(server.CryptoPolicies, " or "))
+	}
 	if d := time.Duration(s.HandshakeTimeout); d < time.Second || d > maxHandshakeTimeout {
 		p.errorf("server.handshake_timeout", "must be between 1s and %s", maxHandshakeTimeout)
+	}
+	if d := time.Duration(s.IdleTimeout); d != 0 && (d < time.Second || d > maxIdleTimeout) {
+		p.errorf("server.idle_timeout", "must be 0 (off) or between 1s and %s", maxIdleTimeout)
+	}
+	if d := time.Duration(s.KeepaliveInterval); d != 0 && (d < time.Second || d > maxKeepalive) {
+		p.errorf("server.keepalive_interval", "must be 0 (off) or between 1s and %s", maxKeepalive)
 	}
 	if d := time.Duration(s.ShutdownTimeout); d < time.Second || d > maxShutdownTimeout {
 		p.errorf("server.shutdown_timeout", "must be between 1s and %s", maxShutdownTimeout)
@@ -108,12 +127,72 @@ func (c *Config) validateLimits(p *problems) {
 		key      string
 		val, max int
 	}{
+		{"limits.max_connections", c.Limits.MaxConnections, maxConnections},
+		{"limits.max_connections_per_ip", c.Limits.MaxConnectionsPerIP, maxConnections},
+		{"limits.max_preauth_connections", c.Limits.MaxPreauthConnections, maxPreauth},
 		{"limits.max_sessions_per_conn", c.Limits.MaxSessionsPerConn, maxSessions},
 		{"limits.max_open_handles", c.Limits.MaxOpenHandles, maxHandles},
 		{"limits.max_auth_tries", c.Limits.MaxAuthTries, maxAuthTries},
 	} {
 		if l.val < 1 || l.val > l.max {
 			p.errorf(l.key, "must be between 1 and %d", l.max)
+		}
+	}
+	if l := c.Limits; l.MaxConnectionsPerIP > 0 {
+		name, limit := "max_preauth_connections", l.MaxPreauthConnections
+		if l.MaxConnections < limit {
+			name, limit = "max_connections", l.MaxConnections
+		}
+		if l.MaxConnectionsPerIP >= limit {
+			p.warnf("limits.max_connections_per_ip", "%d is not below %s (%d): one address can hold every slot for clients that have not logged in yet",
+				l.MaxConnectionsPerIP, name, limit)
+		}
+	}
+}
+
+func (c *Config) validateAuth(p *problems) {
+	a := c.Auth
+	if len(a.Methods) == 0 {
+		p.errorf("auth.methods", "at least one method is required: publickey, password")
+	}
+	for _, m := range a.Methods {
+		if m != auth.MethodPublicKey && m != auth.MethodPassword {
+			p.errorf("auth.methods", "unknown method %q (want publickey or password)", m)
+		}
+	}
+	if c.AnyUser != nil && a.HasMethod(auth.MethodPassword) {
+		p.errorf("auth.methods", "password logins need users with password_hash in a configuration file")
+	}
+	if c.AnyUser == nil && a.HasMethod(auth.MethodPassword) {
+		classes := map[string]bool{}
+		for _, u := range c.Users {
+			if !c.canUsePassword(u) {
+				continue
+			}
+			if h, err := auth.ParsePasswordHash(u.PasswordHash); err == nil {
+				classes[auth.PasswordClass(h)] = true
+			}
+		}
+		switch {
+		case len(classes) == 0:
+			p.warnf("auth.methods", "\"password\" is enabled but no user has a password_hash: every client may make the server check passwords for nothing")
+		case len(classes) > 1:
+			p.warnf("users", "password hashes of %d different kinds or costs: under parallel attempts the response time can show which users exist; re-hash them with 'gosftpd user hash-password'", len(classes))
+		}
+	}
+	b := a.Ban
+	if b.AfterFailures < 0 || b.AfterFailures > maxBanFailures {
+		p.errorf("auth.ban.after_failures", "must be between 0 (no bans) and %d", maxBanFailures)
+	}
+	if d := time.Duration(b.Within); d < time.Second || d > maxBanWindow {
+		p.errorf("auth.ban.within", "must be between 1s and %s", maxBanWindow)
+	}
+	if d := time.Duration(b.Duration); d < time.Second || d > maxBanDuration {
+		p.errorf("auth.ban.duration", "must be between 1s and %s", maxBanDuration)
+	}
+	for _, e := range b.Exempt {
+		if _, err := auth.ParsePrefix(e); err != nil {
+			p.errorf("auth.ban.exempt", "%v", err)
 		}
 	}
 }
@@ -252,8 +331,19 @@ func (c *Config) validateUsers(p *problems) {
 		if u.Expires != nil && u.Expires.Before(time.Now()) {
 			p.warnf(k("expires"), "already expired (%s)", u.Expires.Format(time.RFC3339))
 		}
-		if len(u.AuthorizedKeys) == 0 && u.AuthorizedKeysFile == "" {
-			p.warnf(where, "no authorized_keys or authorized_keys_file: the user cannot log in")
+		if u.PasswordHash != "" {
+			if _, err := auth.ParsePasswordHash(u.PasswordHash); err != nil {
+				p.errorf(k("password_hash"), "%v", err)
+			} else if !c.Auth.HasMethod(auth.MethodPassword) {
+				p.warnf(k("password_hash"), "ignored: auth.methods does not include \"password\"")
+			}
+		}
+		hasKeys := len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != ""
+		if hasKeys && !c.Auth.HasMethod(auth.MethodPublicKey) {
+			p.warnf(where, "keys not used: auth.methods does not include \"publickey\"")
+		}
+		if !c.usesKeys(u) && !c.canUsePassword(u) {
+			p.warnf(where, "no usable authorized_keys or password_hash: the user cannot log in")
 		}
 	}
 }
