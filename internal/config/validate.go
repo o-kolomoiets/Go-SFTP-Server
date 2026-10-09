@@ -163,9 +163,22 @@ func (c *Config) validateAuth(p *problems) {
 	if c.AnyUser != nil && a.HasMethod(auth.MethodPassword) {
 		p.errorf("auth.methods", "password logins need users with password_hash in a configuration file")
 	}
-	if c.AnyUser == nil && a.HasMethod(auth.MethodPassword) &&
-		!slices.ContainsFunc(sortedKeys(c.Users), func(n string) bool { return c.canUsePassword(c.Users[n]) }) {
-		p.warnf("auth.methods", "\"password\" is enabled but no user has a password_hash: every client may make the server check passwords for nothing")
+	if c.AnyUser == nil && a.HasMethod(auth.MethodPassword) {
+		classes := map[string]bool{}
+		for _, u := range c.Users {
+			if !c.canUsePassword(u) {
+				continue
+			}
+			if h, err := auth.ParsePasswordHash(u.PasswordHash); err == nil {
+				classes[auth.PasswordClass(h)] = true
+			}
+		}
+		switch {
+		case len(classes) == 0:
+			p.warnf("auth.methods", "\"password\" is enabled but no user has a password_hash: every client may make the server check passwords for nothing")
+		case len(classes) > 1:
+			p.warnf("users", "password hashes of %d different kinds or costs: under parallel attempts the response time can show which users exist; re-hash them with 'gosftpd user hash-password'", len(classes))
+		}
 	}
 	b := a.Ban
 	if b.AfterFailures < 0 || b.AfterFailures > maxBanFailures {

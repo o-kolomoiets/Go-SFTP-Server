@@ -36,11 +36,17 @@ model and a hardening guide follow in v0.3.
 - The handshake must finish within `handshake_timeout`; a connection without
   SFTP traffic for `idle_timeout` is closed, and so is one that leaves 3
   keepalive requests unanswered.
-- A password attempt checks one hash, at most one per CPU at a time, so
-  pre-authentication memory stays bounded (19 MiB per check with the
-  default parameters). Passwords over 1024 bytes are refused without
-  hashing. A failed attempt takes as long as the costliest configured hash,
-  whichever user it names.
+- A password attempt checks one hash, at most one per available CPU at a
+  time, so pre-authentication memory and CPU stay bounded (19 MiB per
+  check with the default parameters). Passwords over 1024 bytes are refused
+  without hashing. Unknown users are checked against a stand-in of the
+  costliest configured hash, and failures wait until that check would have
+  finished. With one kind and cost of hash (the default) the response time
+  does not show which users exist; with several, parallel attempts can
+  still show it (see [configuration.md](configuration.md#usersname)).
+- Bans are a soft limit: a burst over many parallel connections can get
+  up to about `max_connections_per_ip` more password checks than
+  `after_failures` before the ban stops it.
 - Refused connections are logged at most 10 per second.
 
 ## Confinement

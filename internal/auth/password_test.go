@@ -9,6 +9,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,10 +61,12 @@ func TestParsePasswordHash(t *testing.T) {
 		{"$argon2id$v=19$m=19456,t=2,p=1$" + salt + "$" + key, true},
 		{"$argon2id$v=19$m=65536,t=3,p=4$" + salt + "$" + key, true},
 		{string(cheap), false},
-		{"$2b$12$" + strings.Repeat("*", 53), false}, // fails without hashing
-		{"$2b$12$" + string(bc[7:]) + "x", false},    // too long
-		{"$argon2id$v=19$m=19456,t=2,p=1$" + strings.Repeat("A", 100) + "$" + key, false}, // 75-byte salt
-		{"$argon2id$v=19$m=2097152,t=2,p=1$" + salt + "$" + key, false},                   // 2 GiB per attempt
+		// A bad salt fails without hashing.
+		{"$2b$12$" + strings.Repeat("*", 53), false},
+		{"$2b$12$" + string(bc[7:]) + "x", false},
+		// A 75-byte salt.
+		{"$argon2id$v=19$m=19456,t=2,p=1$" + strings.Repeat("A", 100) + "$" + key, false},
+		{"$argon2id$v=19$m=2097152,t=2,p=1$" + salt + "$" + key, false}, // 2 GiB per attempt
 		{"$argon2id$v=19$m=19456,t=100,p=1$" + salt + "$" + key, false},
 		{"$argon2id$v=19$m=19456,t=2,p=64$" + salt + "$" + key, false},
 		{"$argon2id$v=19$t=2,m=19456,p=1$" + salt + "$" + key, false},
@@ -227,66 +230,116 @@ func (h slowHash) verify(pw []byte) bool {
 	return h.pw != "" && string(pw) == h.pw
 }
 func (h slowHash) class() string       { return h.cls }
+func (h slowHash) lanes() int          { return 1 }
 func (h slowHash) dummy() PasswordHash { return slowHash{cls: h.cls, took: h.took, calls: h.calls} }
 
 // TestPasswordPadding checks the mechanism behind TestPasswordTiming with
-// hashes that sleep instead of hashing: each attempt verifies one hash, and
-// every failure lasts at least as long as the slowest kind of hash.
+// hashes that sleep instead of hashing: each attempt verifies one hash,
+// unknown users and users without a password verify the costliest kind,
+// and every failure lasts at least as long as the costliest kind.
 func TestPasswordPadding(t *testing.T) {
 	t.Parallel()
 
-	var calls atomic.Int32
-	fast := slowHash{cls: "fast", pw: "alice pw", took: 5 * time.Millisecond, calls: &calls}
-	slow := slowHash{cls: "slow", pw: "bob pw", took: 60 * time.Millisecond, calls: &calls}
+	var fastCalls, slowCalls atomic.Int32
+	fast := slowHash{cls: "fast", pw: "alice pw", took: 5 * time.Millisecond, calls: &fastCalls}
+	slow := slowHash{cls: "slow", pw: "bob pw", took: 60 * time.Millisecond, calls: &slowCalls}
 	a := NewUsers([]User{
 		{Name: "alice", Password: fast},
 		{Name: "bob", Password: slow},
 		{Name: "carol", Keys: []Key{{Key: newKey(t)}}},
 	})
+	a.pad.classes = []PasswordHash{fast.dummy(), slow.dummy()} // without the real argon2id default
 	var slept atomic.Int64
 	a.pad.sleep = func(d time.Duration) { slept.Store(int64(d)); time.Sleep(d) }
-	a.dummy = slowHash{cls: "default", took: time.Millisecond, calls: &calls}
+	a.pad.measure(a) // the first attempt would do this
+	target := time.Duration(a.pad.target.Load())
+	if target < 72*time.Millisecond || target > 500*time.Millisecond {
+		t.Fatalf("target %v, want about 1.2 × 60ms", target)
+	}
 
-	attempt := func(user, pw string) (bool, time.Duration) {
-		calls.Store(0)
+	attempt := func(user, pw string) (ok bool, took time.Duration, fastN, slowN int32) {
+		fastCalls.Store(0)
+		slowCalls.Store(0)
 		slept.Store(0)
 		start := time.Now()
 		_, err := a.Password(fakeConn{user: user}, []byte(pw))
-		if n := calls.Load(); n != 1 {
-			t.Errorf("%s: %d verifications, want 1", user, n)
-		}
-		return err == nil, time.Since(start)
+		return err == nil, time.Since(start), fastCalls.Load(), slowCalls.Load()
 	}
-	a.pad.measure(a.hashing) // the first attempt would do this
-	target := time.Duration(a.pad.target.Load())
-	if target < 72*time.Millisecond {
-		t.Fatalf("target %v, want at least 1.2 × 60ms", target)
-	}
-	for _, tt := range []struct{ user, pw string }{
-		{"alice", "wrong"}, {"bob", "wrong"}, {"carol", "x"}, {"mallory", "x"}, {"alice", "bob pw"},
+	for _, tt := range []struct {
+		user, pw     string
+		fastN, slowN int32
+	}{
+		{"alice", "wrong", 1, 0},
+		{"alice", "bob pw", 1, 0},
+		{"bob", "wrong", 0, 1},
+		{"carol", "x", 0, 1},   // no password: the costliest dummy
+		{"mallory", "x", 0, 1}, // unknown: the costliest dummy
+		{"mallory", "bob pw", 0, 1},
 	} {
-		ok, took := attempt(tt.user, tt.pw)
+		ok, took, fastN, slowN := attempt(tt.user, tt.pw)
 		if ok {
 			t.Fatalf("%s/%s accepted", tt.user, tt.pw)
+		}
+		if fastN != tt.fastN || slowN != tt.slowN {
+			t.Errorf("%s: verified fast %d, slow %d; want %d, %d", tt.user, fastN, slowN, tt.fastN, tt.slowN)
 		}
 		if took < target {
 			t.Errorf("%s: failure took %v, less than the target %v", tt.user, took, target)
 		}
 	}
 	// A success is not padded.
-	if ok, _ := attempt("alice", "alice pw"); !ok || slept.Load() != 0 {
+	if ok, _, _, _ := attempt("alice", "alice pw"); !ok || slept.Load() != 0 {
 		t.Errorf("success: ok %v, slept %v", ok, time.Duration(slept.Load()))
 	}
+	// CheckPassword leaves the wait to the caller.
+	_, wait, err := a.CheckPassword(fakeConn{user: "alice"}, []byte("wrong"))
+	if err == nil || wait < target-10*time.Millisecond {
+		t.Errorf("CheckPassword: wait %v, err %v; want about %v", wait, err, target-fast.took)
+	}
 
-	// Under load the target follows slower verifications, up to twice
-	// the measured value.
+	// Under load the target follows slower verifications, up to four
+	// times the measured value.
 	a.pad.observe(target * 3 / 2)
 	if got := time.Duration(a.pad.target.Load()); got != target*3/2 {
 		t.Errorf("target after a slower verification = %v, want %v", got, target*3/2)
 	}
-	a.pad.observe(10 * target)
-	if got := time.Duration(a.pad.target.Load()); got != 2*target {
-		t.Errorf("target after a very slow verification = %v, want the cap %v", got, 2*target)
+	a.pad.observe(100 * target)
+	if got := time.Duration(a.pad.target.Load()); got != 4*target {
+		t.Errorf("target after a very slow verification = %v, want the cap %v", got, 4*target)
+	}
+}
+
+func TestAcquireLanes(t *testing.T) {
+	t.Parallel()
+
+	a := NewUsers(nil)
+	slots := cap(a.hashing)
+	wide := &argon2Hash{threads: uint8(min(slots+3, 255))}
+	if n := a.acquire(wide); n != slots || len(a.hashing) != slots {
+		t.Errorf("acquire(p=%d) took %d of %d slots", wide.threads, n, slots)
+	}
+	a.release(slots)
+	if n := a.acquire(bcryptHash("")); n != 1 {
+		t.Errorf("acquire(bcrypt) took %d slots", n)
+	}
+	a.release(1)
+
+	// Two multi-lane verifications and single ones do not deadlock.
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			h := PasswordHash(bcryptHash(""))
+			if i%3 == 0 {
+				h = wide
+			}
+			n := a.acquire(h)
+			time.Sleep(time.Millisecond)
+			a.release(n)
+		})
+	}
+	wg.Wait()
+	if len(a.hashing) != 0 {
+		t.Errorf("%d slots still held", len(a.hashing))
 	}
 }
 

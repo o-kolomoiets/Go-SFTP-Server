@@ -25,9 +25,11 @@ Incompatible changes are prefixed with **BREAKING:**.
   `idle_timeout` or `keepalive_timeout`.
 - Opt-in password login: `auth.methods = ["publickey", "password"]` and
   `password_hash` (argon2id; bcrypt accepted for imported accounts). Each
-  attempt checks one hash, and a failure takes as long as the costliest
-  configured hash, so the response time does not reveal which users exist;
-  checks run at most one per CPU. A method missing from `auth.methods` is
+  attempt checks one hash; unknown users are checked against a stand-in of
+  the costliest configured hash, and failures wait until it would have
+  finished, so the response time does not reveal which users exist (fully
+  with one kind of hash; `config validate` warns about mixed ones). Checks
+  run at most one per available CPU. A method missing from `auth.methods` is
   refused, and its keys or passwords are not loaded. `gosftpd user hash-password [--stdin]` prints a hash, and
   `user add --password-hash` adds it to a user.
 - `server.crypto_policy`: `modern` (default, as before) or `compat`, which

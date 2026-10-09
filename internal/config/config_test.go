@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
@@ -940,6 +941,17 @@ methods = ["password"]
 	warns = mustValidate(t, c)
 	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "is not below max_connections (16)") }) {
 		t.Errorf("warnings %q lack the max_connections case", warns)
+	}
+
+	// Hashes of several kinds or costs.
+	bc, err := bcrypt.GenerateFromPassword([]byte("pw"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ = load(t, fmt.Sprintf(base, hash)+"[users.carol]\npassword_hash = \""+string(bc)+"\"\naccess = { m = \"read\" }\n[auth]\nmethods = [\"password\"]\n")
+	warns = mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "password hashes of 2 different kinds") }) {
+		t.Errorf("warnings %q lack the mixed hash kinds", warns)
 	}
 
 	// "password" without any password_hash is useless.

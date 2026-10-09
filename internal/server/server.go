@@ -384,9 +384,10 @@ func (ca *connAuth) config() *ssh.ServerConfig {
 			return pk(md, key)
 		}
 	}
-	if pw := cfg.PasswordCallback; pw != nil {
+	if cfg.PasswordCallback != nil {
 		cfg.PasswordCallback = func(md ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			if !ca.user.same(md.User()) {
+				ca.fail()
 				return nil, errUserChanged
 			}
 			// A connection opened before its source was banned guesses
@@ -394,7 +395,14 @@ func (ca *connAuth) config() *ssh.ServerConfig {
 			if ca.banned() {
 				return nil, errBanned
 			}
-			return pw(md, password)
+			perms, wait, err := ca.s.cfg.Auth.CheckPassword(md, password)
+			if err != nil {
+				// Count before the wait, so that the source's other
+				// connections see a ban as early as possible.
+				ca.fail()
+				time.Sleep(wait)
+			}
+			return perms, err
 		}
 	}
 	cfg.PreAuthConnCallback = func(pc ssh.ServerPreAuthConn) {
@@ -412,9 +420,10 @@ func (ca *connAuth) config() *ssh.ServerConfig {
 		}
 		ca.failures.Add(1)
 		ca.attemptedUser.Store(md.User())
-		if method == auth.MethodPassword {
-			ca.fail() // every wrong password counts, at once
-		} else {
+		// Wrong passwords were counted by the callback, each at once. Other
+		// failures, including passwords sent while the method is off,
+		// count once per connection.
+		if method != auth.MethodPassword || ca.s.sshCfg.PasswordCallback == nil {
 			ca.keyFailures.Add(1)
 		}
 	}

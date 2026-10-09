@@ -51,7 +51,13 @@ type PasswordHash interface {
 	class() string
 	// dummy returns a hash of the same class that matches no password.
 	dummy() PasswordHash
+	// lanes is the number of threads a verification uses.
+	lanes() int
 }
+
+// PasswordClass names the kind and cost of a hash. Hashes of one class
+// take equally long to verify.
+func PasswordClass(h PasswordHash) string { return h.class() }
 
 type argon2Hash struct {
 	memory, time uint32
@@ -62,6 +68,8 @@ type argon2Hash struct {
 func (h *argon2Hash) class() string {
 	return fmt.Sprintf("argon2id m=%d t=%d p=%d len=%d", h.memory, h.time, h.threads, len(h.key))
 }
+
+func (h *argon2Hash) lanes() int { return int(h.threads) }
 
 func (h *argon2Hash) dummy() PasswordHash {
 	d := &argon2Hash{memory: h.memory, time: h.time, threads: h.threads, salt: make([]byte, len(h.salt)), key: make([]byte, len(h.key))}
@@ -80,6 +88,8 @@ type bcryptHash []byte
 func (h bcryptHash) verify(password []byte) bool {
 	return bcrypt.CompareHashAndPassword(h, password) == nil
 }
+
+func (h bcryptHash) lanes() int { return 1 }
 
 func (h bcryptHash) class() string {
 	cost, _ := bcrypt.Cost(h)

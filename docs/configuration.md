@@ -236,12 +236,16 @@ check (about 19 MiB and tens of milliseconds of CPU with the default
 parameters). New hashes use argon2id with m=19456, t=2, p=1. Imported
 hashes may use argon2id with up to 64 MiB, t ≤ 10 and p ≤ 8, or bcrypt with
 cost 10 to 14 (`$2a$`, `$2b$`, `$2y$`). So that the response time does not
-tell which users exist, a failed attempt takes as long as checking the
-costliest hash in the configuration: unknown users and users without a
-password are checked against a default argon2id hash, and every failure
-then waits the rest of that time without using the CPU. Costly imported
-hashes therefore make every failed attempt slower; re-hash them with
-`gosftpd user hash-password` when you can.
+tell which users exist, unknown users and users without a password are
+checked against a stand-in of the costliest hash in the configuration, and
+every failed attempt then waits, without using the CPU, until checking that
+hash would have finished. With hashes of one kind and cost (all made by
+`gosftpd user hash-password`) unknown and real users do exactly the same
+work, under any load. With several kinds or costs, attempts made one at a
+time still take equally long, but parallel attempts can tell users of the
+cheaper hashes apart, and every failed attempt takes as long as the
+costliest hash; `config validate` warns about this. Re-hash imported
+passwords with `gosftpd user hash-password` when you can.
 
 ### Permissions
 

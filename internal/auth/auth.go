@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -82,20 +83,20 @@ type Authenticator struct {
 	any   *account // zero-config: accepts every valid user name
 	now   func() time.Time
 	// hashing bounds concurrent password verifications, and so the memory
-	// they take before authentication.
+	// and CPU they take before authentication: one slot per lane, one lane
+	// per available CPU. multi serializes taking several slots, so that two
+	// multi-lane verifications cannot each hold half.
 	hashing chan struct{}
-	// dummy stands in for the hash of unknown users and users without a
-	// password; pad equalizes the time of failures.
-	dummy PasswordHash
-	pad   *padder
+	multi   sync.Mutex
+	// pad equalizes the time of failures.
+	pad *padder
 }
 
 func newAuthenticator(n int) *Authenticator {
 	return &Authenticator{
 		users:   make(map[string]*account, n),
 		now:     time.Now,
-		hashing: make(chan struct{}, runtime.NumCPU()),
-		dummy:   defaultDummy(),
+		hashing: make(chan struct{}, runtime.GOMAXPROCS(0)),
 		pad:     newPadder(nil),
 	}
 }
@@ -182,31 +183,61 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 	return perms, nil
 }
 
-// Password is an ssh.ServerConfig.PasswordCallback. It verifies one hash,
-// the user's own or a dummy, and a failure takes as long as the costliest
-// configured hash (see padder), whichever user it names.
+// Password is an ssh.ServerConfig.PasswordCallback: CheckPassword, and a
+// failure waits as long as CheckPassword says.
 func (a *Authenticator) Password(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
-	if len(password) == 0 || len(password) > MaxPasswordLen {
-		return nil, errDenied
+	perms, wait, err := a.CheckPassword(conn, password)
+	if err != nil {
+		a.pad.sleep(wait)
 	}
-	a.pad.measure(a.hashing)
+	return perms, err
+}
+
+// CheckPassword verifies one hash, the user's own or a dummy (see padder).
+// After a failure the caller must wait for the returned duration before
+// answering, so that the failure takes as long whichever user it names; the
+// caller can count the failure first.
+func (a *Authenticator) CheckPassword(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, time.Duration, error) {
+	if len(password) == 0 || len(password) > MaxPasswordLen {
+		return nil, 0, errDenied
+	}
+	a.pad.measure(a)
 	name := conn.User()
 	acc := a.lookup(name)
-	h := a.dummy
+	h := a.pad.dummy
 	if acc != nil && acc.password != nil {
 		h = acc.password
 	}
-	a.hashing <- struct{}{}
+	n := a.acquire(h)
 	start := time.Now()
 	ok := h.verify(password)
 	took := time.Since(start)
-	<-a.hashing
+	a.release(n)
 	a.pad.observe(took)
 	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
-		a.pad.pad(took)
-		return nil, errDenied
+		return nil, a.pad.rest(took), errDenied
 	}
-	return newPermissions(name, MethodPassword), nil
+	return newPermissions(name, MethodPassword), 0, nil
+}
+
+// acquire takes a hashing slot per lane of h, at most all of them, and
+// returns how many it took.
+func (a *Authenticator) acquire(h PasswordHash) int {
+	n := min(h.lanes(), cap(a.hashing))
+	if n > 1 {
+		a.multi.Lock()
+		defer a.multi.Unlock()
+	}
+	for range n {
+		a.hashing <- struct{}{}
+	}
+	return n
+}
+
+func (a *Authenticator) release(n int) {
+	for range n {
+		<-a.hashing
+	}
 }
 
 // allowed checks the account-wide conditions of a login.
