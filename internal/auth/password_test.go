@@ -291,14 +291,20 @@ func TestPasswordPadding(t *testing.T) {
 	if ok, _, _, _ := attempt("alice", "alice pw"); !ok || slept.Load() != 0 {
 		t.Errorf("success: ok %v, slept %v", ok, time.Duration(slept.Load()))
 	}
-	// CheckPassword leaves the wait to the caller.
+	// CheckPassword leaves the wait to the caller: the check and the wait
+	// together last the target. (The check itself may run long on a busy
+	// machine, so only the sum is fixed.)
+	start := time.Now()
 	_, wait, err := a.CheckPassword(fakeConn{user: "alice"}, []byte("wrong"))
-	if err == nil || wait < target-10*time.Millisecond {
-		t.Errorf("CheckPassword: wait %v, err %v; want about %v", wait, err, target-fast.took)
+	checked := time.Since(start)
+	if target := time.Duration(a.pad.target.Load()); err == nil || wait <= 0 || checked+wait < target {
+		t.Errorf("CheckPassword: checked in %v, wait %v, err %v; want the sum to be at least %v", checked, wait, err, target)
 	}
 
 	// Under load the target follows slower verifications, up to four
-	// times the measured value.
+	// times the measured value. (Slow checks above may have raised it
+	// already on a busy machine.)
+	a.pad.target.Store(int64(target))
 	a.pad.observe(target * 3 / 2)
 	if got := time.Duration(a.pad.target.Load()); got != target*3/2 {
 		t.Errorf("target after a slower verification = %v, want %v", got, target*3/2)
