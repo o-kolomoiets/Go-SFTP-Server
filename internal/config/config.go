@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 
@@ -356,16 +357,36 @@ func decodeError(file string, err error) error {
 	return fmt.Errorf("%s: %w", file, err)
 }
 
-// withPosition returns pe.ErrorWithPosition, or pe.Error where that
+// withPosition returns pe.ErrorWithPosition, or a plain message where that
 // panics: BurntSushi/toml v1.6.0 reports line 0 for an escape that the end
-// of the file cuts off on the first line (found by FuzzParseConfig).
+// of the file cuts off on the first line (found by FuzzParseConfig). Its
+// messages can hold the NUL it reads at the end of the file, so control
+// characters are escaped.
 func withPosition(pe toml.ParseError) (msg string) {
 	defer func() {
 		if recover() != nil {
-			msg = pe.Error()
+			where := "at the end of the file"
+			if pe.Position.Line > 0 {
+				where = "at line " + strconv.Itoa(pe.Position.Line)
+			}
+			msg = "toml: error: " + printable(pe.Message) + " " + where
 		}
 	}()
-	return pe.ErrorWithPosition()
+	return printable(pe.ErrorWithPosition())
+}
+
+// printable shows control characters in s, except line breaks, as \xNN
+// escapes.
+func printable(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) && r != '\n' {
+			fmt.Fprintf(&b, "\\x%02x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func unknownKeys(file string, md toml.MetaData) error {

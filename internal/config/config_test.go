@@ -170,8 +170,16 @@ func TestSyntaxErrorHasPosition(t *testing.T) {
 	// panicked.
 	for _, data := range []string{`"\`, `a = "C:\`, "config_version = 1\n[mounts.m]\npath = \"C:\\"} {
 		path := writeConfig(t, dir, data)
-		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), path) {
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), path) {
 			t.Errorf("Load(%q) = %v, want an error naming the file", data, err)
+			continue
+		}
+		if strings.ContainsFunc(err.Error(), func(r rune) bool { return r < ' ' && r != '\n' && r != '\t' }) {
+			t.Errorf("Load(%q): error %q has control characters", data, err)
+		}
+		if !strings.HasPrefix(data, "config_version") && !strings.Contains(err.Error(), "at the end of the file") {
+			t.Errorf("Load(%q): error %q does not say where", data, err)
 		}
 	}
 }
