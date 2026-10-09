@@ -535,7 +535,7 @@ func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *s
 	}
 
 	h := sftpd.New(vs, al, log, s.cfg.MaxOpenHandles)
-	rs := sftp.NewRequestServer(ch, h.Handlers(), sftp.WithStartDirectory("/"))
+	rs := sftp.NewRequestServer(sftpd.NewGate(ch), h.Handlers(), sftp.WithStartDirectory("/"))
 	err := rs.Serve()
 
 	// Without exit-status OpenSSH scp reports failure even after a complete

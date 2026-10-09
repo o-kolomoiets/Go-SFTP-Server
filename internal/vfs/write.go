@@ -418,8 +418,12 @@ func (s *Session) openResume(v *view, rel string, appendOnly bool) (*WriteHandle
 func (o *MountOptions) freeName(rel string, try func(cand string) error) (string, error) {
 	dir, base := filepath.Split(rel)
 	stem, ext := splitExt(base, o.CompoundExts)
-	for n := 1; n <= o.MaxRenameAttempts; n++ {
+	for n, tried := 1, 0; tried < o.MaxRenameAttempts; n++ {
 		cand := filepath.Join(dir, candidate(o.RenameTemplate, stem, strconv.Itoa(n), ext))
+		if cand == rel {
+			continue // a shortened stem gave back the original name
+		}
+		tried++
 		err := try(cand)
 		if err == nil {
 			return cand, nil
@@ -457,10 +461,14 @@ func splitExt(name string, compound []string) (stem, ext string) {
 }
 
 // candidate expands the rename template, shortening stem so the name fits
-// maxNameLen bytes without splitting a UTF-8 sequence.
+// maxNameLen bytes without splitting a UTF-8 sequence. An extension too long
+// to keep is shortened as part of the stem.
 func candidate(tmpl, stem, n, ext string) string {
 	expand := func(stem string) string {
 		return strings.NewReplacer("{stem}", stem, "{n}", n, "{ext}", ext).Replace(tmpl)
+	}
+	if len(expand("")) > maxNameLen/2 {
+		stem, ext = stem+ext, ""
 	}
 	stems := max(strings.Count(tmpl, "{stem}"), 1)
 	limit := max((maxNameLen-len(expand("")))/stems, 1)

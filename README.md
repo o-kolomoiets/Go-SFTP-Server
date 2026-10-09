@@ -10,9 +10,10 @@ never silently overwrite a file, and a JSON audit log of every action. No
 root, no database, no web UI.**
 
 > **Status: alpha.** It works with OpenSSH, paramiko, rclone and lftp, with
-> several users and per-folder permissions. Hardening for servers exposed to
-> the internet is in progress (v0.3): connection limits and bans are there,
-> atomic uploads and fuzzing are not yet. See the [plan](#plan).
+> several users and per-folder permissions, and has the hardening of v0.3:
+> connection limits, bans, disk limits, atomic uploads and fuzzing. Before
+> exposing it, read the [hardening guide](docs/security/hardening.md). See
+> the [plan](#plan).
 
 ## What it is, and what it is not
 
@@ -139,7 +140,8 @@ log.
 - [Quick start](docs/quickstart.md)
 - [Configuration](docs/configuration.md)
 - [Audit log](docs/audit-log.md)
-- [Security model](docs/security.md)
+- [Security model](docs/security.md), [threat model](docs/security/threat-model.md)
+  and [hardening guide](docs/security/hardening.md)
 - [Client compatibility](docs/interop.md)
 - [Release checklist](docs/release-checklist.md)
 - [Design decisions](docs/adr/)
@@ -147,8 +149,8 @@ log.
 ## Plan
 
 The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md) (in
-Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.3): atomic
-uploads, a `version` conflict mode, disk limits, fuzzing.
+Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.4): reload
+on SIGHUP, metrics, hooks, systemd integration and SSH certificates.
 
 ## Contributing
 
