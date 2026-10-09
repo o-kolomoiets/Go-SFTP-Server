@@ -52,7 +52,8 @@ sftp> ls -l
 ```
 
 Uploading over an existing file does not replace it: the upload goes to
-`notes (1).txt`. Use `--on-conflict overwrite` or `reject` to change that.
+`notes (1).txt`. Use `--on-conflict overwrite`, `reject` or `version` (keeps
+the old file in `.versions`) to change that.
 
 ## Several users with a configuration file
 

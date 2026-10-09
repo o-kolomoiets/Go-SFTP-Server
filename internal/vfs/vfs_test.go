@@ -168,7 +168,7 @@ func TestOpenValidation(t *testing.T) {
 		{spec("a", base, ConflictRename), spec("h", filepath.Join(base, UserPlaceholder), ConflictRename)},
 		{spec("h", filepath.Join(base, UserPlaceholder, "x"), ConflictRename)},
 		{spec("a", filepath.Join(base, "missing"), ConflictRename)},
-		{spec("a", base, "version")},
+		{spec("a", base, "merge")},
 		{{Name: "a", Path: base, Options: badOpts}},
 	} {
 		if tbl, err := Open(specs, Options{}); err == nil {
@@ -692,12 +692,12 @@ func TestStatAndRemoveErrors(t *testing.T) {
 func TestParseConflictPolicy(t *testing.T) {
 	t.Parallel()
 
-	for _, ok := range []string{"rename", "reject", "overwrite"} {
+	for _, ok := range []string{"rename", "reject", "overwrite", "version"} {
 		if _, err := ParseConflictPolicy(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	if _, err := ParseConflictPolicy("version"); err == nil {
-		t.Error("version accepted before it is implemented")
+	if _, err := ParseConflictPolicy("merge"); err == nil {
+		t.Error("unknown policy accepted")
 	}
 }

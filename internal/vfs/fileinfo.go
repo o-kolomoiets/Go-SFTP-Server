@@ -23,6 +23,14 @@ func (d dirInfo) ModTime() time.Time { return d.modTime }
 func (d dirInfo) IsDir() bool        { return true }
 func (d dirInfo) Sys() any           { return nil }
 
+// namedInfo is a file's info under another name.
+type namedInfo struct {
+	fs.FileInfo
+	name string
+}
+
+func (n namedInfo) Name() string { return n.name }
+
 func (t *Table) rootInfo() fs.FileInfo {
 	return dirInfo{name: "/", perm: 0o555, modTime: t.started}
 }
@@ -77,7 +85,8 @@ func (sliceLister) Close() error { return nil }
 // dirLister reads a directory lazily, in batches.
 type dirLister struct {
 	f         *os.File
-	hideLinks bool // symlinks = "deny"
+	hideLinks bool   // symlinks = "deny"
+	hide      string // an entry not listed: the versions directory
 	entries   []fs.FileInfo
 	done      bool
 	err       error
@@ -89,7 +98,7 @@ func (l *dirLister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	for !l.done && int64(len(l.entries)) < offset+int64(len(ls)) {
 		des, err := l.f.ReadDir(readDirBatch)
 		for _, de := range des {
-			if !visible(de.Type()) || (l.hideLinks && de.Type()&fs.ModeSymlink != 0) {
+			if !visible(de.Type()) || (l.hideLinks && de.Type()&fs.ModeSymlink != 0) || isTempName(de.Name()) || de.Name() == l.hide {
 				continue
 			}
 			fi, err := de.Info()

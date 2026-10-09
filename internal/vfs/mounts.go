@@ -28,17 +28,18 @@ const (
 	ConflictRename    ConflictPolicy = "rename"
 	ConflictReject    ConflictPolicy = "reject"
 	ConflictOverwrite ConflictPolicy = "overwrite"
+	// ConflictVersion moves the existing file into the versions directory
+	// when an upload or rename replaces it.
+	ConflictVersion ConflictPolicy = "version"
 )
 
 // ParseConflictPolicy validates a policy name.
 func ParseConflictPolicy(s string) (ConflictPolicy, error) {
 	switch p := ConflictPolicy(s); p {
-	case ConflictRename, ConflictReject, ConflictOverwrite:
+	case ConflictRename, ConflictReject, ConflictOverwrite, ConflictVersion:
 		return p, nil
-	case "version":
-		return "", errors.New(`on_conflict "version" is planned for v0.3; use rename, reject or overwrite`)
 	default:
-		return "", fmt.Errorf("unknown conflict policy %q (want rename, reject or overwrite)", s)
+		return "", fmt.Errorf("unknown conflict policy %q (want rename, reject, overwrite or version)", s)
 	}
 }
 
@@ -128,6 +129,29 @@ const (
 // DefaultCompoundExtensions are kept whole when naming copies.
 var DefaultCompoundExtensions = []string{".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"}
 
+// Version retention defaults.
+const (
+	DefaultVersionsDir    = ".versions"
+	DefaultVersionsKeep   = 10
+	DefaultVersionsMaxAge = 30 * 24 * time.Hour
+	// MaxVersionsKeep is the largest accepted versions.keep.
+	MaxVersionsKeep = 10000
+	// DefaultMinFreeSpace is the free space below which uploads are refused.
+	DefaultMinFreeSpace = 1 << 30
+)
+
+// VersionsOptions configure on_conflict = "version".
+type VersionsOptions struct {
+	// Dir is the directory, at the top of the mount, that holds old
+	// versions: <Dir>/<path of the file>/<stem>.<UTC time><ext>. Clients
+	// can read it but not change it.
+	Dir string
+	// Keep is how many old versions of a file are kept; 0 keeps all.
+	Keep int
+	// MaxAge removes versions older than this; 0 keeps them forever.
+	MaxAge time.Duration
+}
+
 // MountOptions configure how a mount handles uploads and attributes.
 type MountOptions struct {
 	OnConflict        ConflictPolicy
@@ -142,6 +166,19 @@ type MountOptions struct {
 	// name, in all of the user's sessions.
 	StatRedirect bool
 	Symlinks     SymlinkPolicy
+
+	// MaxFileSize refuses writes past this size; 0 means no limit.
+	MaxFileSize int64
+	// MinFreeSpace refuses opening a file for writing while the mount's
+	// filesystem has less free space; 0 turns the check off.
+	MinFreeSpace int64
+	// AtomicUploads writes uploads to a hidden temporary file and gives it
+	// its name only when the upload is closed; resume is not possible.
+	AtomicUploads bool
+	// Fsync flushes an upload to disk before it gets its name (with
+	// AtomicUploads or on_conflict = "version").
+	Fsync    bool
+	Versions VersionsOptions
 }
 
 // DefaultMountOptions returns the documented defaults.
@@ -156,6 +193,8 @@ func DefaultMountOptions() MountOptions {
 		Resume:            ResumeAppendOnly,
 		StatRedirect:      true,
 		Symlinks:          SymlinksInsideOnly,
+		MinFreeSpace:      DefaultMinFreeSpace,
+		Versions:          VersionsOptions{Dir: DefaultVersionsDir, Keep: DefaultVersionsKeep, MaxAge: DefaultVersionsMaxAge},
 	}
 }
 
@@ -187,6 +226,18 @@ func (o MountOptions) Validate() error {
 	}
 	if o.Umask&^fs.ModePerm != 0 {
 		errs = append(errs, fmt.Errorf("umask %#o has bits outside 0777", uint32(o.Umask)))
+	}
+	if o.MaxFileSize < 0 || o.MinFreeSpace < 0 {
+		errs = append(errs, errors.New("max_file_size and min_free_space must not be negative"))
+	}
+	if d := o.Versions.Dir; d == "" || d == "." || d == ".." || strings.ContainsAny(d, `/\`+"\x00") || strings.HasPrefix(d, tempPrefix) {
+		errs = append(errs, fmt.Errorf("versions.dir %q must be one directory name", d))
+	}
+	if o.Versions.Keep < 0 || o.Versions.Keep > MaxVersionsKeep {
+		errs = append(errs, fmt.Errorf("versions.keep must be between 0 (all) and %d", MaxVersionsKeep))
+	}
+	if o.Versions.MaxAge < 0 {
+		errs = append(errs, errors.New("versions.max_age must not be negative"))
 	}
 	return errors.Join(errs...)
 }

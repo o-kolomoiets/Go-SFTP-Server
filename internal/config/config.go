@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -106,6 +107,18 @@ type MountOptions struct {
 	Resume             string   `toml:"resume"`
 	StatRedirect       bool     `toml:"stat_redirect"`
 	Symlinks           string   `toml:"symlinks"`
+	MaxFileSize        ByteSize `toml:"max_file_size"`
+	MinFreeSpace       ByteSize `toml:"min_free_space"`
+	AtomicUploads      bool     `toml:"atomic_uploads"`
+	Fsync              bool     `toml:"fsync"`
+	Versions           Versions `toml:"versions"`
+}
+
+// Versions configures on_conflict = "version".
+type Versions struct {
+	Dir    string   `toml:"dir"`
+	Keep   int      `toml:"keep"`
+	MaxAge Duration `toml:"max_age"`
 }
 
 func (o MountOptions) clone() MountOptions {
@@ -210,6 +223,9 @@ func Default() *Config {
 				Resume:             string(o.Resume),
 				StatRedirect:       o.StatRedirect,
 				Symlinks:           string(o.Symlinks),
+				MaxFileSize:        ByteSize(o.MaxFileSize),
+				MinFreeSpace:       ByteSize(o.MinFreeSpace),
+				Versions:           Versions{Dir: o.Versions.Dir, Keep: o.Versions.Keep, MaxAge: Duration(o.Versions.MaxAge)},
 			},
 			Flatten: true,
 		},
@@ -535,6 +551,74 @@ func (d *Duration) UnmarshalText(b []byte) error {
 
 // MarshalText implements encoding.TextMarshaler.
 func (d Duration) MarshalText() ([]byte, error) { return []byte(time.Duration(d).String()), nil }
+
+// ByteSize is a size in bytes, written as an integer or as a string with a
+// unit: "500MB", "10GiB" (B, kB, MB, GB, TB; KiB, MiB, GiB, TiB).
+type ByteSize int64
+
+var byteUnits = []struct {
+	name string
+	mult int64
+}{
+	{"TiB", 1 << 40},
+	{"GiB", 1 << 30},
+	{"MiB", 1 << 20},
+	{"KiB", 1 << 10},
+	{"TB", 1e12},
+	{"GB", 1e9},
+	{"MB", 1e6},
+	{"kB", 1e3},
+	{"KB", 1e3},
+	{"B", 1},
+}
+
+// UnmarshalTOML implements toml.Unmarshaler.
+func (b *ByteSize) UnmarshalTOML(v any) error {
+	switch v := v.(type) {
+	case int64:
+		if v < 0 {
+			return fmt.Errorf("size %d must not be negative", v)
+		}
+		*b = ByteSize(v)
+		return nil
+	case string:
+		n, err := ParseByteSize(v)
+		if err != nil {
+			return err
+		}
+		*b = n
+		return nil
+	}
+	return fmt.Errorf("want a size such as \"10GiB\" or a number of bytes, got %v", v)
+}
+
+// ParseByteSize parses a size with an optional unit.
+func ParseByteSize(s string) (ByteSize, error) {
+	t := strings.TrimSpace(s)
+	mult := int64(1)
+	for _, u := range byteUnits {
+		if num, ok := strings.CutSuffix(t, u.name); ok {
+			t, mult = strings.TrimSpace(num), u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(t, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("invalid size %q (examples: \"0\", \"500MB\", \"10GiB\")", s)
+	}
+	return ByteSize(n * mult), nil
+}
+
+// MarshalText implements encoding.TextMarshaler, with the largest binary
+// unit that divides the size.
+func (b ByteSize) MarshalText() ([]byte, error) {
+	for _, u := range byteUnits[:4] {
+		if b != 0 && int64(b)%u.mult == 0 {
+			return []byte(strconv.FormatInt(int64(b)/u.mult, 10) + u.name), nil
+		}
+	}
+	return []byte(strconv.FormatInt(int64(b), 10)), nil
+}
 
 // FileMode is a permission mask written as an octal string such as "0027".
 type FileMode fs.FileMode

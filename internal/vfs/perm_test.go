@@ -356,7 +356,11 @@ func TestValidateOptions(t *testing.T) {
 	}
 	for name, mod := range map[string]func(*MountOptions){
 		"policy":       func(o *MountOptions) { o.OnConflict = "merge" },
-		"version":      func(o *MountOptions) { o.OnConflict = "version" },
+		"versions dir": func(o *MountOptions) { o.Versions.Dir = "a/b" },
+		"temp dir":     func(o *MountOptions) { o.Versions.Dir = ".gosftpd-x" },
+		"keep":         func(o *MountOptions) { o.Versions.Keep = -1 },
+		"max age":      func(o *MountOptions) { o.Versions.MaxAge = -time.Hour },
+		"max size":     func(o *MountOptions) { o.MaxFileSize = -1 },
 		"no {n}":       func(o *MountOptions) { o.RenameTemplate = "{stem} copy{ext}" },
 		"slash":        func(o *MountOptions) { o.RenameTemplate = "{stem}/{n}{ext}" },
 		"placeholder":  func(o *MountOptions) { o.RenameTemplate = "{stem} {date} {n}{ext}" },

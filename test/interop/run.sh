@@ -156,6 +156,17 @@ path = "$C/inbox"
 path = "$C/home/{user}"
 create = true
 
+[mounts.synced]
+path = "$C/synced"
+create = true
+on_conflict = "version"
+versions = { keep = 3 }
+
+[mounts.atomic]
+path = "$C/atomic"
+create = true
+atomic_uploads = true
+
 [users.reader]
 authorized_keys = ["$(cat "$WORK/id_reader.pub")"]
 access = { public = "read" }
@@ -166,7 +177,7 @@ access = { inbox = "upload" }
 
 [users.admin]
 authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
-access = { public = "read", inbox = "full", home = "full" }
+access = { public = "read", inbox = "full", home = "full", synced = "full", atomic = "full" }
 
 [users.courier]
 password_hash = "$COURIER_HASH"
@@ -249,9 +260,45 @@ rm /inbox/new.txt
 BATCH
 # shellcheck disable=SC2046
 sftp -P "$PORT" $(as admin) -b "$C/admin.batch" admin@127.0.0.1 >"$C/admin.out" 2>&1 && pass "admin: sftp batch" || { fail "admin batch"; cat "$C/admin.out" >&2; }
-grep -q 'home' "$C/admin.out" && grep -q 'inbox' "$C/admin.out" && grep -q 'public' "$C/admin.out" && pass "admin: sees three mounts" || fail "admin: mounts"
+grep -q 'home' "$C/admin.out" && grep -q 'inbox' "$C/admin.out" && grep -q 'public' "$C/admin.out" && pass "admin: sees the mounts" || fail "admin: mounts"
 cmp -s "$WORK/local/short.txt" "$C/home/admin/notes.txt" && pass "admin: home created" || fail "admin: home"
 [ ! -e "$C/inbox/new.txt" ] && pass "admin: delete" || fail "admin: delete"
+
+# on_conflict=version: the replaced file is kept in the unlisted .versions.
+cat >"$C/versions.batch" <<BATCH
+put $WORK/local/short.txt /synced/doc.txt
+put $WORK/local/upload.bin /synced/doc.txt
+ls -a /synced
+ls /synced/.versions/doc.txt
+-rm /synced/.versions/doc.txt/*
+BATCH
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as admin) -b "$C/versions.batch" admin@127.0.0.1 >"$C/versions.out" 2>&1 && pass "version: sftp batch" || { fail "version batch"; cat "$C/versions.out" >&2; }
+VERSIONS=("$C"/synced/.versions/doc.txt/doc.*.txt)
+cmp -s "$WORK/local/upload.bin" "$C/synced/doc.txt" && [ "${#VERSIONS[@]}" = 1 ] && cmp -s "$WORK/local/short.txt" "${VERSIONS[0]}" &&
+	pass "version: new content under the name, old one kept" || fail "version: $(ls -laR "$C/synced")"
+! grep -q '\.versions$' "$C/versions.out" && grep -q "$(basename "${VERSIONS[0]}")" "$C/versions.out" &&
+	pass "version: .versions unlisted but readable by path" || fail "version listing: $(cat "$C/versions.out")"
+grep -q 'Permission denied' "$C/versions.out" && [ -e "${VERSIONS[0]}" ] && pass "version: versions cannot be deleted" || fail "version: delete in .versions"
+grep -q '"conflict":"versioned".*"version_path":"/synced/.versions/doc.txt/doc\.' "$C/audit.jsonl" &&
+	pass "version: audit has version_path" || fail "version: audit lacks version_path"
+
+# atomic_uploads: a client killed mid-upload leaves nothing under the name.
+printf 'put %s /atomic/big.bin\n' "$WORK/local/upload.bin" >"$C/atomic.batch"
+# shellcheck disable=SC2046
+sftp -l 400 -P "$PORT" $(as admin) -b "$C/atomic.batch" admin@127.0.0.1 >/dev/null 2>&1 &
+SFTP_PID=$!
+temp_files() { compgen -G "$C/atomic/.gosftpd-*.part" >/dev/null; }
+for _ in $(seq 100); do temp_files && break; sleep 0.1; done
+if temp_files && [ ! -e "$C/atomic/big.bin" ]; then pass "atomic: upload in a hidden temporary file"; else fail "atomic: no temporary file: $(ls -la "$C/atomic")"; fi
+kill -9 "$SFTP_PID"; wait "$SFTP_PID" 2>/dev/null || true
+for _ in $(seq 100); do temp_files || break; sleep 0.1; done
+if ! temp_files && [ ! -e "$C/atomic/big.bin" ]; then pass "atomic: kill -9 of the client leaves no file"; else fail "atomic: left $(ls -la "$C/atomic")"; fi
+grep -q '"event":"fs.upload".*"path":"/atomic/big.bin".*"result":"aborted"' "$C/audit.jsonl" &&
+	pass "atomic: audit has the aborted upload" || fail "atomic: audit lacks the aborted upload"
+# shellcheck disable=SC2046
+scp -q -P "$PORT" $(as admin) "$WORK/local/upload.bin" admin@127.0.0.1:/atomic/big.bin && cmp -s "$WORK/local/upload.bin" "$C/atomic/big.bin" &&
+	pass "atomic: scp upload" || fail "atomic: scp upload"
 
 # courier: password login (OpenSSH reads the password from SSH_ASKPASS).
 # sftp -b sets BatchMode, which disables password prompts; the first value wins.
@@ -313,6 +360,20 @@ if command -v "$RCLONE" >/dev/null 2>&1; then
 		pass "rclone: original kept, new version as a copy" || fail "rclone: $(ls "$C/inbox/rc"): $(cat "$C/inbox/rc/a.txt")"
 	"${RC[@]}" about "$(remote admin)inbox" >"$C/rclone.about" 2>&1 && grep -q 'Total' "$C/rclone.about" &&
 		pass "rclone: about (statvfs)" || fail "rclone about: $(cat "$C/rclone.about")"
+	# on_conflict=version: repeated syncs into the mount root keep the name,
+	# add no copies and leave the unlisted .versions alone (keep = 3).
+	mkdir -p "$WORK/local/sync"
+	sync_ok=yes
+	for i in 1 2 3 4 5; do
+		printf 'version %s\n' "$i" >"$WORK/local/sync/a.txt"
+		touch -d "2020-01-0$i 12:00" "$WORK/local/sync/a.txt"
+		"${RC[@]}" sync "$WORK/local/sync" "$(remote admin)synced" 2>>"$C/rclone-sync.err" || sync_ok=no
+	done
+	[ "$sync_ok" = yes ] && pass "rclone: sync x5 into a version mount" || fail "rclone sync: $(tail -3 "$C/rclone-sync.err")"
+	[ "$(ls -A "$C/synced" | tr '\n' ' ')" = ".versions a.txt " ] && grep -qx 'version 5' "$C/synced/a.txt" &&
+		pass "rclone: sync leaves only the synced file" || fail "rclone sync: $(ls -A "$C/synced")"
+	[ "$(cat "$C"/synced/.versions/a.txt/* | sort | tr '\n' ' ')" = "version 2 version 3 version 4 " ] &&
+		pass "rclone: the 3 newest versions are kept" || fail "rclone versions: $(ls -A "$C/synced/.versions/a.txt" 2>&1)"
 else
 	missing rclone
 fi

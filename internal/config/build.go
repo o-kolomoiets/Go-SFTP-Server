@@ -59,6 +59,15 @@ func (o MountOptions) toVFS() (vfs.MountOptions, error) {
 		Resume:            resume,
 		StatRedirect:      o.StatRedirect,
 		Symlinks:          links,
+		MaxFileSize:       int64(o.MaxFileSize),
+		MinFreeSpace:      int64(o.MinFreeSpace),
+		AtomicUploads:     o.AtomicUploads,
+		Fsync:             o.Fsync,
+		Versions: vfs.VersionsOptions{
+			Dir:    o.Versions.Dir,
+			Keep:   o.Versions.Keep,
+			MaxAge: time.Duration(o.Versions.MaxAge),
+		},
 	}, nil
 }
 

@@ -58,6 +58,8 @@ var statusMap = []struct {
 	{vfs.ErrExists, sftp.ErrSSHFxFailure, "file already exists", "error"},
 	{vfs.ErrImmutable, sftp.ErrSSHFxPermissionDenied, "existing data is immutable", "denied"},
 	{vfs.ErrBusy, sftp.ErrSSHFxFailure, "file is busy: another upload is writing it", "denied"},
+	{vfs.ErrTooLarge, sftp.ErrSSHFxFailure, "file too large (max_file_size)", "denied"},
+	{vfs.ErrNoSpace, sftp.ErrSSHFxFailure, "not enough free space on the server", "denied"},
 	{vfs.ErrResumeDisabled, sftp.ErrSSHFxFailure, "resume is disabled", "denied"},
 	{vfs.ErrIsDir, sftp.ErrSSHFxFailure, "is a directory", "error"},
 	{vfs.ErrNotDir, sftp.ErrSSHFxFailure, "not a directory", "error"},
