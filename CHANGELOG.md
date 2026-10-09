@@ -53,6 +53,17 @@ Incompatible changes are prefixed with **BREAKING:**.
 - `max_file_size` (off by default), checked against the end of every write
   and on truncation, and `min_free_space` (1 GiB), checked when a file is
   opened for writing. Sizes accept units such as `"10GiB"`.
+- Fuzzing: six targets (path resolution, confinement on a tree with
+  symlinks, conflict copy names, the configuration, `authorized_keys`, and
+  arbitrary SFTP packets against the real handlers) run 60 seconds each on
+  every change and 10 minutes each night.
+- CI checks coverage floors of the security packages (unit and interop
+  coverage merged), audits `crypto_policy = "modern"` with ssh-audit, and
+  runs OpenSSF Scorecard weekly; all actions are pinned by commit SHA.
+- Documents: [threat model](docs/security/threat-model.md),
+  [hardening guide](docs/security/hardening.md), a manual WinSCP checklist,
+  and [ADR 0004](docs/adr/0004-limits-extension.md) on
+  `limits@openssh.com`.
 
 ### Changed
 
@@ -68,11 +79,20 @@ Incompatible changes are prefixed with **BREAKING:**.
   `"none"`.
 - Names starting with `.gosftpd-` (in any case) are reserved: hidden from
   listings and refused in paths.
+- **BREAKING:** `rename_template` must contain `{n}` exactly once and be
+  valid UTF-8 of at most 64 bytes, so that copy names always fit 255 bytes;
+  `config validate` names a template that does not.
 
 ### Fixed
 
 - A client that disconnected right after logging in left no `auth.success`
   and `conn.close` events.
+- A client that sent READ or WRITE with a guessed handle before the answer
+  to its OPEN raced with the OPEN inside `pkg/sftp`, which could crash the
+  server; such requests now wait for the answer (found by fuzzing).
+- Copy names under `on_conflict = "rename"` could exceed 255 bytes for
+  names with a very long extension; a shortened name could equal the
+  original.
 
 ## [0.2.0] - 2026-10-09
 

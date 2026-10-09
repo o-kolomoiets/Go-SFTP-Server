@@ -10,7 +10,8 @@ change. Tested:
 | rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount |
 | lftp | 4.9.2 | put, get, listing |
 
-WinSCP, FileZilla and Cyberduck are not tested automatically yet.
+WinSCP, FileZilla and Cyberduck are not tested automatically yet; WinSCP has
+a manual checklist below.
 
 ## Notes per client
 
@@ -56,6 +57,24 @@ name; with the rename policy the check is answered for the copy
 WinSCP uploads files larger than 100 KiB to a temporary `NAME.filepart` and
 renames it; the `upload` permission covers that. If you prefer direct
 uploads, disable "Transfer to temporary filename" in the transfer settings.
+
+WinSCP is not tested automatically yet (planned with the Windows track).
+Before a release, check it by hand: gosftpd on Linux, WinSCP 6.x on Windows
+with default settings, SFTP protocol, a user with the `upload` preset on
+mount `inbox` and one with `full` on mount `files`.
+
+| # | Step | Expected |
+|---|---|---|
+| 1 | First connection | The host key fingerprint WinSCP shows matches the one gosftpd printed at start. |
+| 2 | Upload a 50 KiB file as `upload` | It appears under its name, without a `.filepart` (direct upload). |
+| 3 | Upload a 5 MiB file as `upload` | WinSCP uses `.filepart` and renames it; no error, the file is complete, its time is the local one. |
+| 4 | Upload the same 5 MiB file again (`rename`) | WinSCP asks to overwrite; on "Yes" the upload succeeds and lands as `file (1).ext`; the original is unchanged. |
+| 5 | Delete, rename, download as `upload` | Refused with "Permission denied"; the session stays usable. |
+| 6 | Upload into `files` with `on_conflict = "version"` as `full`, twice | The name keeps the new content; the old one is under `.versions/`, readable by typing the path. |
+| 7 | Cancel a 1 GiB upload halfway, with `atomic_uploads = true` | No file under the name and no `.filepart` left; the audit log has `result = "aborted"`. |
+| 8 | Disconnect and reconnect during a large upload with `resume = "append-only"` | WinSCP offers to resume; the result is identical to the source. |
+| 9 | Synchronize a local folder to `files` (Commands → Synchronize) | Runs without errors; a second run finds nothing to do. |
+| 10 | Check the audit log | Every step is there with `user`, `path` and `final_path`. |
 
 ### Clients that append at offset 0
 

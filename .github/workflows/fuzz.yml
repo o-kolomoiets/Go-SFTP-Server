@@ -1,0 +1,60 @@
+name: Fuzz
+
+# Every fuzz target for 10 minutes each night (ROADMAP §8.3). A failure
+# uploads the failing input and opens an issue; commit the input under
+# testdata/fuzz/ as a regression seed together with the fix.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.fn }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ./internal/vfs, fn: FuzzResolve }
+          - { pkg: ./internal/vfs, fn: FuzzResolveInRoot }
+          - { pkg: ./internal/vfs, fn: FuzzConflictName }
+          - { pkg: ./internal/config, fn: FuzzParseConfig }
+          - { pkg: ./internal/auth, fn: FuzzAuthorizedKeys }
+          - { pkg: ./internal/sftpd, fn: FuzzRequestServer }
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: Fuzz for 10 minutes
+        env:
+          PKG: ${{ matrix.pkg }}
+          FN: ${{ matrix.fn }}
+        run: go test -run='^$' -fuzz="^${FN}\$" -fuzztime=10m "$PKG"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.fn }}
+          path: "**/testdata/fuzz/${{ matrix.fn }}"
+      - name: Open an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FN: ${{ matrix.fn }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="fuzz: $FN failed"
+          if [ "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq length)" = 0 ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "The nightly fuzz run of \`$FN\` failed: $RUN. The failing input is in the run's artifacts; add it under \`testdata/fuzz/$FN/\` with the fix."
+          fi

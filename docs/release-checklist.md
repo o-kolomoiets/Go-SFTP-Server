@@ -10,10 +10,12 @@ note in the CHANGELOG.
 1. All work for the release is merged and CI is green on `main`, including
    both interop jobs (OpenSSH 9.6 with paramiko, rclone and lftp; OpenSSH
    10.6).
-2. `CHANGELOG.md`: move the `Unreleased` entries into
+2. For a minor release, the manual WinSCP checklist in
+   [interop.md](interop.md#winscp) passes.
+3. `CHANGELOG.md`: move the `Unreleased` entries into
    `## [X.Y.Z] - YYYY-MM-DD`, keep an empty `Unreleased`, and update the
    comparison links at the bottom. Merge that change through a pull request.
-3. Locally on the merged `main`:
+4. Locally on the merged `main`:
 
    ```sh
    make lint test interop
@@ -24,20 +26,20 @@ note in the CHANGELOG.
 
 ## Publish
 
-4. On GitHub: **Releases → Draft a new release**.
+5. On GitHub: **Releases → Draft a new release**.
    - **Choose a tag**: type `vX.Y.Z`, then "Create new tag on publish";
      target `main`.
    - **Title**: `vX.Y.Z`.
    - **Notes**: the CHANGELOG section of the version.
    - Mark it as a pre-release for `-alpha`, `-beta` and `-rc` versions.
    - **Publish release**.
-5. Publishing starts the **Release** workflow, which builds the binaries with
+6. Publishing starts the **Release** workflow, which builds the binaries with
    GoReleaser and attaches the archives and `checksums.txt` to the release.
    Wait for it to finish.
 
 ## After
 
-6. Download one archive and check it:
+7. Download one archive and check it:
 
    ```sh
    sha256sum --check --ignore-missing checksums.txt
@@ -45,9 +47,9 @@ note in the CHANGELOG.
    ```
 
    `gosftpd version` must print `vX.Y.Z` and the commit of the tag.
-7. `go list -m github.com/o-kolomoiets/go-sftp-server@vX.Y.Z` finds the
+8. `go list -m github.com/o-kolomoiets/go-sftp-server@vX.Y.Z` finds the
    version through the Go module proxy.
-8. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
+9. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
 
 ## Patch releases
 

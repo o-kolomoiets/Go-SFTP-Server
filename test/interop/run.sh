@@ -27,7 +27,10 @@ missing() { # missing CLIENT: skip, or fail with REQUIRE_CLIENTS=1
 PYTHON=${PYTHON:-python3}
 RCLONE=${RCLONE:-rclone}
 
-(cd "$ROOT" && go build -o "$WORK/gosftpd" ./cmd/gosftpd)
+# With GOCOVERDIR set, the binary records coverage there (ROADMAP §8.5).
+COVER=()
+if [ -n "${GOCOVERDIR:-}" ]; then COVER=(-cover -coverpkg=./...); fi
+(cd "$ROOT" && go build "${COVER[@]}" -o "$WORK/gosftpd" ./cmd/gosftpd)
 # gosftpd refuses to run as root; containers often are root.
 ROOT_FLAG=()
 if [ "$(id -u)" = 0 ]; then ROOT_FLAG=(--allow-root); fi

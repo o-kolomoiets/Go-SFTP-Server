@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ConflictPolicy decides what an upload does when the target file exists.
@@ -109,6 +110,9 @@ const (
 	maxPathLen = 4096
 	maxDepth   = 64
 	maxNameLen = 255
+	// maxTemplateLen bounds rename_template, so that a candidate name
+	// always fits maxNameLen.
+	maxTemplateLen = 64
 
 	// DefaultRenameTemplate names copies made by the rename policy.
 	DefaultRenameTemplate = "{stem} ({n}){ext}"
@@ -245,8 +249,11 @@ func (o MountOptions) Validate() error {
 // ValidateRenameTemplate checks a rename_template: it must contain {n}, may
 // contain {stem} and {ext}, and no other braces or path separators.
 func ValidateRenameTemplate(t string) error {
-	if !strings.Contains(t, "{n}") {
-		return fmt.Errorf("rename_template %q must contain {n}", t)
+	if strings.Count(t, "{n}") != 1 {
+		return fmt.Errorf("rename_template %q must contain {n} once", t)
+	}
+	if len(t) > maxTemplateLen || !utf8.ValidString(t) {
+		return fmt.Errorf("rename_template must be valid UTF-8 of at most %d bytes", maxTemplateLen)
 	}
 	if strings.ContainsAny(t, `/\`+"\x00") {
 		return fmt.Errorf("rename_template %q must not contain slashes", t)

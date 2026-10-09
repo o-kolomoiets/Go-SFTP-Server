@@ -156,7 +156,7 @@ with `reason = "home_not_dir"` is written.
 |---|---|---|
 | `flatten` | `true` | A user who can access exactly one mount sees it as `/`. Only in `[defaults]`. |
 | `on_conflict` | `"rename"` | Upload to an existing file: `rename`, `reject`, `overwrite` or `version`, see below. |
-| `rename_template` | `"{stem} ({n}){ext}"` | Name of the copy with `rename`. Must contain `{n}`; may contain `{stem}` and `{ext}`; no slashes. |
+| `rename_template` | `"{stem} ({n}){ext}"` | Name of the copy with `rename`. Must contain `{n}` once; may contain `{stem}` and `{ext}`; no slashes; at most 64 bytes. |
 | `max_rename_attempts` | `100` | Numbered names tried before `{n}` becomes a UTC timestamp with a random suffix (1–10000). |
 | `compound_extensions` | `[".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]` | Extensions kept whole: `a.tar.gz` becomes `a (1).tar.gz`. |
 | `resume` | `"append-only"` | Continuing an upload into an existing file (OpenSSH `reput`, paramiko mode `a`): `append-only` or `off`. |

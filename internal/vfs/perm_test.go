@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -362,6 +363,9 @@ func TestValidateOptions(t *testing.T) {
 		"max age":      func(o *MountOptions) { o.Versions.MaxAge = -time.Hour },
 		"max size":     func(o *MountOptions) { o.MaxFileSize = -1 },
 		"no {n}":       func(o *MountOptions) { o.RenameTemplate = "{stem} copy{ext}" },
+		"two {n}":      func(o *MountOptions) { o.RenameTemplate = "{stem} {n}-{n}{ext}" },
+		"long":         func(o *MountOptions) { o.RenameTemplate = strings.Repeat("x", 62) + "{n}" },
+		"not UTF-8":    func(o *MountOptions) { o.RenameTemplate = "\xff{n}" },
 		"slash":        func(o *MountOptions) { o.RenameTemplate = "{stem}/{n}{ext}" },
 		"placeholder":  func(o *MountOptions) { o.RenameTemplate = "{stem} {date} {n}{ext}" },
 		"attempts":     func(o *MountOptions) { o.MaxRenameAttempts = 0 },

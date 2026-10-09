@@ -1,8 +1,9 @@
-# Security model (draft)
+# Security model
 
-What gosftpd protects, how, and where its protection ends. Report
-vulnerabilities as described in [SECURITY.md](../SECURITY.md). A full threat
-model and a hardening guide follow in v0.3.
+What gosftpd protects, how, and where its protection ends. The
+[threat model](security/threat-model.md) maps threats to these controls; the
+[hardening guide](security/hardening.md) says how to deploy them. Report
+vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
 ## What a client can do
 
@@ -48,6 +49,19 @@ model and a hardening guide follow in v0.3.
   up to about `max_connections_per_ip` more password checks than
   `after_failures` before the ban stops it.
 - Refused connections are logged at most 10 per second.
+
+## Protocol robustness
+
+The SFTP protocol is served by `pkg/sftp`'s request server; gosftpd's
+handlers see only parsed requests. The parsers that face clients and
+administrators are fuzzed in CI on every change and nightly: path
+resolution inside and outside a tree with symlinks, names of conflict
+copies, the configuration, `authorized_keys`, and a stream of arbitrary
+SFTP packets against the real handlers. Fuzzing found a data race in
+`pkg/sftp` v1.13: a client that sends READ or WRITE with a guessed handle
+before its OPEN is answered races with the OPEN, which could crash the
+server. gosftpd holds such requests until the OPEN is answered; clients
+learn handles from that answer, so they are not slowed down.
 
 ## Confinement
 
@@ -124,7 +138,9 @@ The default `crypto_policy = "modern"` offers key exchange
 `mlkem768x25519-sha256` and `curve25519-sha256`; ciphers ChaCha20-Poly1305,
 AES-GCM and AES-CTR; MACs HMAC-SHA2 with encrypt-then-MAC. `compat` adds NIST
 curve and SHA-2 Diffie-Hellman key exchange and MACs without
-encrypt-then-MAC, for old clients; scanners such as ssh-audit flag those.
+encrypt-then-MAC, for old clients; scanners such as ssh-audit flag those (see
+[hardening.md](security/hardening.md#cryptography) for the expected findings;
+CI checks that `modern` has none that fail).
 SHA-1, CBC and DSA are never offered. Host and user RSA keys sign with SHA-2
 only, and user RSA keys need at least 2048 bits. `verify-required` in `authorized_keys` is refused, because the SSH
 library does not check the user-verification flag of security keys.

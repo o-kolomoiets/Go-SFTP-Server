@@ -11,7 +11,7 @@
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
 | M2 MVP | v0.2.0 | ✅ | 18 / 18 |
-| M3 Hardening | v0.3.0 | 🔄 | 8 / 12 |
+| M3 Hardening | v0.3.0 | 🔄 | 10 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
@@ -108,10 +108,10 @@
 | M3-05 | `atomic_uploads`, janitor | ✅ | Временный `.gosftpd-<16hex>.part` (0600) рядом с целью, скрыт из листинга, имена `.gosftpd-*` клиентам недоступны (без учёта регистра); публикация при `Close` переименованием без перезаписи, политика конфликтов — в этот момент; обрыв или отказ записи — файл удаляется; FSTAT/FSETSTAT доходят до временного файла; `fsync`; докачка выключена; janitor при старте и каждые 6 ч (старше 24 ч, без read-only mount'ов), RMDIR убирает осиротевшие temp-файлы; interop: `kill -9` клиента не оставляет файла |
 | M3-06 | `on_conflict = "version"` | ✅ | Старый файл уходит в `.versions/<rel>/<stem>.<UTC>[-N]<ext>`, `keep` и `max_age` (лишние версии вытесняет только пользователь с `delete` или `overwrite`); posix-rename версионирует цель так же; хватает права `write`; `.versions` не листится (sync-инструменты не пытаются его удалить), читается по пути, менять его нельзя; аудит `conflict=versioned`, `version_path`; interop: `rclone sync` ×5 без лишних файлов |
 | M3-07 | Профиль `compat` и тест профилей криптографии | ✅ | `server.crypto_policy`; тест: каждое имя есть в `SupportedAlgorithms`, нет в `InsecureAlgorithms` и в списке «никогда»; клиент только с compat-алгоритмами входит лишь при `compat` |
-| M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ⬜ | |
-| M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ⬜ | |
-| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | 🔄 | `--allow-root` сделан (M3a); WinSCP и `limits@openssh.com` — в M3c |
-| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ⬜ | |
+| M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ✅ | 6 целей: `FuzzResolve`, `FuzzResolveInRoot`, `FuzzConflictName`, `FuzzParseConfig` (с проверкой Encode → Load), `FuzzAuthorizedKeys`, `FuzzRequestServer` (поток SFTP-пакетов в настоящие обработчики); `fuzz-smoke` 60 с на цель в PR, `fuzz.yml` ночью по 10 мин с issue при падении. Найдено и исправлено: гонка в `pkg/sftp` (READ/WRITE с угаданным handle до ответа на OPEN могли уронить процесс) закрыта `sftpd.Gate`; имена копий длиннее 255 байт; `rename_template` ограничен. Покрытие unit + interop объединяется через `covdata`, пороги: vfs, config, sftpd ≥ 85%, auth ≥ 90% (`test/coverage.sh`) |
+| M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ✅ | `test/ssh-audit.sh` (ssh-audit 3.9.0): у `modern` нет fail, у `compat` fail только на NIST-кривых; `scorecard.yml` раз в неделю; все actions закреплены по commit SHA |
+| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | 🔄 | `--allow-root` (M3a); ADR 0004 (`limits@openssh.com`: пока без изменений, предложить upstream, вернуться с бенчмарками); чек-лист WinSCP в `docs/interop.md` — прогон вручную перед релизом (владелец) |
+| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | 🔄 | `docs/security/threat-model.md`, `docs/security/hardening.md` (в т.ч. ожидаемые замечания ssh-audit и пример systemd-unit); DoD M3 выполнен, кроме ручной проверки WinSCP; релиз — владелец |
 | M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ✅ | `internal/testutil.AsyncConn`; idle и keepalive проверяются в `testing/synctest` на `net.Pipe` |
 
 ## M3b: Windows (можно после v1.0)

@@ -16,10 +16,10 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
@@ -33,7 +33,7 @@ jobs:
         run: |
           go mod tidy -diff
           cd tools && go mod tidy -diff
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
       - name: actionlint
@@ -48,28 +48,42 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, windows-latest]
         go: ["1.26.x", "1.27.x"]
     runs-on: ${{ matrix.os }}
+    env:
+      # One cell records coverage for the floors (job coverage, ROADMAP §8.5).
+      COVERAGE: ${{ matrix.os == 'ubuntu-24.04' && matrix.go == '1.27.x' && 'true' || '' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
       - name: go test -race
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !env.COVERAGE
         run: go test -race -shuffle=on -count=1 ./...
+      - name: go test -race with coverage
+        if: env.COVERAGE
+        run: |
+          mkdir -p coverage/unit
+          go test -race -shuffle=on -count=1 -cover -coverpkg=./... ./... -args -test.gocoverdir="$PWD/coverage/unit"
       - name: go test
         if: runner.os == 'Windows'
         run: go test -shuffle=on -count=1 ./...
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.COVERAGE
+        with:
+          name: coverage-unit
+          path: coverage/unit
+          retention-days: 7
 
   min-go:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - run: go build ./... && go vet ./...
@@ -90,10 +104,10 @@ jobs:
       CLIENT_RCLONE_VERSION: v1.75.0
       CLIENT_RCLONE_SHA256: aa2804e08f48250e71009c727124b6341cd0288465804a9a09d14663cabafbaa
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
@@ -130,24 +144,105 @@ jobs:
       - name: Clients against gosftpd
         run: |
           ssh -V
+          if [ -n "$RECORD_COVERAGE" ]; then
+            mkdir -p coverage/e2e
+            export GOCOVERDIR="$PWD/coverage/e2e"
+          fi
           test/interop/run.sh
+        env:
+          RECORD_COVERAGE: ${{ matrix.clients && 'true' || '' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.clients
+        with:
+          name: coverage-e2e
+          path: coverage/e2e
+          retention-days: 7
+
+  coverage:
+    needs: [test, interop]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          path: coverage
+      - name: Coverage floors of the security packages
+        run: test/coverage.sh coverage/coverage-unit coverage/coverage-e2e
+
+  ssh-audit:
+    runs-on: ubuntu-24.04
+    env:
+      SSH_AUDIT_VERSION: 3.9.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: Install ssh-audit
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "ssh-audit==$SSH_AUDIT_VERSION"
+      - name: modern has no failure, compat only the documented ones
+        run: test/ssh-audit.sh "$RUNNER_TEMP/venv/bin/ssh-audit"
+
+  fuzz-smoke:
+    name: fuzz-smoke (${{ matrix.fn }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ./internal/vfs, fn: FuzzResolve }
+          - { pkg: ./internal/vfs, fn: FuzzResolveInRoot }
+          - { pkg: ./internal/vfs, fn: FuzzConflictName }
+          - { pkg: ./internal/config, fn: FuzzParseConfig }
+          - { pkg: ./internal/auth, fn: FuzzAuthorizedKeys }
+          - { pkg: ./internal/sftpd, fn: FuzzRequestServer }
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: Fuzz for 60 seconds
+        env:
+          PKG: ${{ matrix.pkg }}
+          FN: ${{ matrix.fn }}
+        run: go test -run='^$' -fuzz="^${FN}\$" -fuzztime=60s -fuzzminimizetime=10s "$PKG"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.fn }}
+          path: "**/testdata/fuzz/${{ matrix.fn }}"
 
   goreleaser-check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: v2.18.2
           args: check
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: v2.18.2
           args: release --snapshot --clean
@@ -158,7 +253,7 @@ jobs:
   vuln:
     runs-on: ubuntu-24.04
     steps:
-      - uses: golang/govulncheck-action@v1
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
         with:
           go-version-input: stable
           check-latest: true
@@ -167,7 +262,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, goreleaser-check, vuln]
+    needs: [lint, test, min-go, interop, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed
