@@ -107,6 +107,26 @@ func TestFailClosed(t *testing.T) {
 	}
 }
 
+// Probe does not wait for the next probe time.
+func TestProbe(t *testing.T) {
+	t.Parallel()
+
+	var buf buffer
+	l := New(&buf, slog.New(slog.DiscardHandler))
+	buf.setFail(true)
+	l.Event("fs.upload", slog.String("path", "/x"))
+	if l.Healthy() || l.Probe() {
+		t.Fatal("healthy while writes fail")
+	}
+	buf.setFail(false)
+	if !l.Probe() {
+		t.Fatal("Probe() = false although writes work")
+	}
+	if lines := buf.lines(); len(lines) == 0 || lines[len(lines)-1]["event"] != "server.audit_recovered" {
+		t.Errorf("no recovery event: %v", lines)
+	}
+}
+
 func TestShortWriteFails(t *testing.T) {
 	t.Parallel()
 

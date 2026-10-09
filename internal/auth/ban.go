@@ -6,6 +6,7 @@ import (
 	"container/list"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 )
@@ -73,6 +74,15 @@ type BanTable struct {
 
 // NewBanTable returns a BanTable; zero options take the defaults.
 func NewBanTable(o BanOptions) *BanTable {
+	o = o.withDefaults()
+	b := &BanTable{opts: o, now: time.Now}
+	b.start = b.now()
+	b.failures = newLRU[netip.Prefix, []time.Duration](o.MaxEntries)
+	b.bans = newLRU[netip.Prefix, time.Duration](o.MaxEntries)
+	return b
+}
+
+func (o BanOptions) withDefaults() BanOptions {
 	if o.AfterFailures <= 0 {
 		o.AfterFailures = DefaultBanAfterFailures
 	}
@@ -85,13 +95,33 @@ func NewBanTable(o BanOptions) *BanTable {
 	if o.MaxEntries <= 0 {
 		o.MaxEntries = DefaultMaxBanEntries
 	}
-	b := &BanTable{opts: o, now: time.Now}
-	b.start = b.now()
-	b.failures = newLRU[netip.Prefix, []time.Duration](o.MaxEntries)
-	b.bans = newLRU[netip.Prefix, time.Duration](o.MaxEntries)
-	return b
+	o.Exempt = slices.Clone(o.Exempt)
+	return o
 }
 
+// SetOptions changes the options of a running table (configuration
+// reload); zero options take the defaults. Recorded failures and bans
+// stay: a ban keeps the end it got, and a source newly exempt is let in
+// at once. A smaller MaxEntries evicts the oldest entries.
+func (b *BanTable) SetOptions(o BanOptions) {
+	o = o.withDefaults()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.opts = o
+	b.failures.resize(o.MaxEntries)
+	b.bans.resize(o.MaxEntries)
+}
+
+// Options returns the options, with the defaults applied.
+func (b *BanTable) Options() BanOptions {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	o := b.opts
+	o.Exempt = slices.Clone(o.Exempt)
+	return o
+}
+
+// exempt reports whether ip is never banned; b.mu must be held.
 func (b *BanTable) exempt(ip netip.Addr) bool {
 	for _, p := range b.opts.Exempt {
 		if p.Contains(ip) {
@@ -105,12 +135,12 @@ func (b *BanTable) elapsed() time.Duration { return b.now().Sub(b.start) }
 
 // Banned reports whether ip is banned now.
 func (b *BanTable) Banned(ip netip.Addr) bool {
-	if b.exempt(ip) {
-		return false
-	}
 	src := SourceKey(ip)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.exempt(ip) {
+		return false
+	}
 	until, ok := b.bans.get(src)
 	if !ok {
 		return false
@@ -126,12 +156,12 @@ func (b *BanTable) Banned(ip netip.Addr) bool {
 // (SourceKey). Failures of a source that is banned already are not
 // recorded, so one burst starts one ban.
 func (b *BanTable) Fail(ip netip.Addr) bool {
-	if b.exempt(ip) {
-		return false
-	}
 	src := SourceKey(ip)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.exempt(ip) {
+		return false
+	}
 	now := b.elapsed()
 	if until, ok := b.bans.get(src); ok && now < until {
 		return false
@@ -152,7 +182,11 @@ func (b *BanTable) Fail(ip netip.Addr) bool {
 }
 
 // Duration returns the length of a ban.
-func (b *BanTable) Duration() time.Duration { return b.opts.Duration }
+func (b *BanTable) Duration() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.opts.Duration
+}
 
 // Len returns the number of tracked sources and of bans.
 func (b *BanTable) Len() (failures, bans int) {
@@ -193,7 +227,17 @@ func (l *lru[K, V]) put(k K, v V) {
 		return
 	}
 	l.m[k] = l.ll.PushFront(&lruEntry[K, V]{k, v})
-	if l.ll.Len() > l.max {
+	l.evict()
+}
+
+// resize changes the bound, evicting the least recently used entries.
+func (l *lru[K, V]) resize(limit int) {
+	l.max = limit
+	l.evict()
+}
+
+func (l *lru[K, V]) evict() {
+	for l.ll.Len() > l.max {
 		oldest := l.ll.Back()
 		l.ll.Remove(oldest)
 		delete(l.m, oldest.Value.(*lruEntry[K, V]).k)

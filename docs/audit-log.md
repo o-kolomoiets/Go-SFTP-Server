@@ -37,11 +37,12 @@ never host paths. Strings from clients are JSON-escaped.
 | Event | Category | Fields |
 |---|---|---|
 | `server.start` | server | `version`, `listen` |
+| `server.reload` | server | `result` (`ok` or `error`), `duration_ms`; on error `reason`: `config` (the configuration cannot be read or is invalid), `mounts` or `audit_output` (the new `audit.output` cannot be opened); on success `restart_required` (comma-separated keys that changed but apply only at restart) and `disconnected` (connections closed by `reload.disconnect_removed_users`). The error itself goes to the operational log, since it can name host paths |
 | `server.stop` | server | |
 | `server.audit_recovered` | server | written when the log works again after a failure |
 | `conn.reject` | conn | `reason`: `banned`, `max_connections`, `max_connections_per_ip` or `max_preauth_connections`; `suppressed` (see below) |
 | `conn.accept` | conn | `client_version` (after the client sent its version line) |
-| `conn.close` | conn | `duration_ms`, `result` (`ok`, `error`, `idle_timeout`, `keepalive_timeout`) |
+| `conn.close` | conn | `duration_ms`, `result` (`ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked`: a reload refused the login, or closed the connection with `reload.disconnect_removed_users`) |
 | `auth.success` | auth | `auth_method` (`publickey` or `password`), `key_fp` (SHA256 fingerprint, public keys only), `failed_attempts` |
 | `auth.failure` | auth | `attempts`, `user` (the last name tried); written when a connection ends without login |
 | `auth.ban` | auth | `source` (IPv4 address or IPv6 /64), `duration_ms` |
@@ -78,7 +79,27 @@ every event that could not be stored to stderr.
 
 ## Rotation
 
-There is no built-in rotation yet. Use journald or Docker logging with
-`output = "stdout"`, or logrotate with `copytruncate` for a file (SIGHUP does
-not reopen the file before v0.4). The file is opened with `O_APPEND`, so
-`copytruncate` leaves no hole.
+There is no built-in rotation. Use journald or Docker logging with
+`output = "stdout"`, or logrotate for a file. SIGHUP reopens the file before
+anything else in a reload, whether the reload succeeds or not, and then
+writes `server.reload` into the new file:
+
+```
+/var/log/gosftpd/audit.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    create 0600 gosftpd gosftpd
+    postrotate
+        systemctl reload gosftpd
+    endscript
+}
+```
+
+If the file cannot be opened again (for example because logrotate created it
+with the wrong owner), gosftpd closes the rotated file and every write fails
+until the file can be opened: with `on_error = "fail-closed"` it refuses
+connections and changes, and the events go to stderr. It retries every 5
+seconds and recovers on its own. `copytruncate` works too: the file is opened
+with `O_APPEND`, so truncating it leaves no hole.

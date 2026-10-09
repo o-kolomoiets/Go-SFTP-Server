@@ -48,14 +48,16 @@ trusted.
 | Spoofing | Authentication bypass through state captured in callbacks (CVE-2024-45337) | Identity only from `ssh.Permissions`; `x/crypto` ≥ v0.57.0 | auth tests |
 | Spoofing | Guessing passwords of one user under another user's connection | The user name is pinned to the connection | server tests, paramiko interop |
 | Spoofing | Enumerating users by response time | One hash checked per attempt; unknown users against a stand-in of the costliest hash; failures padded | timing test (medians within 10%) |
+| Spoofing | A key, password or user revoked by a reload still logging in, or staying logged in | Every login is rechecked after the handshake against the configuration current then (x/crypto caches accepted keys); `reload.disconnect_removed_users` closes open connections whose login is revoked; a deleted `authorized_keys` file revokes its keys on reload | server and cli reload tests, interop |
 | Spoofing | MITM on first connection (N2) | Host key fingerprint and `known_hosts` line printed at start; SHA-2 signatures only | — |
 | Tampering | Leaving a mount through `..`, absolute paths, symlinks (N3) | One `resolve` for every path; `os.Root` per mount; links cannot be created | `FuzzResolve`, `FuzzResolveInRoot`, `FuzzRequestServer`, interop |
 | Tampering | Swapping a `{user}` home or a mount for a symlink or another mount (N4) | Parent `os.Root`, `Lstat` and `os.SameFile` for homes; `require_mountpoint` | vfs tests |
+| Tampering | A client writing a file gosftpd trusts (a key, an included user file, the configuration, the audit log), which a reload would apply (N3) | `CheckFS` refuses trusted files inside writable mounts, and host keys and configuration files inside any mount, at start and on reload | config tests |
 | Tampering | Overwriting other people's data (N3) | Conflict policy (`rename` by default), `overwrite` permission, append-only resume, one writer per file | vfs tests, interop |
 | Tampering | Destroying versions under `on_conflict = "version"` (N3) | `.versions` read-only for clients, also on case-insensitive filesystems; count-based pruning only for users who may delete or overwrite | vfs tests |
 | Tampering | A crafted packet stream corrupting server state (N3) | `pkg/sftp` request server behind `sftpd.Gate`, which keeps OPEN and requests with a handle apart (a data race in `pkg/sftp` v1.13) | `FuzzRequestServer` with the race detector (seeds on every test run, fuzzing in CI and nightly), gate tests |
 | Repudiation | "I did not upload that" | Audit log with `user`, `key_fp`, `session_id`, `path`, `final_path`, `version_path` | audit schema test |
-| Repudiation | Acting while the audit log cannot be written | `audit.on_error = "fail-closed"` | server tests |
+| Repudiation | Acting while the audit log cannot be written | `audit.on_error = "fail-closed"`; a file that cannot be reopened after rotation fails writes instead of filling the rotated file | server and cli tests |
 | Information disclosure | Host paths in errors, host accounts in listings | Fixed client messages; virtual owners | protocol tests |
 | Information disclosure | Reading through planted hard links or bind mounts (N4) | Not prevented by `os.Root`; documented limit | — |
 | Denial of service | Connection floods, slow handshakes (N1) | Connection limits before the handshake; handshake, idle and keepalive timeouts; bans | 1000-connection test, synctest timeouts |

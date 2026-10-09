@@ -45,6 +45,7 @@ type Config struct {
 	Users         map[string]*User  `toml:"users"`
 	Log           Log               `toml:"log"`
 	Audit         Audit             `toml:"audit"`
+	Reload        Reload            `toml:"reload"`
 
 	// File is the file the configuration was loaded from, "" when it was
 	// built from command-line flags. Files lists File and every included
@@ -66,6 +67,16 @@ type Server struct {
 	IdleTimeout         Duration `toml:"idle_timeout"`
 	KeepaliveInterval   Duration `toml:"keepalive_interval"`
 	ShutdownTimeout     Duration `toml:"shutdown_timeout"`
+}
+
+// Reload is the [reload] table: what a reload on SIGHUP does besides
+// switching new logins to the new configuration.
+type Reload struct {
+	// DisconnectRemovedUsers closes the connections whose login the new
+	// configuration would refuse: the user was removed, disabled or has
+	// expired, or the key or password used was removed or changed, or
+	// allow_from no longer matches.
+	DisconnectRemovedUsers bool `toml:"disconnect_removed_users"`
 }
 
 // Limits is the [limits] table.
@@ -257,6 +268,7 @@ type fileConfig struct {
 	Users         map[string]*User          `toml:"users"`
 	Log           Log                       `toml:"log"`
 	Audit         Audit                     `toml:"audit"`
+	Reload        Reload                    `toml:"reload"`
 }
 
 // includeFile is what an included file may contain.
@@ -302,6 +314,7 @@ func Load(path string) (*Config, error) {
 		Users:         raw.Users,
 		Log:           raw.Log,
 		Audit:         raw.Audit,
+		Reload:        raw.Reload,
 		File:          abs,
 		Files:         []string{abs},
 	}

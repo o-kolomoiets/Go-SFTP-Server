@@ -37,7 +37,8 @@ exchange point that you can run next to it as an ordinary user. See
 | Connection limits, bans after failed logins, idle and keepalive timeouts | alpha |
 | Opt-in password login (argon2id) | alpha |
 | Atomic uploads, file size and free space limits | alpha |
-| Reload on SIGHUP, metrics, hooks, systemd integration, SSH certificates | planned (v0.4) |
+| Reload on SIGHUP without dropping connections, `sd_notify` | alpha |
+| Metrics, hooks, systemd unit, SSH certificates | planned (v0.4) |
 | Docker image, deb/rpm packages, signed releases | planned (v0.5) |
 
 ## Quick start
@@ -149,8 +150,8 @@ log.
 ## Plan
 
 The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md) (in
-Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.4): reload
-on SIGHUP, metrics, hooks, systemd integration and SSH certificates.
+Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.4): user management
+commands, SSH certificates, metrics, hooks and systemd integration.
 
 ## Contributing
 

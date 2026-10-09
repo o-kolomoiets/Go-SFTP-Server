@@ -231,6 +231,7 @@ func (h slowHash) verify(pw []byte) bool {
 }
 func (h slowHash) class() string       { return h.cls }
 func (h slowHash) lanes() int          { return 1 }
+func (h slowHash) id() string          { return h.cls + " " + h.pw }
 func (h slowHash) dummy() PasswordHash { return slowHash{cls: h.cls, took: h.took, calls: h.calls} }
 
 // TestPasswordPadding checks the mechanism behind TestPasswordTiming with
@@ -315,13 +316,38 @@ func TestPasswordPadding(t *testing.T) {
 	}
 }
 
+// The authenticator of a reloaded configuration shares the hashing slots
+// of its predecessor, and its padding only while the classes are equal.
+func TestInherit(t *testing.T) {
+	t.Parallel()
+
+	fast := slowHash{cls: "fast", pw: "a"}
+	slow := slowHash{cls: "slow", pw: "b"}
+	prev := NewUsers([]User{{Name: "alice", Password: fast}})
+	same := NewUsers([]User{{Name: "bob", Password: fast}})
+	same.Inherit(prev)
+	if same.hashing != prev.hashing || same.pad != prev.pad {
+		t.Error("same classes: slots or padding not shared")
+	}
+	costlier := NewUsers([]User{{Name: "alice", Password: fast}, {Name: "bob", Password: slow}})
+	costlier.Inherit(prev)
+	if costlier.hashing != prev.hashing || costlier.pad == prev.pad {
+		t.Error("a new class: slots not shared or padding shared")
+	}
+	zero := New("", nil)
+	zero.Inherit(costlier)
+	if zero.hashing != prev.hashing || zero.pad == costlier.pad {
+		t.Error("fewer classes: slots not shared or padding shared")
+	}
+}
+
 func TestAcquireLanes(t *testing.T) {
 	t.Parallel()
 
 	a := NewUsers(nil)
-	slots := cap(a.hashing)
+	slots := cap(a.hashing.slots)
 	wide := &argon2Hash{threads: uint8(min(slots+3, 255))}
-	if n := a.acquire(wide); n != slots || len(a.hashing) != slots {
+	if n := a.acquire(wide); n != slots || len(a.hashing.slots) != slots {
 		t.Errorf("acquire(p=%d) took %d of %d slots", wide.threads, n, slots)
 	}
 	a.release(slots)
@@ -344,8 +370,8 @@ func TestAcquireLanes(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	if len(a.hashing) != 0 {
-		t.Errorf("%d slots still held", len(a.hashing))
+	if len(a.hashing.slots) != 0 {
+		t.Errorf("%d slots still held", len(a.hashing.slots))
 	}
 }
 

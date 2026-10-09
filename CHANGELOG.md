@@ -8,6 +8,45 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Added
+
+- Reload on SIGHUP (`systemctl reload`): the audit log file is reopened
+  first (for logrotate), then the configuration file is read and checked
+  again and applied to new logins: users, keys, passwords, mounts,
+  permissions, limits, bans settings and the log level. Open connections
+  keep the configuration they logged in under; with the new
+  `reload.disconnect_removed_users` they are closed when the new
+  configuration would refuse their login. An invalid file keeps the running
+  configuration. A key file that is missing or unsafe on reload revokes its
+  keys instead of failing the reload, and a mount that is unavailable is
+  left out until the next reload. A remounted mount directory is opened
+  anew for new logins. See [docs/configuration.md](docs/configuration.md#reload)
+  and [ADR 0005](docs/adr/0005-reload.md).
+- Audit event `server.reload`; `conn.close` result `revoked`.
+- `sd_notify`: `READY=1`, `RELOADING=1` with `MONOTONIC_USEC`, `STOPPING=1`
+  (`Type=notify-reload`).
+
+### Changed
+
+- **BREAKING:** `serve` refuses a configuration where the configuration
+  file, an included file, an `authorized_keys` file, a host key or the
+  audit log lies inside a mount clients can write, or a host key or
+  configuration file inside any mount: a client could add itself a key, or
+  read the host key. `serve --dir ~` is refused for that reason; serve a
+  subdirectory.
+- `serve` checks for root before anything else, so running as root without
+  `--allow-root` is reported first.
+- Every login is checked once more after the SSH handshake against the
+  configuration current then: a key removed by a reload while a client was
+  logging in is refused.
+
+### Fixed
+
+- TOML errors no longer print control characters or "line 0" for an escape
+  cut off at the end of the file.
+- A data race between an upload being opened and another session checking
+  whether a file is its own upload.
+
 ## [0.3.0] - 2026-10-09
 
 Hardening for servers exposed to the internet. Read

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -306,6 +307,10 @@ type MountSpec struct {
 type Options struct {
 	// Flatten exposes a user's only mount as "/" instead of "/<name>".
 	Flatten bool
+	// Unavailable names configured mounts that cannot be served now; their
+	// specs are left out. A session granted one finds it unavailable, as a
+	// missing home, and the other mounts keep their paths.
+	Unavailable []string
 }
 
 // Mount is an opened MountSpec.
@@ -316,7 +321,27 @@ type Mount struct {
 	create   bool
 	home     bool
 	opts     MountOptions
-	root     *os.Root // for a home mount: the parent directory
+	dir      *dir
+	root     *os.Root // dir.root; for a home mount: the parent directory
+}
+
+// dir is an opened mount directory. Generations of a table whose mount has
+// the same host directory share it; the last one closes it.
+type dir struct {
+	path string
+	root *os.Root
+	refs int // guarded by registry.dmu
+}
+
+// current reports whether d.path still names the directory d opened, and
+// not, for example, a disk mounted over it since.
+func (d *dir) current() bool {
+	fi, err := os.Stat(d.path)
+	if err != nil {
+		return false
+	}
+	rfi, err := d.root.Stat(".")
+	return err == nil && os.SameFile(fi, rfi)
 }
 
 // Name returns the mount name.
@@ -334,13 +359,24 @@ func (m *Mount) Home() bool { return m.home }
 // Options returns the mount options.
 func (m *Mount) Options() MountOptions { return m.opts }
 
-// Table is the set of mounts served to clients.
+// Table is the set of mounts served to clients. A configuration reload
+// makes a new generation of it (Reload); the generations share the
+// registries of uploads and of users' files, and the directories of
+// unchanged mounts.
 type Table struct {
 	mounts  []*Mount // sorted by name
 	byName  map[string]*Mount
 	flatten bool
 	started time.Time
+	refs    atomic.Int64     // see Acquire
+	missing map[string]error // configured mounts that are unavailable
+	*registry
+}
 
+// registry is the state every generation of a table shares. Its entries
+// name directories by their *dir, so a mount that now points elsewhere does
+// not see the entries made for its old directory.
+type registry struct {
 	// Open uploads of all sessions, to refuse a second writer on a file
 	// (ROADMAP §6.2: existing data must not change behind an upload).
 	wmu     sync.Mutex
@@ -349,38 +385,66 @@ type Table struct {
 	umu   sync.Mutex
 	users map[string]*userState // see users.go
 	now   func() time.Time
+
+	dmu sync.Mutex // guards dir.refs
 }
 
-// Open validates specs and opens an os.Root for every mount.
+// Open validates specs and opens an os.Root for every mount. The caller
+// holds the one reference to the table; Close drops it.
 func Open(specs []MountSpec, opts Options) (*Table, error) {
-	if len(specs) == 0 {
-		return nil, errors.New("no directories to serve")
+	t, _, err := open(specs, opts, &registry{users: map[string]*userState{}, now: time.Now}, nil)
+	return t, err
+}
+
+// Reload returns the next generation of t for a new configuration. Mounts
+// whose directory is the one t opened, at the same host path, keep it;
+// the others are opened anew. A mount that cannot be opened is unavailable
+// in the new table, as with Options.Unavailable; the returned warnings say
+// why. t is not changed: sessions started on it keep their mounts until
+// they end. The caller must hold a reference to t.
+func (t *Table) Reload(specs []MountSpec, opts Options) (*Table, []error, error) {
+	return open(specs, opts, t.registry, t)
+}
+
+func open(specs []MountSpec, opts Options, reg *registry, prev *Table) (*Table, []error, error) {
+	if len(specs)+len(opts.Unavailable) == 0 {
+		return nil, nil, errors.New("no directories to serve")
 	}
 	if err := ValidateSpecs(specs); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	t := &Table{
-		byName:  make(map[string]*Mount, len(specs)),
-		flatten: opts.Flatten,
-		started: time.Now(),
-		users:   map[string]*userState{},
-		now:     time.Now,
+		byName:   make(map[string]*Mount, len(specs)),
+		flatten:  opts.Flatten,
+		started:  time.Now(),
+		missing:  map[string]error{},
+		registry: reg,
 	}
+	for _, name := range opts.Unavailable {
+		t.missing[name] = ErrUnavailable
+	}
+	t.refs.Store(1)
+	var warns []error
 	for _, s := range specs {
-		m, err := openMount(s)
-		if err != nil {
+		m, err := t.openMount(s, prev)
+		switch {
+		case err != nil && prev == nil:
 			_ = t.Close()
-			return nil, fmt.Errorf("mount %q: %w", s.Name, err)
+			return nil, nil, fmt.Errorf("mount %q: %w", s.Name, err)
+		case err != nil:
+			t.missing[s.Name] = fmt.Errorf("%w: %w", ErrUnavailable, err)
+			warns = append(warns, fmt.Errorf("mount %q is unavailable: %w", s.Name, err))
+			continue
 		}
 		t.mounts = append(t.mounts, m)
 		t.byName[s.Name] = m
 	}
 	slices.SortFunc(t.mounts, func(a, b *Mount) int { return strings.Compare(a.name, b.name) })
-	return t, nil
+	return t, warns, nil
 }
 
-func openMount(s MountSpec) (*Mount, error) {
+func (t *Table) openMount(s MountSpec, prev *Table) (*Mount, error) {
 	m := &Mount{
 		name:     s.Name,
 		hostPath: s.Path,
@@ -389,21 +453,41 @@ func openMount(s MountSpec) (*Mount, error) {
 		home:     isHomePath(s.Path),
 		opts:     s.Options,
 	}
-	dir := s.Path
+	path := filepath.Clean(s.Path)
 	if m.home {
-		dir = filepath.Dir(s.Path)
+		path = filepath.Dir(path)
+	}
+	if d := prev.dirAt(path); d != nil && d.current() {
+		t.dmu.Lock()
+		d.refs++
+		t.dmu.Unlock()
+		m.dir, m.root = d, d.root
+		return m, nil
 	}
 	if s.Create {
-		if err := os.MkdirAll(dir, s.Options.dirPerm()); err != nil {
+		if err := os.MkdirAll(path, s.Options.dirPerm()); err != nil {
 			return nil, err
 		}
 	}
-	root, err := os.OpenRoot(dir)
+	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, err
 	}
-	m.root = root
+	m.dir, m.root = &dir{path: path, root: root, refs: 1}, root
 	return m, nil
+}
+
+// dirAt returns the directory a mount of t opened at path, or nil.
+func (t *Table) dirAt(path string) *dir {
+	if t == nil {
+		return nil
+	}
+	for _, m := range t.mounts {
+		if m.dir.path == path {
+			return m.dir
+		}
+	}
+	return nil
 }
 
 func isHomePath(p string) bool { return filepath.Base(p) == UserPlaceholder }
@@ -492,13 +576,38 @@ func (t *Table) Mount(name string) *Mount { return t.byName[name] }
 
 // Flattened reports whether a user who can access every mount sees it as
 // "/": flattening is on and there is exactly one mount.
-func (t *Table) Flattened() bool { return t.flatten && len(t.mounts) == 1 }
+func (t *Table) Flattened() bool { return t.flatten && len(t.mounts)+len(t.missing) == 1 }
 
-// Close releases all mount roots.
+// Acquire takes another reference to t, so that its directories stay open
+// while it is used: a server pins the table of a connection's configuration
+// for the connection's life, and sessions must only be started on a table
+// the caller holds a reference to. Acquire fails once the last reference
+// is gone.
+func (t *Table) Acquire() bool {
+	for {
+		n := t.refs.Load()
+		if n <= 0 {
+			return false
+		}
+		if t.refs.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
+// Close drops a reference to t. The last one closes the mount directories
+// that no other generation uses.
 func (t *Table) Close() error {
+	if t.refs.Add(-1) != 0 {
+		return nil
+	}
+	t.dmu.Lock()
+	defer t.dmu.Unlock()
 	errs := make([]error, 0, len(t.mounts))
 	for _, m := range t.mounts {
-		errs = append(errs, m.root.Close())
+		if m.dir.refs--; m.dir.refs == 0 {
+			errs = append(errs, m.dir.root.Close())
+		}
 	}
 	return errors.Join(errs...)
 }

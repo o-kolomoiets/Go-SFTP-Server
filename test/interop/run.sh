@@ -116,10 +116,17 @@ for ev in conn.accept auth.success session.start fs.upload fs.download fs.rename
 	grep -q "\"event\":\"$ev\"" "$WORK/rename/audit.jsonl" && pass "audit has $ev" || fail "audit lacks $ev"
 done
 
-# --- signals: HUP is ignored until reload exists, TERM exits cleanly -------
+# --- signals: HUP reloads and reopens the audit log, TERM exits cleanly ----
 RENAME_PID=${PIDS[0]}
-kill -HUP "$RENAME_PID"; sleep 0.5
+mv "$WORK/rename/audit.jsonl" "$WORK/rename/audit.jsonl.1" # as logrotate does
+kill -HUP "$RENAME_PID"
+for _ in $(seq 100); do
+	if grep -q '"event":"server.reload"' "$WORK/rename/audit.jsonl" 2>/dev/null; then break; fi
+	sleep 0.1
+done
 kill -0 "$RENAME_PID" 2>/dev/null && pass "SIGHUP does not stop the server" || fail "SIGHUP stopped the server"
+grep -q '"event":"server.reload".*"result":"ok"' "$WORK/rename/audit.jsonl" 2>/dev/null &&
+	pass "SIGHUP reloads and reopens the audit log" || fail "no server.reload in the reopened audit log"
 kill -TERM "$RENAME_PID"
 if wait "$RENAME_PID"; then pass "SIGTERM exits 0"; else fail "SIGTERM exit code $?"; fi
 grep -q '"event":"server.stop"' "$WORK/rename/audit.jsonl" && pass "audit has server.stop" || fail "audit lacks server.stop"
@@ -201,7 +208,8 @@ set +e; "$WORK/gosftpd" config validate --config "$C/typo.toml" 2>"$C/typo.err" 
 	pass "typo in a key: exit 2 naming the key" || fail "typo: exit $code: $(cat "$C/typo.err")"
 
 "$WORK/gosftpd" serve --config "$C/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$C/server.log" &
-PIDS+=($!)
+CFG_PID=$!
+PIDS+=("$CFG_PID")
 for _ in $(seq 100); do
 	if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then break; fi
 	sleep 0.1
@@ -400,6 +408,66 @@ fi
 # An unknown user is refused.
 # shellcheck disable=SC2046
 if sftp -P "$PORT" $(as admin) -b "$C/admin.batch" mallory@127.0.0.1 >/dev/null 2>&1; then fail "unknown user accepted"; else pass "unknown user refused"; fi
+
+# --- reload on SIGHUP (ROADMAP M4) ------------------------------------------
+reloads() { grep -c '"event":"server.reload"' "$C/audit.jsonl" || true; }
+hup() { # hup: SIGHUP the configuration server and wait for its server.reload event
+	local n
+	n=$(reloads)
+	kill -HUP "$CFG_PID"
+	for _ in $(seq 100); do
+		if [ "$(reloads)" -gt "$n" ]; then return 0; fi
+		sleep 0.1
+	done
+	return 1
+}
+ssh-keygen -q -t ed25519 -N '' -C newbie -f "$WORK/id_newbie"
+printf 'get readme.txt %s\n' "$C/newbie.got" >"$C/newbie.batch"
+echo pwd >"$C/pwd.batch"
+# shellcheck disable=SC2046
+if sftp -P "$PORT" $(as newbie) -b "$C/newbie.batch" newbie@127.0.0.1 >/dev/null 2>&1; then fail "reload: newbie accepted before it was added"; fi
+
+# A session opened before the reload keeps its configuration.
+mkfifo "$C/held.fifo"
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as partner) -b - partner@127.0.0.1 <"$C/held.fifo" >"$C/held.out" 2>&1 &
+HELD_PID=$!
+exec 4>"$C/held.fifo"
+echo "put $WORK/local/short.txt held1.txt" >&4
+for _ in $(seq 100); do
+	if [ -e "$C/inbox/held1.txt" ]; then break; fi
+	sleep 0.1
+done
+
+# Remove partner, add newbie.
+sed -i '/^\[users.partner\]/,/^$/d' "$C/gosftpd.toml"
+cat >>"$C/gosftpd.toml" <<TOML
+
+[users.newbie]
+authorized_keys = ["$(cat "$WORK/id_newbie.pub")"]
+access = { public = "read" }
+TOML
+if hup && grep -q '"event":"server.reload".*"result":"ok"' "$C/audit.jsonl"; then pass "reload: SIGHUP reloads the configuration"; else fail "reload: no successful server.reload"; fi
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as newbie) -b "$C/newbie.batch" newbie@127.0.0.1 >/dev/null 2>&1 && cmp -s "$C/public/readme.txt" "$C/newbie.got" &&
+	pass "reload: an added user logs in" || fail "reload: added user cannot log in"
+# shellcheck disable=SC2046
+if sftp -P "$PORT" $(as partner) -b "$C/pwd.batch" partner@127.0.0.1 >/dev/null 2>&1; then fail "reload: removed user accepted"; else pass "reload: a removed user is refused"; fi
+echo "put $WORK/local/short.txt held2.txt" >&4
+exec 4>&-
+if wait "$HELD_PID" && [ -e "$C/inbox/held2.txt" ]; then pass "reload: an open session keeps its configuration"; else fail "reload: open session: $(tail -3 "$C/held.out")"; fi
+
+# An invalid configuration is refused; the running one stays.
+printf '[server\n' >>"$C/gosftpd.toml"
+if hup && grep -q '"event":"server.reload".*"result":"error"' "$C/audit.jsonl" && kill -0 "$CFG_PID" 2>/dev/null; then
+	pass "reload: an invalid configuration is refused"
+else
+	fail "reload: invalid configuration not refused"
+fi
+rm -f "$C/newbie.got"
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as newbie) -b "$C/newbie.batch" newbie@127.0.0.1 >/dev/null 2>&1 && cmp -s "$C/public/readme.txt" "$C/newbie.got" &&
+	pass "reload: the running configuration stays after a failed reload" || fail "reload: failed reload changed the configuration"
 
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"

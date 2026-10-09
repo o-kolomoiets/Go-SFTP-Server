@@ -13,7 +13,7 @@
 | M2 MVP | v0.2.0 | ✅ | 18 / 18 |
 | M3 Hardening | v0.3.0 | ✅ | 12 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
-| M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
+| M4 Multi-user и Ops | v0.4.0 | 🔄 | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
 | M6 v1.0 | v1.0.0 | ⬜ | 0 / 8 |
 
@@ -124,10 +124,10 @@
 
 ## M4: Multi-user и Operations (v0.4.0)
 
-| ID | Блок | Статус |
-|---|---|---|
-| M4-01 | Reload по SIGHUP, переоткрытие mount'ов | ⬜ |
-| M4-02 | sd_notify, drop-in для systemd < 253 | ⬜ |
+| ID | Блок | Статус | Детали |
+|---|---|---|---|
+| M4-01 | Reload по SIGHUP, переоткрытие mount'ов | 🔄 | ADR 0005 после трёх ревью дизайна; снимки конфигурации, поколения таблицы mount'ов, перепроверка входа после рукопожатия, `reload.disconnect_removed_users`, событие `server.reload`; ждёт PR |
+| M4-02 | sd_notify, drop-in для systemd < 253 | 🔄 | `READY`/`RELOADING`+`MONOTONIC_USEC`/`STOPPING` готовы; drop-in — с пакетами (M4-08) |
 | M4-03 | `user add --write`, `disable`, `remove` | ⬜ |
 | M4-04 | SSH user certificates | ⬜ |
 | M4-05 | Ротация host keys, host certificates | ⬜ |

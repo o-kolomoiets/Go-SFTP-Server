@@ -33,6 +33,9 @@ var (
 	ErrHomeNotDir = errors.New("home is not a directory")
 	// ErrHomeMissing: a user's home does not exist and create is off.
 	ErrHomeMissing = errors.New("home does not exist")
+	// ErrUnavailable: a configured mount could not be opened (see
+	// Options.Unavailable and Table.Reload).
+	ErrUnavailable = errors.New("mount unavailable")
 )
 
 // osError classifies an error from os.Root into one of the VFS errors.

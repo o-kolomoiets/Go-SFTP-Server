@@ -179,6 +179,16 @@ func (l *Logger) Healthy() bool {
 	return ok
 }
 
+// Probe retries an unhealthy audit log at once instead of at the next
+// probe time, for example after its file was reopened. It reports whether
+// the log works.
+func (l *Logger) Probe() bool {
+	l.sink.mu.Lock()
+	l.sink.lastProbe = time.Time{}
+	l.sink.mu.Unlock()
+	return l.Healthy()
+}
+
 // sink records write failures of the underlying writer.
 type sink struct {
 	w        io.Writer

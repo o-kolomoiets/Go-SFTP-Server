@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,10 @@ const (
 	ExtUser        = "gosftpd-user"
 	ExtMethod      = "gosftpd-method"
 	ExtFingerprint = "pubkey-fp"
+	// extKey holds the public key a login used, extPassword the identity of
+	// the password hash (see Recheck).
+	extKey      = "gosftpd-key"
+	extPassword = "gosftpd-password"
 )
 
 // Authentication methods.
@@ -79,24 +84,28 @@ var noKeys = newAccount(nil)
 // Authenticator checks public keys of configured users, or, in zero-config
 // mode, of any user name against one authorized_keys set.
 type Authenticator struct {
-	users map[string]*account
-	any   *account // zero-config: accepts every valid user name
-	now   func() time.Time
-	// hashing bounds concurrent password verifications, and so the memory
-	// and CPU they take before authentication: one slot per lane, one lane
-	// per available CPU. multi serializes taking several slots, so that two
-	// multi-lane verifications cannot each hold half.
-	hashing chan struct{}
-	multi   sync.Mutex
-	// pad equalizes the time of failures.
-	pad *padder
+	users   map[string]*account
+	any     *account // zero-config: accepts every valid user name
+	now     func() time.Time
+	hashing *hashSlots
+	pad     *padder // equalizes the time of failures
+}
+
+// hashSlots bounds concurrent password verifications, and so the memory and
+// CPU they take before authentication: one slot per lane, one lane per
+// available CPU. multi serializes taking several slots, so that two
+// multi-lane verifications cannot each hold half. The authenticators of
+// successive configurations share one (Inherit).
+type hashSlots struct {
+	slots chan struct{}
+	multi sync.Mutex
 }
 
 func newAuthenticator(n int) *Authenticator {
 	return &Authenticator{
 		users:   make(map[string]*account, n),
 		now:     time.Now,
-		hashing: make(chan struct{}, runtime.GOMAXPROCS(0)),
+		hashing: &hashSlots{slots: make(chan struct{}, runtime.GOMAXPROCS(0))},
 		pad:     newPadder(nil),
 	}
 }
@@ -130,6 +139,49 @@ func NewUsers(users []User) *Authenticator {
 	}
 	a.pad = newPadder(hashes)
 	return a
+}
+
+// Inherit makes a, built for a reloaded configuration, the successor of
+// prev, before a is used. They share the password hashing slots, so that
+// logins under both configurations together verify no more passwords at
+// once than one would. a also keeps prev's padding when both have the same
+// kinds and costs of hashes; otherwise a measures its own, so that a new,
+// costlier hash cannot reveal its users.
+func (a *Authenticator) Inherit(prev *Authenticator) {
+	a.hashing = prev.hashing
+	if slices.EqualFunc(a.pad.classes, prev.pad.classes, func(x, y PasswordHash) bool { return x.class() == y.class() }) {
+		a.pad = prev.pad
+	}
+}
+
+// Recheck reports whether the login that produced perms would still
+// succeed under a, without verifying a password again: the user exists, is
+// neither disabled nor expired and may log in from conn's address, and
+// still has the key the login used, unexpired and with the same options, or
+// the same password hash. After a reload the server rechecks every login
+// against the current configuration, and, if configured to, every open
+// connection.
+func (a *Authenticator) Recheck(conn ssh.ConnMetadata, perms *ssh.Permissions) bool {
+	user, ok := UserFrom(perms)
+	if !ok {
+		return false
+	}
+	acc := a.lookup(user)
+	if !a.allowed(acc, conn) {
+		return false
+	}
+	switch perms.Extensions[ExtMethod] {
+	case MethodPublicKey:
+		k, ok := acc.keys[perms.Extensions[extKey]]
+		if !ok || !k.expires.IsZero() && a.now().After(k.expires) {
+			return false
+		}
+		_, noTouch := perms.Extensions["no-touch-required"]
+		return k.noTouchRequire == noTouch && k.sourceAddress == perms.CriticalOptions["source-address"]
+	case MethodPassword:
+		return acc.password != nil && acc.password.id() == perms.Extensions[extPassword]
+	}
+	return false
 }
 
 // Len returns the number of accepted keys.
@@ -173,6 +225,7 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 	}
 	perms := newPermissions(name, MethodPublicKey)
 	perms.Extensions[ExtFingerprint] = ssh.FingerprintSHA256(key)
+	perms.Extensions[extKey] = string(key.Marshal())
 	if k.noTouchRequire {
 		perms.Extensions["no-touch-required"] = ""
 	}
@@ -217,26 +270,28 @@ func (a *Authenticator) CheckPassword(conn ssh.ConnMetadata, password []byte) (*
 	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
 		return nil, a.pad.rest(took), errDenied
 	}
-	return newPermissions(name, MethodPassword), 0, nil
+	perms := newPermissions(name, MethodPassword)
+	perms.Extensions[extPassword] = acc.password.id()
+	return perms, 0, nil
 }
 
 // acquire takes a hashing slot per lane of h, at most all of them, and
 // returns how many it took.
 func (a *Authenticator) acquire(h PasswordHash) int {
-	n := min(h.lanes(), cap(a.hashing))
+	n := min(h.lanes(), cap(a.hashing.slots))
 	if n > 1 {
-		a.multi.Lock()
-		defer a.multi.Unlock()
+		a.hashing.multi.Lock()
+		defer a.hashing.multi.Unlock()
 	}
 	for range n {
-		a.hashing <- struct{}{}
+		a.hashing.slots <- struct{}{}
 	}
 	return n
 }
 
 func (a *Authenticator) release(n int) {
 	for range n {
-		<-a.hashing
+		<-a.hashing.slots
 	}
 }
 

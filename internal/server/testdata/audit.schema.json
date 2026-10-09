@@ -5,6 +5,7 @@
   "context": ["conn_id", "remote_addr", "local_addr", "user", "session_id"],
   "events": {
     "server.start": {"required": ["version", "listen"]},
+    "server.reload": {"required": ["result", "duration_ms"], "optional": ["reason", "restart_required", "disconnected"]},
     "server.stop": {},
     "server.audit_recovered": {},
     "conn.reject": {"required": ["reason"], "optional": ["suppressed"]},

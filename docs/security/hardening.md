@@ -151,8 +151,8 @@ exchange (`kex-strict-s-v00@openssh.com`) protects against Terrapin
 - Keep `audit.on_error = "fail-closed"` (the default): gosftpd refuses
   changes rather than work unaudited.
 - Write the log to journald (`output = "stdout"`) or to a file on a
-  filesystem with room, rotated with `copytruncate` until reopening on
-  SIGHUP arrives in v0.4.
+  filesystem with room, rotated by logrotate with a reload in `postrotate`
+  (see [audit-log.md](../audit-log.md#rotation)).
 - Ship it to a log store the gosftpd user cannot change, and alert on
   `auth.ban`, `fs.denied` and `conn.reject` bursts.
 
