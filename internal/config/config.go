@@ -351,9 +351,21 @@ func readFile(path string) ([]byte, error) {
 // decodeError shows TOML syntax and type errors with their position.
 func decodeError(file string, err error) error {
 	if pe, ok := errors.AsType[toml.ParseError](err); ok {
-		return fmt.Errorf("%s: %s", file, pe.ErrorWithPosition())
+		return fmt.Errorf("%s: %s", file, withPosition(pe))
 	}
 	return fmt.Errorf("%s: %w", file, err)
+}
+
+// withPosition returns pe.ErrorWithPosition, or pe.Error where that
+// panics: BurntSushi/toml v1.6.0 reports line 0 for an escape that the end
+// of the file cuts off on the first line (found by FuzzParseConfig).
+func withPosition(pe toml.ParseError) (msg string) {
+	defer func() {
+		if recover() != nil {
+			msg = pe.Error()
+		}
+	}()
+	return pe.ErrorWithPosition()
 }
 
 func unknownKeys(file string, md toml.MetaData) error {
