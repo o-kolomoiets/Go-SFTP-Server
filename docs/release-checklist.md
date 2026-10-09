@@ -10,8 +10,8 @@ note in the CHANGELOG.
 1. All work for the release is merged and CI is green on `main`, including
    both interop jobs (OpenSSH 9.6 with paramiko, rclone and lftp; OpenSSH
    10.6).
-2. For a minor release, the manual WinSCP checklist in
-   [interop.md](interop.md#winscp) passes.
+2. Optional until WinSCP runs in CI (M3b-02): the manual WinSCP checklist
+   in [interop.md](interop.md#winscp).
 3. `CHANGELOG.md`: move the `Unreleased` entries into
    `## [X.Y.Z] - YYYY-MM-DD`, keep an empty `Unreleased`, and update the
    comparison links at the bottom. Merge that change through a pull request.

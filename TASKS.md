@@ -11,7 +11,7 @@
 | M0 Фундамент | — | 🔄 | 18 / 21 |
 | M1 Вертикальный срез | v0.1.0-alpha | ✅ | 19 / 19 |
 | M2 MVP | v0.2.0 | ✅ | 18 / 18 |
-| M3 Hardening | v0.3.0 | 🔄 | 10 / 12 |
+| M3 Hardening | v0.3.0 | ✅ | 12 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user и Ops | v0.4.0 | ⬜ | 0 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
@@ -110,8 +110,8 @@
 | M3-07 | Профиль `compat` и тест профилей криптографии | ✅ | `server.crypto_policy`; тест: каждое имя есть в `SupportedAlgorithms`, нет в `InsecureAlgorithms` и в списке «никогда»; клиент только с compat-алгоритмами входит лишь при `compat` |
 | M3-08 | Fuzzing (≥ 5 целей), `fuzz.yml`, `fuzz-smoke`, пороги покрытия | ✅ | 6 целей: `FuzzResolve`, `FuzzResolveInRoot`, `FuzzConflictName`, `FuzzParseConfig` (с проверкой Encode → Load), `FuzzAuthorizedKeys`, `FuzzRequestServer` (поток SFTP-пакетов в настоящие обработчики); `fuzz-smoke` 60 с на цель в PR, `fuzz.yml` ночью по 10 мин с issue при падении. Найдено и исправлено: гонка в `pkg/sftp` (READ/WRITE с угаданным handle до ответа на OPEN могли уронить процесс) закрыта `sftpd.Gate`; имена копий длиннее 255 байт; `rename_template` ограничен. Покрытие unit + interop объединяется через `covdata`, пороги: vfs, config, sftpd ≥ 85%, auth ≥ 90% (`test/coverage.sh`) |
 | M3-09 | ssh-audit в CI, Scorecard, actions по SHA | ✅ | `test/ssh-audit.sh` (ssh-audit 3.9.0): у `modern` нет fail, у `compat` fail только на NIST-кривых; `scorecard.yml` раз в неделю; все actions закреплены по commit SHA |
-| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | 🔄 | `--allow-root` (M3a); ADR 0004 (`limits@openssh.com`: пока без изменений, предложить upstream, вернуться с бенчмарками); чек-лист WinSCP в `docs/interop.md` — прогон вручную перед релизом (владелец) |
-| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | 🔄 | `docs/security/threat-model.md`, `docs/security/hardening.md` (в т.ч. ожидаемые замечания ssh-audit и пример systemd-unit); DoD M3 выполнен, кроме ручной проверки WinSCP; релиз — владелец |
+| M3-10 | Отказ от uid 0 без `--allow-root`; WinSCP вручную; исследование `limits@openssh.com` | ✅ | `--allow-root` (M3a); ADR 0004 (`limits@openssh.com`: пока без изменений, предложить upstream, вернуться с бенчмарками); чек-лист WinSCP в `docs/interop.md`. Ручной прогон WinSCP по решению владельца отложен до автоматизации в CI (M3b-02) |
+| M3-11 | Документы threat-model и hardening, DoD M3, релиз `v0.3.0` | ✅ | `docs/security/threat-model.md`, `docs/security/hardening.md`; DoD M3 выполнен, кроме ручной проверки WinSCP (отложена до M3b-02); релиз `v0.3.0` (владелец) проверен: архивы, `checksums.txt`, `gosftpd version`, Go proxy, поведение бинаря |
 | M3-12 | `testutil.AsyncConn` и synctest-тесты таймаутов (перенесено из M1-08) | ✅ | `internal/testutil.AsyncConn`; idle и keepalive проверяются в `testing/synctest` на `net.Pipe` |
 
 ## M3b: Windows (можно после v1.0)
@@ -176,3 +176,6 @@
 | 2026-10-09 | M3a: лимиты соединений, баны, таймауты, вход по паролю, `crypto_policy`, `--allow-root`; ревью и две проверки (все находки исправлены) | [o-kolomoiets/Go-SFTP-Server#8](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/8) |
 | 2026-10-09 | M3b: `atomic_uploads`, `on_conflict = "version"`, `max_file_size`, `min_free_space`; ревью (8 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#9](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/9) |
 | 2026-10-09 | M3c: 6 fuzz-целей и `fuzz-smoke`/`fuzz.yml`, гонка в `pkg/sftp` закрыта `sftpd.Gate`, пороги покрытия, ssh-audit, Scorecard, actions по SHA, threat model, hardening, ADR 0004; ревью (5 находок, исправлены) | [o-kolomoiets/Go-SFTP-Server#10](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/10) |
+| 2026-10-09 | CHANGELOG для `v0.3.0` | [o-kolomoiets/Go-SFTP-Server#11](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/11) |
+| 2026-10-09 | Паника `config validate`/`serve` на конфиге, первая строка которого обрывается внутри escape (нашёл `FuzzParseConfig` в CI) | [o-kolomoiets/Go-SFTP-Server#12](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/12) |
+| 2026-10-09 | Релиз `v0.3.0` (владелец), проверен; M3 закрыт. Хвосты на M4: в сообщении той ошибки TOML печатает «line 0» и управляющий символ; в zero-config ошибка про ключи показывается раньше отказа от root | [v0.3.0](https://github.com/o-kolomoiets/Go-SFTP-Server/releases/tag/v0.3.0) |
