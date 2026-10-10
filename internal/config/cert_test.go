@@ -262,7 +262,7 @@ methods = ["password"]
 trusted_user_ca_keys = ["garbage", "from=\"10.0.0.0/8\" `+ca+`"]
 revoked_keys = ["not a key"]
 [mounts.m]
-path = "/m"
+path = "{dir}/m"
 [users.alice]
 principals = ["", "alice"]
 password_hash = "`+mustHash(t)+`"
@@ -293,7 +293,7 @@ config_version = 1
 [server]
 host_keys = ["/k"]
 [mounts.m]
-path = "/m"
+path = "{dir}/m"
 [users.alice]
 principals = ["alice@corp"]
 access = { m = "read" }
@@ -397,7 +397,7 @@ methods = ["password"]
 trusted_user_ca_keys_file = "missing.pub"
 revoked_keys_file = "missing"
 [mounts.m]
-path = "/m"
+path = "{dir}/m"
 [users.alice]
 password_hash = "`+mustHash(t)+`"
 access = { m = "read" }
@@ -418,7 +418,7 @@ host_keys = ["/k"]
 [auth]
 trusted_user_ca_keys = ["`+authorized(newCA(t).PublicKey())+`"]
 [mounts.m]
-path = "/m"
+path = "{dir}/m"
 [users.none]
 principals = []
 access = { m = "read" }
