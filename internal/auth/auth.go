@@ -28,7 +28,11 @@ import (
 const (
 	ExtUser        = "gosftpd-user"
 	ExtMethod      = "gosftpd-method"
-	ExtFingerprint = "pubkey-fp"
+	ExtFingerprint = "pubkey-fp" // of the key, or of the certified key
+	// Set for a login with a certificate, from CertAudit.
+	ExtCertKeyID  = "gosftpd-cert-key-id"
+	ExtCertSerial = "gosftpd-cert-serial"
+	ExtCertCA     = "gosftpd-cert-ca-fp"
 	// extKey holds the public key a login used, extPassword the identity of
 	// the password hash (see Recheck).
 	extKey      = "gosftpd-key"
@@ -59,22 +63,41 @@ type User struct {
 	AllowFrom []netip.Prefix // empty: any address
 	Expires   time.Time      // zero: never
 	Disabled  bool
+	// Principals a certificate from a trusted CA (Trust) needs one of to
+	// log in as the user; nil means the user's name, empty none.
+	Principals []string
 }
 
 type account struct {
-	keys      map[string]Key
-	password  PasswordHash
-	allowFrom []netip.Prefix
-	expires   time.Time
-	disabled  bool
+	keys       map[string]Key
+	cas        []caLine // cert-authority lines, in order
+	principals []string
+	password   PasswordHash
+	allowFrom  []netip.Prefix
+	expires    time.Time
+	disabled   bool
 }
 
+// caLine is a cert-authority line and the id of its CA key.
+type caLine struct {
+	id string
+	Key
+}
+
+// newAccount keeps cert-authority lines apart from keys: a plain key line
+// never accepts a certificate, and a cert-authority line never its CA key.
 func newAccount(keys []Key) *account {
 	m := make(map[string]Key, len(keys))
+	acc := &account{keys: m}
 	for _, k := range keys {
-		m[string(k.Key.Marshal())] = k
+		id := string(k.Key.Marshal())
+		if k.certAuthority {
+			acc.cas = append(acc.cas, caLine{id: id, Key: k})
+		} else {
+			m[id] = k
+		}
 	}
-	return &account{keys: m}
+	return acc
 }
 
 // noKeys stands in for an unknown user, so that it takes the same path as a
@@ -84,11 +107,15 @@ var noKeys = newAccount(nil)
 // Authenticator checks public keys of configured users, or, in zero-config
 // mode, of any user name against one authorized_keys set.
 type Authenticator struct {
-	users   map[string]*account
-	any     *account // zero-config: accepts every valid user name
-	now     func() time.Time
-	hashing *hashSlots
-	pad     *padder // equalizes the time of failures
+	users    map[string]*account
+	any      *account            // zero-config: accepts every valid user name
+	cas      map[string]struct{} // CAs trusted for every configured user (Trust)
+	lineCAs  map[string]struct{} // CAs of cert-authority lines
+	revoked  *RevokedKeys
+	verified *certCache
+	now      func() time.Time
+	hashing  *hashSlots
+	pad      *padder // equalizes the time of failures
 }
 
 // hashSlots bounds concurrent password verifications, and so the memory and
@@ -103,10 +130,24 @@ type hashSlots struct {
 
 func newAuthenticator(n int) *Authenticator {
 	return &Authenticator{
-		users:   make(map[string]*account, n),
-		now:     time.Now,
-		hashing: &hashSlots{slots: make(chan struct{}, runtime.GOMAXPROCS(0))},
-		pad:     newPadder(nil),
+		users:    make(map[string]*account, n),
+		lineCAs:  map[string]struct{}{},
+		verified: newCertCache(),
+		now:      time.Now,
+		hashing:  &hashSlots{slots: make(chan struct{}, runtime.GOMAXPROCS(0))},
+		pad:      newPadder(nil),
+	}
+}
+
+// addAccount adds acc under name ("" for any name) and indexes its CAs.
+func (a *Authenticator) addAccount(name string, acc *account) {
+	if name == "" {
+		a.any = acc
+	} else {
+		a.users[name] = acc
+	}
+	for _, l := range acc.cas {
+		a.lineCAs[l.id] = struct{}{}
 	}
 }
 
@@ -114,11 +155,9 @@ func newAuthenticator(n int) *Authenticator {
 // only that SSH user name is accepted; otherwise any valid name is.
 func New(user string, keys []Key) *Authenticator {
 	a := newAuthenticator(1)
-	if user != "" {
-		a.users[user] = newAccount(keys)
-	} else {
-		a.any = newAccount(keys)
-	}
+	acc := newAccount(keys)
+	acc.principals = []string{user}
+	a.addAccount(user, acc)
 	return a
 }
 
@@ -135,10 +174,24 @@ func NewUsers(users []User) *Authenticator {
 		acc.allowFrom = u.AllowFrom
 		acc.expires = u.Expires
 		acc.disabled = u.Disabled
-		a.users[u.Name] = acc
+		acc.principals = u.Principals
+		if acc.principals == nil {
+			acc.principals = []string{u.Name}
+		}
+		a.addAccount(u.Name, acc)
 	}
 	a.pad = newPadder(hashes)
 	return a
+}
+
+// Trust sets the CAs trusted for every configured user and the revocation
+// list, before a is used.
+func (a *Authenticator) Trust(cas []ssh.PublicKey, revoked *RevokedKeys) {
+	a.cas = make(map[string]struct{}, len(cas))
+	for _, k := range cas {
+		a.cas[string(k.Marshal())] = struct{}{}
+	}
+	a.revoked = revoked
 }
 
 // Inherit makes a, built for a reloaded configuration, the successor of
@@ -154,19 +207,27 @@ func (a *Authenticator) Inherit(prev *Authenticator) {
 	}
 }
 
-// Recheck reports whether the login that produced perms would still
-// succeed under a, without verifying a password again: the user exists, is
-// neither disabled nor expired and may log in from conn's address, and
-// still has the key the login used, unexpired and with the same options, or
-// the same password hash. After a reload the server rechecks every login
-// against the current configuration, and, if configured to, every open
-// connection.
-func (a *Authenticator) Recheck(conn ssh.ConnMetadata, perms *ssh.Permissions) bool {
-	return a.Refusal(conn, perms) == ""
+// Refusal returns why the login that produced perms would not succeed
+// under a, or "", without verifying a password or signature again: the
+// user exists, is neither disabled nor expired and may log in from conn's
+// address, and still has the key the login used, unrevoked, unexpired and
+// with the same options, or a certificate that a source still accepts, or
+// the same password hash. The server rechecks every login against the
+// configuration current after the handshake (a reload may have come in
+// between).
+func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) string {
+	return a.recheck(conn, perms, false)
 }
 
-// Refusal returns why Recheck refuses the login that produced perms, or "".
-func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) string {
+// Recheck reports whether a connection logged in with perms may stay open
+// under a, after a reload with reload.disconnect_removed_users: as
+// Refusal, but a certificate whose validity period has passed since the
+// login does not count, as in sshd.
+func (a *Authenticator) Recheck(conn ssh.ConnMetadata, perms *ssh.Permissions) bool {
+	return a.recheck(conn, perms, true) == ""
+}
+
+func (a *Authenticator) recheck(conn ssh.ConnMetadata, perms *ssh.Permissions, open bool) string {
 	user, ok := UserFrom(perms)
 	if !ok {
 		return ReasonRemoved
@@ -177,12 +238,22 @@ func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) s
 	}
 	switch perms.Extensions[ExtMethod] {
 	case MethodPublicKey:
-		k, ok := acc.keys[perms.Extensions[extKey]]
+		blob := perms.Extensions[extKey]
+		k, ok := acc.keys[blob]
 		if !ok {
-			return ReasonRemoved
+			cert, err := parseCert(blob)
+			if err != nil {
+				return ReasonRemoved
+			}
+			// The certificate is the one the login verified.
+			reason, _, users := a.certRefusal(acc, user, conn, cert, open)
+			if !users {
+				return ReasonRemoved
+			}
+			return reason
 		}
-		_, noTouch := perms.Extensions["no-touch-required"]
-		if k.noTouchRequire != noTouch || k.sourceAddress != perms.CriticalOptions["source-address"] {
+		_, noTouch := perms.Extensions[noTouchRequired]
+		if k.noTouchRequire != noTouch || k.sourceAddress != perms.CriticalOptions[sourceAddress] {
 			return ReasonRemoved // the key's options changed
 		}
 		return a.keyRefusal(acc, k, conn)
@@ -198,14 +269,14 @@ func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) s
 	return ReasonRemoved
 }
 
-// Len returns the number of accepted keys.
+// Len returns the number of accepted keys and cert-authority lines.
 func (a *Authenticator) Len() int {
 	n := 0
 	if a.any != nil {
-		n += len(a.any.keys)
+		n += len(a.any.keys) + len(a.any.cas)
 	}
 	for _, acc := range a.users {
-		n += len(acc.keys)
+		n += len(acc.keys) + len(acc.cas)
 	}
 	return n
 }
@@ -221,8 +292,8 @@ func (a *Authenticator) lookup(name string) *account {
 }
 
 // PublicKey is an ssh.ServerConfig.PublicKeyCallback. It is a pure lookup:
-// unknown users, wrong keys, disabled or expired accounts and disallowed
-// source addresses all fail the same way.
+// unknown users, wrong keys or certificates, disabled or expired accounts
+// and disallowed source addresses all fail the same way.
 func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	perms, err := a.KnownKey(conn, key)
 	if err != nil {
@@ -232,11 +303,15 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 }
 
 // KnownKey is PublicKey for a server that audits why logins fail: the
-// client sees the same failure, but when key is one of the user's keys and
-// the account or the key may not log in, the error is a *RefusedError with
-// the reason. The client has only offered the key, so the reason is about
-// the key, not about who offered it.
+// client sees the same failure, but when key is one of the user's keys, or
+// a certificate that a source trusts for the user, and the account or the
+// key may not log in, the error is a *RefusedError with the reason. The
+// client has only offered the key, so the reason is about the key, not
+// about who offered it.
 func (a *Authenticator) KnownKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	if cert, ok := key.(*ssh.Certificate); ok {
+		return a.certificate(conn, cert)
+	}
 	name := conn.User()
 	acc := a.lookup(name)
 	keys := noKeys.keys
@@ -248,19 +323,35 @@ func (a *Authenticator) KnownKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 		return nil, errDenied
 	}
 	if reason := a.keyRefusal(acc, k, conn); reason != "" {
-		return nil, &RefusedError{Reason: reason}
+		return nil, &RefusedError{Reason: reason, Key: key}
 	}
 	perms := newPermissions(name, MethodPublicKey)
 	perms.Extensions[ExtFingerprint] = ssh.FingerprintSHA256(key)
 	perms.Extensions[extKey] = string(key.Marshal())
 	if k.noTouchRequire {
-		perms.Extensions["no-touch-required"] = ""
+		perms.Extensions[noTouchRequired] = ""
 	}
 	if k.sourceAddress != "" {
 		// Enforced by x/crypto after authentication.
-		perms.CriticalOptions = map[string]string{"source-address": k.sourceAddress}
+		perms.CriticalOptions = map[string]string{sourceAddress: k.sourceAddress}
 	}
 	return perms, nil
+}
+
+// certificate is KnownKey for a certificate (ADR 0007).
+func (a *Authenticator) certificate(conn ssh.ConnMetadata, cert *ssh.Certificate) (*ssh.Permissions, error) {
+	if !a.authentic(cert) {
+		return nil, errDenied
+	}
+	name := conn.User()
+	reason, detail, users := a.certRefusal(a.lookup(name), name, conn, cert, false)
+	switch {
+	case !users:
+		return nil, errDenied
+	case reason != "":
+		return nil, &RefusedError{Reason: reason, Detail: detail, Key: cert.Key, Cert: cert}
+	}
+	return certPermissions(name, cert), nil
 }
 
 // VerifiedKey is a VerifiedPublicKeyCallback: the client has proved that
@@ -270,13 +361,22 @@ func (a *Authenticator) KnownKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh
 // signed request.
 func (a *Authenticator) VerifiedKey(conn ssh.ConnMetadata, _ ssh.PublicKey, perms *ssh.Permissions) (*ssh.Permissions, error) {
 	if reason := a.Refusal(conn, perms); reason != "" {
-		return nil, &RefusedError{Reason: reason}
+		re := &RefusedError{Reason: reason}
+		if cert, err := parseCert(perms.Extensions[extKey]); err == nil {
+			re.Key, re.Cert = cert.Key, cert
+		} else if k, err := ssh.ParsePublicKey([]byte(perms.Extensions[extKey])); err == nil {
+			re.Key = k
+		}
+		return nil, re
 	}
 	return perms, nil
 }
 
 // keyRefusal returns why acc may not log in with k now, or "".
 func (a *Authenticator) keyRefusal(acc *account, k Key, conn ssh.ConnMetadata) string {
+	if a.revoked.Revoked(k.Key) {
+		return ReasonKeyRevoked
+	}
 	if reason := a.refusal(acc, conn); reason != "" {
 		return reason
 	}
@@ -287,20 +387,32 @@ func (a *Authenticator) keyRefusal(acc *account, k Key, conn ssh.ConnMetadata) s
 }
 
 // Reasons a login is refused although the key offered is one of the
-// user's or the password is right (RefusedError).
+// user's, or a certificate a source trusts for the user, or the password is
+// right (RefusedError).
 const (
-	ReasonDisabled   = "disabled"    // the account is disabled
-	ReasonExpired    = "expired"     // the account has expired
-	ReasonAddress    = "address"     // allow_from does not match the client
-	ReasonKeyExpired = "key_expired" // the key's expiry-time has passed
-	ReasonRemoved    = "removed"     // a reload removed or changed the user, the key or the password
+	ReasonDisabled        = "disabled"           // the account is disabled
+	ReasonExpired         = "expired"            // the account has expired
+	ReasonAddress         = "address"            // allow_from, from= or the certificate's source-address does not match the client
+	ReasonKeyExpired      = "key_expired"        // the expiry-time of the key or cert-authority line has passed
+	ReasonKeyRevoked      = "key_revoked"        // the key, the certified key or the CA is in the revocation list
+	ReasonCertPrincipal   = "cert_principal"     // no principal of the certificate may log in as the user
+	ReasonCertInvalid     = "cert_invalid"       // a SHA-1 CA signature, an unsupported option, an empty principal
+	ReasonCertNotYetValid = "cert_not_yet_valid" // before the certificate's validity period
+	ReasonCertExpired     = "cert_expired"       // after the certificate's validity period
+	ReasonRemoved         = "removed"            // a reload removed or changed the user, the key or the password
 )
 
 // RefusedError refuses a login with credentials of the user: one of the
-// user's keys (offered; the client may not hold the private key) or the
-// right password. The client is told no more than for any failure; Reason
-// is for the audit log.
-type RefusedError struct{ Reason string }
+// user's keys or a certificate that a source trusts for the user (offered;
+// the client may not hold the private key), or the right password. The
+// client is told no more than for any failure; the fields are for the
+// audit and operational logs.
+type RefusedError struct {
+	Reason string
+	Detail string           // more for the operational log, may be ""
+	Key    ssh.PublicKey    // the key offered, or the certified key; nil for a password
+	Cert   *ssh.Certificate // the certificate offered, if any
+}
 
 func (e *RefusedError) Error() string { return "authentication failed: " + e.Reason }
 

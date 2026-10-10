@@ -589,8 +589,8 @@ flowchart LR
   - ready-made instructions for the partner are printed: host, port, fingerprint.
 - [ ] **SSH user certificates:**
   - `cert-authority` + `principals=` lines in `authorized_keys` start being accepted (before M4 they are rejected);
-  - `auth.trusted_user_ca_keys` → `ssh.CertChecker{IsUserAuthority: ..., IsRevoked: ..., SupportedCriticalOptions: []string{"source-address"}}`;
-  - the principal must match the user name; `force-command` and unknown critical options are rejected;
+  - `auth.trusted_user_ca_keys` with per-user `principals`, and `auth.revoked_keys`; gosftpd checks certificates itself, because `ssh.CertChecker` accepts a certificate without principals for every user and SHA-1 CA signatures, and checks the signature last (ADR 0007; `CheckCert` only verifies the signature);
+  - the principal must match the user name (or `principals`); `force-command` other than an SFTP server and unknown critical options are rejected;
   - `key_id` and `serial` are written to the audit log;
   - requires x/crypto ≥ v0.52.0: GO-2026-5014, 5015 and 5019.
 - [ ] **`VerifiedPublicKeyCallback`** (x/crypto ≥ v0.43.0) is the place for key-related side effects. Returning `PartialSuccessError` together with non-nil `Permissions` is not allowed.
@@ -794,7 +794,7 @@ Two streams. The **operational log** is written to stderr in text or JSON format
 | `remote_addr`, `local_addr` | string | always | `203.0.113.7:53122` |
 | `client_version` | string ≤ 128 | after KEX | `SSH-2.0-OpenSSH_9.6p1 ...` |
 | `auth_method`, `key_fp` | string | auth.* | `publickey`, `SHA256:...` |
-| `cert_key_id`, `cert_serial` | string, int | with a certificate | |
+| `cert_key_id`, `cert_serial`, `cert_ca_fp` | string (the serial as a decimal string: CAs use random 64-bit serials) | with a certificate | `alice-laptop`, `"42"`, `SHA256:...` |
 | `mount`, `path`, `target_path`, `final_path` | virtual paths | fs.* | `/inbox/report.pdf` |
 | `conflict` | `none` / `renamed` / `rejected` / `overwritten` / `versioned` | fs.upload, fs.rename | `renamed` |
 | `open_flags` | string | fs.upload | `WRITE+CREAT+TRUNC` |
@@ -867,7 +867,7 @@ max_auth_tries = 6
 
 [auth]
 methods = ["publickey", "password"]     # "password" from M3; without it partner-acme cannot log in
-# trusted_user_ca_keys = "/etc/gosftpd/user_ca.pub"   # M4
+# trusted_user_ca_keys_file = "/etc/gosftpd/user_ca.pub"   # M4
 
 [auth.ban]
 after_failures = 10

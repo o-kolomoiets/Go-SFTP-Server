@@ -98,11 +98,26 @@ type Limits struct {
 // Auth is the [auth] table.
 type Auth struct {
 	Methods []string `toml:"methods"`
-	Ban     Ban      `toml:"ban"`
+	// CA keys, inline and in a file, whose user certificates log in as
+	// every configured user whose principals they sign (ADR 0007).
+	TrustedUserCAKeys     []string `toml:"trusted_user_ca_keys,omitempty"`
+	TrustedUserCAKeysFile string   `toml:"trusted_user_ca_keys_file,omitempty"`
+	// Revoked keys and certificates, inline and in a file.
+	RevokedKeys     []string `toml:"revoked_keys,omitempty"`
+	RevokedKeysFile string   `toml:"revoked_keys_file,omitempty"`
+	Ban             Ban      `toml:"ban"`
 }
 
 // HasMethod reports whether login method m is enabled.
 func (a Auth) HasMethod(m string) bool { return slices.Contains(a.Methods, m) }
+
+// TrustsCAs reports whether CAs are trusted for every configured user.
+func (a Auth) TrustsCAs() bool { return len(a.TrustedUserCAKeys) > 0 || a.TrustedUserCAKeysFile != "" }
+
+// usesCertificates reports whether any certificate setting is set.
+func (a Auth) usesCertificates() bool {
+	return a.TrustsCAs() || len(a.RevokedKeys) > 0 || a.RevokedKeysFile != ""
+}
 
 // Ban is the [auth.ban] table.
 type Ban struct {
@@ -162,13 +177,16 @@ type Mount struct {
 
 // User is a [users.NAME] table.
 type User struct {
-	AuthorizedKeys     []string          `toml:"authorized_keys,omitempty"`
-	AuthorizedKeysFile string            `toml:"authorized_keys_file,omitempty"`
-	PasswordHash       string            `toml:"password_hash,omitempty"`
-	AllowFrom          []string          `toml:"allow_from,omitempty"`
-	Expires            *time.Time        `toml:"expires,omitempty"`
-	Disabled           bool              `toml:"disabled,omitempty"`
-	Access             map[string]string `toml:"access"`
+	AuthorizedKeys     []string   `toml:"authorized_keys,omitempty"`
+	AuthorizedKeysFile string     `toml:"authorized_keys_file,omitempty"`
+	PasswordHash       string     `toml:"password_hash,omitempty"`
+	AllowFrom          []string   `toml:"allow_from,omitempty"`
+	Expires            *time.Time `toml:"expires,omitempty"`
+	Disabled           bool       `toml:"disabled,omitempty"`
+	// Principals a certificate from a trusted CA needs one of to log in
+	// as the user; unset means the user's name, empty none.
+	Principals *[]string         `toml:"principals,omitempty"`
+	Access     map[string]string `toml:"access"`
 
 	// From is the file that defined the user (an include or the main file).
 	From string `toml:"-"`
@@ -503,6 +521,8 @@ func (c *Config) resolvePaths(dir string) {
 	for _, u := range c.Users {
 		u.AuthorizedKeysFile = abs(u.AuthorizedKeysFile)
 	}
+	c.Auth.TrustedUserCAKeysFile = abs(c.Auth.TrustedUserCAKeysFile)
+	c.Auth.RevokedKeysFile = abs(c.Auth.RevokedKeysFile)
 }
 
 // loadIncludes merges the users of every included file. An include may only

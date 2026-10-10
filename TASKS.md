@@ -129,7 +129,7 @@ Three PRs: M3a — network and login (01–03, 07, 10, 12), M3b — disk and upl
 | M4-01 | Reload on SIGHUP, reopening mounts | ✅ | ADR 0005 after three design reviews; configuration snapshots, mount table generations, login re-check after the handshake, `reload.disconnect_removed_users`, `server.reload` event |
 | M4-02 | sd_notify, drop-in for systemd < 253 | ✅ | `READY`/`RELOADING`+`MONOTONIC_USEC`/`STOPPING`; the `legacy-notify.conf` drop-in is installed with the packages (M4-08) |
 | M4-03 | `user add --write`, `disable`, `remove` | ✅ | `users.d/NAME.toml` with a config check and instructions for the partner; `disable`/`enable`/`remove` without losing comments; `reason=expired` (and others) in `auth.failure`; a key of such an account is rejected as soon as it is offered (without an "oracle"), `VerifiedPublicKeyCallback` re-checks after the signature |
-| M4-04 | SSH user certificates | ⬜ |
+| M4-04 | SSH user certificates | 🔄 | ADR 0007 after three design reviews; `auth.trusted_user_ca_keys[_file]` with `users.NAME.principals`, `cert-authority` lines with `principals=`, `auth.revoked_keys[_file]` (fails closed; a certificate revokes its key); checks in gosftpd's own order with reasons `key_revoked`, `cert_principal`, `cert_expired`, `cert_not_yet_valid`, `cert_invalid`; `cert_key_id`, `cert_serial`, `cert_ca_fp` in the audit log; interop with OpenSSH certificates; awaiting a PR |
 | M4-05 | Host key rotation, host certificates | ⬜ |
 | M4-06 | Admin listener (`/metrics`, `/healthz`, `/readyz`), `healthcheck` | ⬜ |
 | M4-07 | Hooks (exec, webhook with HMAC) | ⬜ |

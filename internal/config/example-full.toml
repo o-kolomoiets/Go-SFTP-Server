@@ -27,6 +27,12 @@ max_auth_tries = 6
 
 [auth]
 methods = ["publickey"]                 # add "password" for users with password_hash
+# SSH certificates: CAs trusted for every user (a certificate logs in as a
+# user whose principals it carries), and revoked keys and certificates.
+trusted_user_ca_keys = []               # e.g. ["ssh-ed25519 AAAA... corp-ca"]
+trusted_user_ca_keys_file = ""          # a file of CA public keys, one per line
+revoked_keys = []                       # keys or certificates; a certificate revokes its key
+revoked_keys_file = ""                  # read again on reload; an invalid file fails the reload
 
 [auth.ban]                              # per IPv4 address or IPv6 /64: each wrong password, rejected keys once per connection
 after_failures = 10                     # 0 = no bans
@@ -76,6 +82,7 @@ versions = { keep = 5 }
 authorized_keys = ["<paste alice's public key>"]
 authorized_keys_file = "/etc/gosftpd/keys/alice.pub"
 allow_from = ["10.0.0.0/8", "192.168.0.0/16"]
+principals = ["alice", "alice@corp.example"]  # certificates from trusted CAs; default: the user name
 access = { public = "read", inbox = "upload", home = "full" }
 
 [users.partner-acme]

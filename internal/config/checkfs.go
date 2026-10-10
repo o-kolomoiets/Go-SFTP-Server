@@ -146,6 +146,12 @@ func (c *Config) checkTrusted(p *problems, live []LiveMount) {
 			files = append(files, trusted{f, "the authorized_keys file of " + name, false, false})
 		}
 	}
+	if f := c.Auth.TrustedUserCAKeysFile; f != "" {
+		files = append(files, trusted{f, "the trusted CA keys", false, false})
+	}
+	if f := c.Auth.RevokedKeysFile; f != "" {
+		files = append(files, trusted{f, "the revoked keys", false, false})
+	}
 	if out := c.Audit.Output; out != "" && out != "stdout" {
 		files = append(files, trusted{out, "the audit log", false, true})
 	}
@@ -287,6 +293,16 @@ func (c *Config) checkUsers(p *problems) {
 	}
 	if c.AnyUser != nil && c.AnyUser.AuthorizedKeysFile != "" {
 		files[c.AnyUser.AuthorizedKeysFile] = "--authorized-keys"
+	}
+	if c.Auth.HasMethod(auth.MethodPublicKey) {
+		for f, k := range map[string]string{
+			c.Auth.TrustedUserCAKeysFile: "auth.trusted_user_ca_keys_file",
+			c.Auth.RevokedKeysFile:       "auth.revoked_keys_file",
+		} {
+			if _, ok := files[f]; f != "" && !ok {
+				files[f] = k
+			}
+		}
 	}
 	for _, f := range sortedKeys(files) {
 		k := files[f]

@@ -7,15 +7,17 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
 ## What a client can do
 
-- **Authenticate** with a public key, or with a password where
-  `auth.methods` allows it. Unknown users, wrong keys or passwords, disabled
-  or expired accounts and disallowed addresses all fail the same way (the
-  key of a disabled account is not accepted even as a query, so holding a
-  public key reveals nothing), and an unknown user takes as long to refuse
-  as a wrong password. Only the audit log says why (`auth.failure`
-  `reason`). Identity flows
-  only through the SSH library's permissions, never through state captured
-  during authentication (CVE-2024-45337).
+- **Authenticate** with a public key, an OpenSSH certificate from a trusted
+  CA, or a password where `auth.methods` allows it. Unknown users, wrong
+  keys or passwords, disabled or expired accounts, revoked keys and
+  disallowed addresses all fail the same way (the key of a disabled account
+  is not accepted even as a query, so holding a public key or certificate
+  reveals nothing), and an unknown user takes as long to refuse as a wrong
+  password or a certificate of a known user (its CA signature is verified
+  either way). Only the audit log says why (`auth.failure` `reason`).
+  Identity flows only through the SSH library's permissions, never through
+  state captured during authentication (CVE-2024-45337), and nothing of a
+  certificate's own options is copied into them.
 - **Open SFTP sessions**, nothing else: shell, exec, PTY, environment, agent
   and port forwarding requests are refused.
 - **Work inside its mounts** with the permissions of its user, see
@@ -132,10 +134,23 @@ user that owns only the served directories.
 
 ## Files gosftpd trusts
 
-The configuration, included files, host keys and `authorized_keys` files must
-not be writable by group or others and must belong to root or to the user
-running gosftpd (like sshd's `StrictModes`); host keys must be private
-(`chmod 600`).
+The configuration, included files, host keys, `authorized_keys` files, the
+trusted CA keys and the revocation list must not be writable by group or
+others and must belong to root or to the user running gosftpd (like sshd's
+`StrictModes`); host keys must be private (`chmod 600`). None of them may
+lie inside a mount clients can write.
+
+## Certificates
+
+gosftpd checks OpenSSH user certificates itself rather than with the SSH
+library's checker, which accepts a certificate without principals for every
+user and SHA-1 CA signatures ([ADR 0007](adr/0007-user-certificates.md)).
+A certificate needs at least one principal that the user allows, a CA
+signature with SHA-2 that verifies, a validity period that includes now, and
+no critical option but `source-address` (enforced) and an SFTP-only
+`force-command`. The revocation list fails closed: a list that cannot be
+read or parsed is an error at start and fails a reload. A revoked
+certificate revokes its key, as in sshd.
 
 ## Cryptography
 
@@ -147,8 +162,11 @@ encrypt-then-MAC, for old clients; scanners such as ssh-audit flag those (see
 [hardening.md](security/hardening.md#cryptography) for the expected findings;
 CI checks that `modern` has none that fail).
 SHA-1, CBC and DSA are never offered. Host and user RSA keys sign with SHA-2
-only, and user RSA keys need at least 2048 bits. `verify-required` in `authorized_keys` is refused, because the SSH
-library does not check the user-verification flag of security keys.
+only, and user RSA keys need at least 2048 bits; CA keys and certified keys
+follow the same rules, and CA signatures with SHA-1 (`ssh-rsa`) are refused.
+`verify-required` in `authorized_keys` or in a certificate is refused,
+because the SSH library does not check the user-verification flag of
+security keys.
 
 ## Audit
 

@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,16 +20,27 @@ import (
 // MinRSABits is the smallest accepted RSA user key.
 const MinRSABits = 2048
 
-// Key is one accepted line of an authorized_keys file.
+// Key is one accepted line of an authorized_keys file: a key, or with
+// cert-authority the key of a CA whose user certificates the line accepts.
 type Key struct {
 	Key     ssh.PublicKey
 	Comment string
 	Source  string // "file:line", for messages and audit
 
-	sourceAddress  string    // validated from="..." value (comma-separated IPs/CIDRs)
-	expires        time.Time // expiry-time="..."; zero means never
+	sourceAddress  string         // validated from="..." value (comma-separated IPs/CIDRs)
+	from           []netip.Prefix // sourceAddress, parsed
+	expires        time.Time      // expiry-time="..."; zero means never
 	noTouchRequire bool
+	certAuthority  bool
+	principals     []string // principals= of a cert-authority line; nil: the login name
 }
+
+// CertAuthority reports whether k is a cert-authority line.
+func (k Key) CertAuthority() bool { return k.certAuthority }
+
+// Principals returns the principals= of a cert-authority line, nil if it
+// has none.
+func (k Key) Principals() []string { return k.principals }
 
 // ignoredOptions are restrictions gosftpd always enforces anyway.
 var ignoredOptions = map[string]bool{
@@ -87,15 +101,53 @@ func parseLine(line []byte) (Key, error) {
 			k.expires = t
 		case name == "no-touch-required" && !hasValue:
 			k.noTouchRequire = true
-		case name == "cert-authority":
-			return Key{}, errors.New("cert-authority is not supported yet (planned for v0.4)")
+		case name == "cert-authority" && !hasValue:
+			k.certAuthority = true
+		case name == "principals" && hasValue:
+			p, err := parsePrincipals(unquote(value))
+			if err != nil {
+				return Key{}, err
+			}
+			k.principals = p
+		case name == "command" && hasValue && SFTPOnlyCommand(unquote(value)):
+			// gosftpd serves only SFTP.
+		case name == "command":
+			return Key{}, errors.New("command= is supported only as internal-sftp or a path to sftp-server, without arguments; line rejected")
 		case name == "verify-required":
 			return Key{}, errors.New("verify-required cannot be enforced (user verification is not checked), line rejected")
 		default:
 			return Key{}, fmt.Errorf("unsupported option %q, line rejected", name)
 		}
 	}
+	if k.principals != nil && !k.certAuthority {
+		return Key{}, errors.New("principals= is valid only with cert-authority, line rejected")
+	}
+	if k.sourceAddress != "" {
+		from, err := parsePrefixes(k.sourceAddress)
+		if err != nil {
+			return Key{}, fmt.Errorf("from=%q: %w", k.sourceAddress, err)
+		}
+		k.from = from
+	}
 	return k, nil
+}
+
+// SFTPOnlyCommand reports whether a forced command (command= in
+// authorized_keys, force-command in a certificate) only starts an SFTP
+// server, which is all gosftpd serves anyway: internal-sftp, or a path to
+// sftp-server, without arguments, which could change what it allows.
+func SFTPOnlyCommand(cmd string) bool {
+	return cmd == "internal-sftp" || path.Base(cmd) == "sftp-server" && !strings.ContainsAny(cmd, " \t")
+}
+
+// parsePrincipals parses a principals= list. An empty list or entry would
+// match differently in OpenSSH (which stops at it), so it is an error.
+func parsePrincipals(v string) ([]string, error) {
+	p := strings.Split(v, ",")
+	if slices.Contains(p, "") {
+		return nil, fmt.Errorf("principals=%q: empty principal, line rejected", v)
+	}
+	return p, nil
 }
 
 func checkKeyType(pub ssh.PublicKey) error {
@@ -117,6 +169,9 @@ func checkKeyType(pub ssh.PublicKey) error {
 		}
 		return nil
 	default:
+		if strings.HasSuffix(pub.Type(), "-cert-v01@openssh.com") {
+			return errors.New("this is a certificate, not a key; trust its CA instead (cert-authority, or auth.trusted_user_ca_keys)")
+		}
 		return fmt.Errorf("key type %s is not supported", pub.Type())
 	}
 }
@@ -135,6 +190,20 @@ func parseFrom(v string) (string, error) {
 		parts[i] = p
 	}
 	return strings.Join(parts, ","), nil
+}
+
+// parsePrefixes parses a comma-separated list of IP addresses and CIDR
+// blocks, as a certificate's source-address.
+func parsePrefixes(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for s := range strings.SplitSeq(list, ",") {
+		p, err := ParsePrefix(s)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // parseExpiry parses OpenSSH's YYYYMMDD[HHMM[SS]][Z] timespec; without Z it

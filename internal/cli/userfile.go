@@ -131,6 +131,10 @@ func partnerInstructions(c *config.Config, name, host string) string {
 		dest = "[" + host + "]" // an IPv6 address
 	}
 	fmt.Fprintf(&b, "  connect: sftp %s%s@%s\n", portFlag, name, dest)
+	if ps := c.CertificatePrincipals(name); len(ps) > 0 {
+		fmt.Fprintf(&b, "  certificate: sign the user's key with a trusted CA, for the principal %s:\n", strings.Join(ps, " or "))
+		fmt.Fprintf(&b, "    ssh-keygen -s CA_KEY -I %s -n %s -V +52w id_ed25519.pub\n", name, ps[0])
+	}
 	fmt.Fprintln(&b, "Check the host key fingerprint on the first connection.")
 	return b.String()
 }

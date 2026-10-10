@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,6 +30,10 @@ func FuzzAuthorizedKeys(f *testing.F) {
 		`command="/bin/sh" ` + key,
 		`from="*.example.org" ` + key,
 		`cert-authority ` + key,
+		`cert-authority,principals="alice,ops",from="10.0.0.0/8" ` + key,
+		`principals="alice" ` + key,
+		`cert-authority,principals="a,,b" ` + key,
+		`command="internal-sftp" ` + key,
 		`environment="A=B" ` + key,
 		"# comment\n\n" + key + "\r\n" + key,
 		"ssh-dss AAAA",
@@ -60,9 +65,21 @@ func FuzzAuthorizedKeys(f *testing.F) {
 				t.Fatalf("accepted line does not parse: %v", err)
 			}
 			for _, opt := range options {
-				name, _, _ := strings.Cut(opt, "=")
+				name, value, _ := strings.Cut(opt, "=")
 				switch name = strings.ToLower(name); {
 				case ignoredOptions[name], name == "from", name == "expiry-time", name == "no-touch-required":
+				case name == "cert-authority":
+					if !k.CertAuthority() {
+						t.Fatal("cert-authority line kept as a plain key")
+					}
+				case name == "principals":
+					if !k.CertAuthority() || slices.Contains(k.Principals(), "") {
+						t.Fatalf("accepted principals %q", value)
+					}
+				case name == "command":
+					if !SFTPOnlyCommand(unquote(value)) {
+						t.Fatalf("accepted command %q", value)
+					}
 				default:
 					t.Fatalf("accepted a line with option %q", opt)
 				}

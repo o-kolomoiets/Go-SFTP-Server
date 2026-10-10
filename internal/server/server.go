@@ -441,9 +441,10 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		if ca.accepted.Load() {
 			u, _ := ca.attemptedUser.Load().(string)
 			attrs := []slog.Attr{slog.String("user", u), slog.Int("attempts", int(ca.failures.Load()))}
-			if reason, _ := ca.reason.Load().(string); reason != "" {
-				log.Info("login refused", "user", u, "reason", reason)
-				attrs = append(attrs, slog.String("reason", reason))
+			if re := ca.reason.Load(); re != nil {
+				logRefused(log, u, re)
+				attrs = append(attrs, slog.String("reason", re.Reason))
+				attrs = append(attrs, keyAttrs(re.Key, re.Cert)...)
 			}
 			al.Event("auth.failure", attrs...)
 			ca.closedWithoutLogin()
@@ -474,18 +475,23 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		return
 	}
 	defer sn.cfg.Mounts.Close()
+	ext := sconn.Permissions.Extensions
+	keyFields := []slog.Attr{}
+	if fp := ext[auth.ExtFingerprint]; fp != "" {
+		keyFields = append(keyFields, slog.String("key_fp", fp))
+	}
+	if serial, ok := ext[auth.ExtCertSerial]; ok {
+		keyFields = append(keyFields, slog.String("cert_key_id", ext[auth.ExtCertKeyID]), slog.String("cert_serial", serial), slog.String("cert_ca_fp", ext[auth.ExtCertCA]))
+	}
 	if reason := sn.cfg.Auth.Refusal(sconn, sconn.Permissions); reason != "" {
 		log.Info("login refused: revoked by a configuration reload", "reason", reason)
 		ca.fail()
-		al.Event("auth.failure", slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1), slog.String("reason", reason))
+		al.Event("auth.failure", append([]slog.Attr{slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1), slog.String("reason", reason)}, keyFields...)...)
 		closed("revoked")
 		return
 	}
 	al = al.With("user", name)
-	success := []slog.Attr{slog.String("auth_method", sconn.Permissions.Extensions[auth.ExtMethod])}
-	if fp := sconn.Permissions.Extensions[auth.ExtFingerprint]; fp != "" {
-		success = append(success, slog.String("key_fp", fp))
-	}
+	success := append([]slog.Attr{slog.String("auth_method", ext[auth.ExtMethod])}, keyFields...)
 	al.Event("auth.success", append(success, slog.Int("failed_attempts", int(ca.failures.Load())))...)
 
 	go ssh.DiscardRequests(reqs)
@@ -512,7 +518,7 @@ type connAuth struct {
 	isIP bool
 
 	user          pinnedUser
-	reason        atomic.Value // why valid credentials were refused (auth.Reason*)
+	reason        atomic.Pointer[auth.RefusedError] // why valid credentials were refused
 	accepted      atomic.Bool
 	failures      atomic.Int32 // every failed attempt
 	keyFailures   atomic.Int32 // failed attempts other than passwords
@@ -610,8 +616,36 @@ func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 // refused records why a login with valid credentials was refused.
 func (ca *connAuth) refused(err error) {
 	if re, ok := errors.AsType[*auth.RefusedError](err); ok {
-		ca.reason.Store(re.Reason)
+		ca.reason.Store(re)
 	}
+}
+
+// keyAttrs are the audit fields of the key or certificate of a refused
+// login.
+func keyAttrs(key ssh.PublicKey, cert *ssh.Certificate) []slog.Attr {
+	var attrs []slog.Attr
+	if key != nil {
+		attrs = append(attrs, slog.String("key_fp", ssh.FingerprintSHA256(key)))
+	}
+	if cert != nil {
+		id, serial, ca := auth.CertAudit(cert)
+		attrs = append(attrs, slog.String("cert_key_id", id), slog.String("cert_serial", serial), slog.String("cert_ca_fp", ca))
+	}
+	return attrs
+}
+
+// logRefused tells the operator why a login with the user's credentials
+// was refused; the audit log has the reason only.
+func logRefused(log *slog.Logger, user string, re *auth.RefusedError) {
+	args := []any{"user", user, "reason", re.Reason}
+	if re.Detail != "" {
+		args = append(args, "detail", re.Detail)
+	}
+	if re.Cert != nil {
+		id, serial, _ := auth.CertAudit(re.Cert)
+		args = append(args, "cert_key_id", id, "cert_serial", serial)
+	}
+	log.Info("login refused", args...)
 }
 
 func (ca *connAuth) banned() bool {

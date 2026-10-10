@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -288,5 +289,78 @@ access = { data = "full" }
 	want := strconv.Quote(`log.level = "debug" in ` + path + ` has no effect: $GOSFTPD_LOG_LEVEL overrides it`)
 	if !strings.Contains(ts.stderr.String(), want[1:len(want)-1]) {
 		t.Errorf("no warning about the overridden log.level:\n%s", ts.stderr.String())
+	}
+}
+
+// TestServeReloadCertificates: certificates from a trusted CA log in; a
+// reload applies a revocation, and a broken revocation list fails the
+// reload instead of revoking less.
+func TestServeReloadCertificates(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ca, key := newSigner(t), newSigner(t)
+	cert := &ssh.Certificate{
+		Key: key.PublicKey(), CertType: ssh.UserCert, KeyId: "alice", ValidPrincipals: []string{"alice"},
+		ValidBefore: ssh.CertTimeInfinity,
+	}
+	if err := cert.SignCert(rand.Reader, ca); err != nil {
+		t.Fatal(err)
+	}
+	certKey, err := ssh.NewCertSigner(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "cas.pub"), authorizedKey(ca)+"\n")
+	revoked := filepath.Join(dir, "revoked")
+	writeFile(t, revoked, "# nothing yet\n")
+	path := filepath.Join(dir, "gosftpd.toml")
+	writeFile(t, path, `config_version = 1
+[server]
+listen = ["127.0.0.1:0"]
+host_keys = ["state/host_key"]
+host_key_auto_generate = true
+[auth]
+trusted_user_ca_keys_file = "cas.pub"
+revoked_keys_file = "revoked"
+[mounts.data]
+path = "`+filepath.ToSlash(filepath.Join(dir, "data"))+`"
+[users.alice]
+access = { data = "full" }
+`)
+	ts := startServe(t, "--config", path)
+	c, err := ts.login("alice", certKey)
+	if err != nil {
+		t.Fatalf("certificate login: %v\n%s", err, ts.stderr.String())
+	}
+	c.Close()
+	// The server audits the login a moment after the client returns.
+	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(ts.stdout.String(), `"cert_key_id":"alice"`); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("auth.success does not name the certificate:\n%s", ts.stdout.String())
+		}
+	}
+
+	writeFile(t, revoked, string(ssh.MarshalAuthorizedKey(cert)))
+	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
+		t.Errorf("server.reload = %v\n%s", ev, ts.stderr.String())
+	}
+	if c, err := ts.login("alice", certKey); err == nil {
+		c.Close()
+		t.Error("a revoked certificate logged in")
+	}
+
+	writeFile(t, revoked, "SSHKRL\n\x00\x00\x00\x00\x01")
+	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "error" {
+		t.Errorf("server.reload of a KRL = %v", ev)
+	}
+	if !strings.Contains(ts.stderr.String(), "KRL") {
+		t.Errorf("the failed reload does not say why:\n%s", ts.stderr.String())
+	}
+	if c, err := ts.login("alice", certKey); err == nil {
+		c.Close()
+		t.Error("a failed reload un-revoked the certificate")
 	}
 }

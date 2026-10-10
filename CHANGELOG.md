@@ -41,6 +41,27 @@ Incompatible changes are prefixed with **BREAKING:**.
 - `user add --write` prints the warnings about the new user and refuses one
   that could not log in (for example a password while `auth.methods` has
   only `publickey`) unless `--force`.
+- OpenSSH user certificates ([ADR 0007](docs/adr/0007-user-certificates.md)):
+  CAs trusted for every user (`auth.trusted_user_ca_keys`,
+  `trusted_user_ca_keys_file`), with `users.NAME.principals` to map
+  certificate principals to users, and `cert-authority` lines with
+  `principals=` in `authorized_keys`. Certificates without principals, with
+  SHA-1 CA signatures or with critical options other than `source-address`
+  and an SFTP-only `force-command` are refused. See
+  [docs/configuration.md](docs/configuration.md#certificates).
+- Revoked keys and certificates (`auth.revoked_keys`, `revoked_keys_file`):
+  a certificate revokes its key, as in sshd. The list fails closed: a line
+  that is not a key, or a KRL, is an error at start and fails a reload.
+- `auth.success` names a certificate login (`cert_key_id`, `cert_serial` as
+  a decimal string, `cert_ca_fp`; `key_fp` is the certified key's);
+  `auth.failure` gets `key_fp` and these fields with a reason, and the
+  reasons `key_revoked`, `cert_principal`, `cert_expired`,
+  `cert_not_yet_valid` and `cert_invalid`.
+- `user add` takes `--principal`; with `--write` and trusted CAs a user
+  needs no key, and the connection details show the `ssh-keygen` command to
+  sign its certificate. `user list` shows the principals.
+- `command="internal-sftp"` (or a path to `sftp-server`, without arguments)
+  is accepted in `authorized_keys`, since gosftpd serves only SFTP.
 
 ### Changed
 
@@ -57,6 +78,9 @@ Incompatible changes are prefixed with **BREAKING:**.
 - Every login is checked once more after the SSH handshake against the
   configuration current then: a key removed by a reload while a client was
   logging in is refused.
+- `cert-authority` lines in `authorized_keys` files, which were skipped with
+  a warning, now take effect: check existing files before upgrading. In
+  zero-config mode without `--user`, such a line needs `principals=`.
 
 ### Fixed
 

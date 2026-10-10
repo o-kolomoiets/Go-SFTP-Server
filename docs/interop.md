@@ -5,7 +5,7 @@ change. Tested:
 
 | Client | Version | What is checked |
 |---|---|---|
-| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; `on_conflict = "version"`; `kill -9` of the client during an atomic upload; refused: symlink escape, `ln`, `ln -s`, shell and exec |
+| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; `on_conflict = "version"`; `kill -9` of the client during an atomic upload; user certificates from `ssh-keygen -s` (trusted CA, `force-command=internal-sftp`, another principal refused, revoked after a reload, a KRL refused); refused: symlink escape, `ln`, `ln -s`, shell and exec |
 | paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users, password login, user name change within a connection refused |
 | rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount |
 | lftp | 4.9.2 | put, get, listing |
