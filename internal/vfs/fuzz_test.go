@@ -22,6 +22,7 @@ func fuzzPathSeeds(f *testing.F) {
 		"/share/evil/secret.txt", "../outside/secret.txt", "/share/.gosftpd-1.part",
 		"/share/.versions/a.txt", "C:\\Windows", "\\\\server\\share", "a\x00b", "/share/" + strings.Repeat("x/", 70),
 		"/share/aux", "/share/a.", "/share/a ", "\xff\xfe", "/ŝhare/ä",
+		strings.Repeat("a", maxPathLen), // found by fuzz-smoke: its client path was 1 byte too long
 	} {
 		f.Add(s)
 	}

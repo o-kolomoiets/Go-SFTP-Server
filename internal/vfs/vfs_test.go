@@ -126,6 +126,10 @@ func TestResolve(t *testing.T) {
 		{in: "/one/a\x00b", wantErr: ErrInvalidPath},
 		{in: "/one/\xff", wantErr: ErrInvalidPath},
 		{in: "/one/" + strings.Repeat("d/", maxDepth+1), wantErr: ErrInvalidPath},
+		{in: "/one/" + strings.Repeat("a", maxPathLen-5), mount: "one", rel: strings.Repeat("a", maxPathLen-5)},
+		// The limit applies to the canonical path, which starts with "/":
+		// a path that resolves is one that REALPATH can return.
+		{in: "one/" + strings.Repeat("a", maxPathLen-4), wantErr: ErrInvalidPath},
 	}
 	for _, tt := range tests {
 		v, rel, err := s.resolve(tt.in)

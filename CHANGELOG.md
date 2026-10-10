@@ -70,6 +70,9 @@ Incompatible changes are prefixed with **BREAKING:**.
   cut off at the end of the file.
 - A data race between an upload being opened and another session checking
   whether a file is its own upload.
+- A client path of 4096 bytes without a leading `/` was accepted, although
+  the path the server returned for it (REALPATH) was one byte too long and
+  refused; the limit now applies to the cleaned path (found by fuzzing).
 
 ## [0.3.0] - 2026-10-09
 
