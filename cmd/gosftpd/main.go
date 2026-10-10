@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Command gosftpd is a secure-by-default SFTP server.
+// Command gosftpd turns a folder into an SFTP drop-box with an audit log.
 package main
 
 import (

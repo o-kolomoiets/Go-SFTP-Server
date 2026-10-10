@@ -4,16 +4,27 @@
 [![Release](https://img.shields.io/github/v/release/o-kolomoiets/go-sftp-server?include_prereleases)](https://github.com/o-kolomoiets/go-sftp-server/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**gosftpd is a single static binary that turns any directory into a secure
-SFTP drop-box: key-only login, confinement with Go's `os.Root`, uploads that
-never silently overwrite a file, and a JSON audit log of every action. No
-root, no database, no web UI.**
+**Turn a folder into an SFTP drop-box.**
 
-> **Status: alpha.** It works with OpenSSH, paramiko, rclone and lftp, with
-> several users and per-folder permissions, and has the hardening of v0.3:
-> connection limits, bans, disk limits, atomic uploads and fuzzing. Before
-> exposing it, read the [hardening guide](docs/security/hardening.md). See
-> the [plan](#plan).
+gosftpd is an SFTP server in a single binary, for receiving files from
+people, devices and backup jobs. Run `gosftpd serve --dir ./share` as an
+ordinary user and it accepts the keys in your `~/.ssh/authorized_keys`; for
+more users, write one TOML file.
+
+- **No root, no system accounts, no database.** Users and per-folder
+  permissions live in that file, not `/etc/passwd`.
+- **Users stay where you put them.** Each sees only the folders you grant,
+  nothing outside them ([limits](docs/security.md#limits-of-the-protection)).
+- **No surprise overwrites.** By default a second `report.pdf` arrives as
+  `report (1).pdf`; overwriting or keeping old versions is set per folder.
+- **You know who did what.** Every login, transfer and change goes to a JSON
+  audit log. By default, if the log cannot be written, gosftpd refuses changes
+  and new connections.
+
+> **Status: alpha.** It works, and CI tests it with OpenSSH `sftp` and `scp`,
+> paramiko, rclone and lftp. Read the
+> [hardening guide](docs/security/hardening.md) before exposing it to the
+> internet, and see the [plan](#plan) for v1.0.
 
 ## What it is, and what it is not
 
