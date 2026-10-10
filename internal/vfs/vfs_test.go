@@ -611,7 +611,7 @@ func TestSplitExtAndCandidate(t *testing.T) {
 			t.Errorf("candidate(%q) = %q, want %q", in, got, want)
 		}
 	}
-	long := strings.Repeat("я", 200) + ".txt"
+	long := strings.Repeat("λ", 200) + ".txt"
 	stem, ext := splitExt(long, DefaultCompoundExtensions)
 	got := candidate(DefaultRenameTemplate, stem, "1", ext)
 	if len(got) > maxNameLen || !strings.HasSuffix(got, " (1).txt") || !utf8Valid(got) {

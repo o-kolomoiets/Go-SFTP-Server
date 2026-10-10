@@ -149,8 +149,8 @@ log.
 
 ## Plan
 
-The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md) (in
-Russian); progress is tracked in [TASKS.md](TASKS.md). Next (v0.4): user management
+The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md);
+progress is tracked in [TASKS.md](TASKS.md). Next (v0.4): user management
 commands, SSH certificates, metrics, hooks and systemd integration.
 
 ## Contributing

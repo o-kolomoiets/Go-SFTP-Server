@@ -153,7 +153,7 @@ func FuzzResolveInRoot(f *testing.F) {
 func FuzzConflictName(f *testing.F) {
 	for _, s := range []string{
 		"report.pdf", "archive.tar.gz", ".env", "README", "a (1).txt", "x.",
-		strings.Repeat("я", 127) + ".txt", strings.Repeat("a", 251) + " (1)",
+		strings.Repeat("λ", 127) + ".txt", strings.Repeat("a", 251) + " (1)",
 		"a." + strings.Repeat("e", 252), strings.Repeat("b", 255),
 	} {
 		f.Add(s, uint8(3), DefaultRenameTemplate)

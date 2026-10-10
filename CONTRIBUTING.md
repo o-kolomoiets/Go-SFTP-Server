@@ -28,7 +28,10 @@ before proposing larger changes, and open an issue first to discuss them.
 - Each `.go` file starts with `// SPDX-License-Identifier: Apache-2.0`.
 - Commit messages and PR titles follow
   [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
-  (`feat:`, `fix:`, `docs:`, `ci:`, `chore(deps):` …) and are written in English.
+  (`feat:`, `fix:`, `docs:`, `ci:`, `chore(deps):` …).
+- Everything is written in English: code, comments, tests, documentation,
+  commit messages, issues and pull requests
+  ([ADR 0006](docs/adr/0006-english.md)).
 - Sign off your commits (`git commit -s`) to certify the
   [Developer Certificate of Origin](https://developercertificate.org/).
 - Update the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md).
