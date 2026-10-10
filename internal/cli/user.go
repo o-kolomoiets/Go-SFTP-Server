@@ -20,17 +20,19 @@ import (
 	"golang.org/x/term"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
+	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "user",
-		Short: "Prepare and list users",
+		Short: "Add, list, disable and remove users",
 		Args:  noArgs,
 		RunE:  showHelp,
 	}
-	cmd.AddCommand(newUserAddCmd(), newUserListCmd(), newHashPasswordCmd())
+	cmd.AddCommand(newUserAddCmd(), newUserListCmd(), newHashPasswordCmd(),
+		newUserEditCmd("disable", config.DisableUser), newUserEditCmd("enable", config.EnableUser), newUserEditCmd("remove", config.RemoveUser))
 	return cmd
 }
 
@@ -40,19 +42,27 @@ type userAddOptions struct {
 	access       []string
 	expires      string
 	allowFrom    []string
+	write        bool
+	config       string
+	host         string
 }
 
 func newUserAddCmd() *cobra.Command {
 	var o userAddOptions
 	cmd := &cobra.Command{
 		Use:   "add NAME --key FILE|KEY|--password-hash HASH --access MOUNT=PERMISSIONS...",
-		Short: "Print a [users.NAME] block to add to the configuration",
-		Long: `Print a [users.NAME] block to add to the configuration file (or to a file in
-users.d/ if the configuration includes it). Nothing is written to disk.
+		Short: "Add a user, or print its [users.NAME] block",
+		Long: `Print a [users.NAME] block to add to the configuration file. With --write,
+write it to users.d/NAME.toml instead (the directory of the configuration's
+include = ["users.d/*.toml"]), after checking the configuration with the
+new user, and print the connection details to send to the user. The main
+configuration file is never rewritten. A running server applies the new
+file on reload (systemctl reload gosftpd, or kill -HUP).
 
 Permissions are a preset (read, upload, readwrite, full) or a list of flags
 (list, read, write, overwrite, delete, rename, mkdir, rmdir, setstat).`,
-		Example: `  gosftpd user add partner --key partner.pub --access inbox=upload --expires 720h >> gosftpd.toml
+		Example: `  gosftpd user add partner --key partner.pub --access inbox=upload --expires 720h --write
+  gosftpd user add partner --key partner.pub --access inbox=upload >> gosftpd.toml
   gosftpd user add alice --key "ssh-ed25519 AAAA... alice@laptop" --access home=full --access public=read`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
@@ -65,11 +75,17 @@ Permissions are a preset (read, upload, readwrite, full) or a list of flags
 			if err != nil {
 				return usageError{err}
 			}
-			_, err = fmt.Fprint(cmd.OutOrStdout(), block)
-			return err
+			if !o.write {
+				_, err = fmt.Fprint(cmd.OutOrStdout(), block)
+				return err
+			}
+			return writeUser(cmd.OutOrStdout(), args[0], block, o)
 		},
 	}
 	f := cmd.Flags()
+	f.BoolVar(&o.write, "write", false, "write users.d/NAME.toml instead of printing the block")
+	f.StringVar(&o.config, "config", "", "with --write: configuration file (default: the one serve would use)")
+	f.StringVar(&o.host, "host", "", "with --write: host name in the connection details (default: from listen, or this host's name)")
 	f.StringArrayVar(&o.keys, "key", nil, "public key, or a file with public keys (repeatable)")
 	f.StringVar(&o.passwordHash, "password-hash", "", "password hash from 'gosftpd user hash-password'")
 	f.StringArrayVar(&o.access, "access", nil, "MOUNT=PERMISSIONS (repeatable)")
@@ -146,6 +162,124 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 	}
 	fmt.Fprintf(&b, "access = { %s }\n", strings.Join(access, ", "))
 	return b.String(), nil
+}
+
+// writeUser writes the block of user name to its own file, after checking
+// the whole configuration with it.
+func writeUser(out io.Writer, name, block string, o userAddOptions) error {
+	c, err := loadConfig(o.config, os.Getenv)
+	if err != nil {
+		return err
+	}
+	if prev, ok := c.Users[name]; ok {
+		return usageError{fmt.Errorf("user %q already exists in %s", name, prev.From)}
+	}
+	path, err := c.UsersFile(name)
+	if err != nil {
+		return usageError{err}
+	}
+	data := []byte("# Written by gosftpd user add on " + time.Now().UTC().Format(time.RFC3339) + ".\n" + strings.TrimPrefix(block, "\n"))
+	users, err := config.ParseUsers(path, data)
+	if err != nil {
+		return err
+	}
+	u := users[name]
+	u.From = path
+	c.Users[name] = u
+	c.Files = append(c.Files, path)
+	if _, err := checkConfig(c, false); err != nil {
+		return err
+	}
+	cfg, err := os.Stat(c.File)
+	if err != nil {
+		return err
+	}
+	if err := writeUsersFile(path, data, usersFileMode(cfg), cfg, true); err != nil {
+		return fmt.Errorf("user add: %w", err)
+	}
+	fmt.Fprintf(out, "Wrote %s. Apply it with: systemctl reload gosftpd (or kill -HUP the server).\n\n", path)
+	_, err = fmt.Fprint(out, partnerInstructions(c, name, o.host))
+	return err
+}
+
+func newUserEditCmd(verb string, edit config.UserEdit) *cobra.Command {
+	var file string
+	short := map[config.UserEdit]string{
+		config.DisableUser: "Disable a user: keep it, but refuse its logins",
+		config.EnableUser:  "Enable a disabled user",
+		config.RemoveUser:  "Remove a user",
+	}[edit]
+	cmd := &cobra.Command{
+		Use:   verb + " NAME",
+		Short: short,
+		Long: short + `.
+
+The user must be defined in an included file (such as users.d/NAME.toml from
+user add --write): the main configuration file is never rewritten. The rest
+of the file, comments included, stays as it is. A running server applies
+the change on reload (systemctl reload gosftpd, or kill -HUP); connections
+that are open stay unless reload.disconnect_removed_users is true.`,
+		Example: "  gosftpd user " + verb + " partner",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+				return usageError{err}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return editUser(cmd.OutOrStdout(), file, args[0], verb, edit)
+		},
+	}
+	cmd.Flags().StringVar(&file, "config", "", "configuration file (default: the one serve would use)")
+	return cmd
+}
+
+func editUser(out io.Writer, file, name, verb string, edit config.UserEdit) error {
+	c, err := loadConfig(file, os.Getenv)
+	if err != nil {
+		return err
+	}
+	u, ok := c.Users[name]
+	switch {
+	case !ok:
+		return usageError{fmt.Errorf("no user %q in %s", name, c.File)}
+	case u.From == c.File:
+		return usageError{fmt.Errorf("user %q is defined in %s itself, which gosftpd does not rewrite (its comments would be lost); change it there", name, c.File)}
+	}
+	fi, err := os.Stat(u.From)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(u.From)
+	if err != nil {
+		return err
+	}
+	out2, changed, err := config.EditUser(u.From, data, name, edit)
+	if err != nil {
+		return configError{err}
+	}
+	if !changed {
+		_, err := fmt.Fprintf(out, "%s is %sd already.\n", name, verb)
+		return err
+	}
+	if users, err := config.ParseUsers(u.From, out2); err == nil && len(users) == 0 {
+		err = os.Remove(u.From)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Removed %s and its file %s.", name, u.From)
+	} else {
+		if err := writeUsersFile(u.From, out2, fi.Mode().Perm(), fi, false); err != nil {
+			return err
+		}
+		past := map[config.UserEdit]string{config.DisableUser: "Disabled", config.EnableUser: "Enabled", config.RemoveUser: "Removed"}[edit]
+		fmt.Fprintf(out, "%s %s in %s.", past, name, u.From)
+	}
+	fmt.Fprintln(out, " Apply it with: systemctl reload gosftpd (or kill -HUP the server).")
+	if edit != config.EnableUser && !c.Reload.DisconnectRemovedUsers {
+		fmt.Fprintln(out, "Open connections of the user stay until they end; set reload.disconnect_removed_users = true to close them on reload.")
+	}
+	return nil
 }
 
 // keyLines returns the key itself, or the usable lines of a key file.

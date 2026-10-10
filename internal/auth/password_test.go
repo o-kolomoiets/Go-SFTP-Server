@@ -400,3 +400,22 @@ func TestPasswordClasses(t *testing.T) {
 		t.Errorf("bcrypt dummy compare = %v, want a mismatch after hashing", err)
 	}
 }
+
+// A right password of an account that may not log in is refused with a
+// reason; a wrong one gives none.
+func TestCheckPasswordReason(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	h := slowHash{cls: "x", pw: "right", calls: &calls}
+	a := NewUsers([]User{{Name: "alice", Password: h, Expires: time.Now().Add(-time.Hour)}})
+	a.pad.classes = []PasswordHash{h.dummy()} // without the real argon2id default
+	conn := fakeConn{user: "alice"}
+	var re *RefusedError
+	if _, _, err := a.CheckPassword(conn, []byte("right")); !errors.As(err, &re) || re.Reason != ReasonExpired {
+		t.Errorf("right password of an expired account = %v", err)
+	}
+	if _, _, err := a.CheckPassword(conn, []byte("wrong")); err == nil || errors.As(err, new(*RefusedError)) {
+		t.Errorf("wrong password = %v; want a failure without a reason", err)
+	}
+}

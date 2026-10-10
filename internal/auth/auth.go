@@ -210,6 +210,21 @@ func (a *Authenticator) lookup(name string) *account {
 // unknown users, wrong keys, disabled or expired accounts and disallowed
 // source addresses all fail the same way.
 func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	perms, err := a.KnownKey(conn, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.VerifiedKey(conn, key, perms); err != nil {
+		return nil, errDenied
+	}
+	return perms, nil
+}
+
+// KnownKey is the first half of PublicKey, for a PublicKeyCallback paired
+// with VerifiedKey as VerifiedPublicKeyCallback: it accepts key if it is
+// one of the user's keys, whatever the state of the account. The client has
+// not yet proved that it holds the private key, so nothing is recorded.
+func (a *Authenticator) KnownKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	name := conn.User()
 	acc := a.lookup(name)
 	keys := noKeys.keys
@@ -217,10 +232,7 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 		keys = acc.keys
 	}
 	k, ok := keys[string(key.Marshal())]
-	if !ok || !a.allowed(acc, conn) {
-		return nil, errDenied
-	}
-	if !k.expires.IsZero() && a.now().After(k.expires) {
+	if !ok {
 		return nil, errDenied
 	}
 	perms := newPermissions(name, MethodPublicKey)
@@ -235,6 +247,44 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 	}
 	return perms, nil
 }
+
+// VerifiedKey is the second half of PublicKey, a VerifiedPublicKeyCallback:
+// the client has proved that it holds key, which KnownKey accepted. It
+// checks the account and the key against a, which may be the authenticator
+// of a newer configuration, and says why it refuses (*RefusedError).
+func (a *Authenticator) VerifiedKey(conn ssh.ConnMetadata, key ssh.PublicKey, perms *ssh.Permissions) (*ssh.Permissions, error) {
+	acc := a.lookup(conn.User())
+	if acc == nil {
+		return nil, &RefusedError{Reason: ReasonRemoved}
+	}
+	k, ok := acc.keys[string(key.Marshal())]
+	if !ok {
+		return nil, &RefusedError{Reason: ReasonRemoved}
+	}
+	if reason := a.refusal(acc, conn); reason != "" {
+		return nil, &RefusedError{Reason: reason}
+	}
+	if !k.expires.IsZero() && a.now().After(k.expires) {
+		return nil, &RefusedError{Reason: ReasonKeyExpired}
+	}
+	return perms, nil
+}
+
+// Reasons a login with valid credentials is refused (RefusedError).
+const (
+	ReasonDisabled   = "disabled"    // the account is disabled
+	ReasonExpired    = "expired"     // the account has expired
+	ReasonAddress    = "address"     // allow_from does not match the client
+	ReasonKeyExpired = "key_expired" // the key's expiry-time has passed
+	ReasonRemoved    = "removed"     // a reload removed the user or the key
+)
+
+// RefusedError refuses a login whose credentials were right: the client
+// proved that it holds the key, or knew the password. The client is told
+// no more than for any failure; Reason is for the audit log.
+type RefusedError struct{ Reason string }
+
+func (e *RefusedError) Error() string { return "authentication failed: " + e.Reason }
 
 // Password is an ssh.ServerConfig.PasswordCallback: CheckPassword, and a
 // failure waits as long as CheckPassword says.
@@ -267,8 +317,11 @@ func (a *Authenticator) CheckPassword(conn ssh.ConnMetadata, password []byte) (*
 	took := time.Since(start)
 	a.release(n)
 	a.pad.observe(took)
-	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
+	if !ok || acc == nil || acc.password == nil {
 		return nil, a.pad.rest(took), errDenied
+	}
+	if reason := a.refusal(acc, conn); reason != "" {
+		return nil, a.pad.rest(took), &RefusedError{Reason: reason}
 	}
 	perms := newPermissions(name, MethodPassword)
 	perms.Extensions[extPassword] = acc.password.id()
@@ -297,13 +350,20 @@ func (a *Authenticator) release(n int) {
 
 // allowed checks the account-wide conditions of a login.
 func (a *Authenticator) allowed(acc *account, conn ssh.ConnMetadata) bool {
+	return acc != nil && a.refusal(acc, conn) == ""
+}
+
+// refusal returns why the account-wide conditions refuse a login, or "".
+func (a *Authenticator) refusal(acc *account, conn ssh.ConnMetadata) string {
 	switch {
-	case acc == nil, acc.disabled:
-		return false
+	case acc.disabled:
+		return ReasonDisabled
 	case !acc.expires.IsZero() && a.now().After(acc.expires):
-		return false
+		return ReasonExpired
+	case !addrAllowed(acc.allowFrom, conn.RemoteAddr()):
+		return ReasonAddress
 	}
-	return addrAllowed(acc.allowFrom, conn.RemoteAddr())
+	return ""
 }
 
 func newPermissions(user, method string) *ssh.Permissions {

@@ -25,6 +25,17 @@ Incompatible changes are prefixed with **BREAKING:**.
 - Audit event `server.reload`; `conn.close` result `revoked`.
 - `sd_notify`: `READY=1`, `RELOADING=1` with `MONOTONIC_USEC`, `STOPPING=1`
   (`Type=notify-reload`).
+- `user add --write` writes `users.d/NAME.toml` after checking the
+  configuration with the new user, and prints the connection details for
+  the user (host, port, host key fingerprint, `sftp` command). `user
+  disable`, `enable` and `remove` change a user's file without touching the
+  rest of it; the main configuration file is never rewritten. `gosftpd init`
+  includes `users.d/*.toml`.
+- `auth.failure` has a `reason` when the credentials were right but the
+  login was refused: `disabled`, `expired`, `address`, `key_expired` or
+  `removed`. A key's account is checked once the client has proved that it
+  holds the key (`VerifiedPublicKeyCallback`), so the reason is never
+  recorded for someone who only knows a public key.
 
 ### Changed
 

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -275,6 +276,62 @@ func TestRecheck(t *testing.T) {
 	}
 	if before.Recheck(conn, nil) || before.Recheck(conn, newPermissions("alice", "keyboard-interactive")) {
 		t.Error("Recheck accepted permissions without a login")
+	}
+}
+
+// KnownKey accepts a user's key whatever the account's state; VerifiedKey,
+// after the client proved that it holds the key, says why it refuses.
+func TestVerifiedKeyReasons(t *testing.T) {
+	t.Parallel()
+
+	k := newKey(t)
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	expiring, _ := ParseAuthorizedKeys([]byte(authorizedLine(t, `expiry-time="20261001"`, k)), "test")
+	conn := fakeConn{user: "alice", addr: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1}}
+	for _, tt := range []struct {
+		name   string
+		user   User
+		reason string
+	}{
+		{"active", User{Keys: []Key{{Key: k}}}, ""},
+		{"disabled", User{Keys: []Key{{Key: k}}, Disabled: true}, ReasonDisabled},
+		{"expired", User{Keys: []Key{{Key: k}}, Expires: now.Add(-time.Hour)}, ReasonExpired},
+		{"address", User{Keys: []Key{{Key: k}}, AllowFrom: mustPrefixes(t, "10.0.0.0/8")}, ReasonAddress},
+		{"key expired", User{Keys: expiring}, ReasonKeyExpired},
+	} {
+		tt.user.Name = "alice"
+		a := NewUsers([]User{tt.user})
+		a.now = func() time.Time { return now }
+		perms, err := a.KnownKey(conn, k)
+		if err != nil {
+			t.Errorf("%s: KnownKey refused a configured key: %v", tt.name, err)
+			continue
+		}
+		_, err = a.VerifiedKey(conn, k, perms)
+		var re *RefusedError
+		switch {
+		case tt.reason == "" && err != nil:
+			t.Errorf("%s: VerifiedKey: %v", tt.name, err)
+		case tt.reason != "" && (!errors.As(err, &re) || re.Reason != tt.reason):
+			t.Errorf("%s: VerifiedKey = %v, want reason %s", tt.name, err, tt.reason)
+		}
+		if _, err := a.PublicKey(conn, k); (err == nil) != (tt.reason == "") {
+			t.Errorf("%s: PublicKey = %v", tt.name, err)
+		}
+		if _, err := a.PublicKey(conn, k); err != nil && errors.As(err, &re) {
+			t.Errorf("%s: PublicKey tells the reason: %v", tt.name, err)
+		}
+	}
+
+	a := NewUsers([]User{{Name: "alice", Keys: []Key{{Key: k}}}})
+	if _, err := a.KnownKey(conn, newKey(t)); err == nil || errors.As(err, new(*RefusedError)) {
+		t.Errorf("KnownKey with another key = %v", err)
+	}
+	perms, _ := a.KnownKey(conn, k)
+	var re *RefusedError
+	reloaded := NewUsers(nil) // a reload removed alice between the two calls
+	if _, err := reloaded.VerifiedKey(conn, k, perms); !errors.As(err, &re) || re.Reason != ReasonRemoved {
+		t.Errorf("VerifiedKey after a reload removed the user = %v", err)
 	}
 }
 

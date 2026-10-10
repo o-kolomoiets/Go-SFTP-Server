@@ -31,8 +31,11 @@ disabled or expired and may log in from that address, and still has the
 key the login used, unexpired and with the same options, or the same
 password hash. x/crypto caches the result of a public-key query and does not
 call the callback again for the signed request, so a key removed between
-the two (a passphrase prompt, a security key touch) is only caught here
-(review finding). A refused login is audited as `auth.failure` and
+the two (a passphrase prompt, a security key touch) needs another check
+(review finding). Since M4b, `VerifiedPublicKeyCallback` checks the account
+and the key against the current snapshot once the client has proved that
+it holds the key, which refuses such a login with `reason = "removed"`;
+step 3 still catches a reload that lands after that. A refused login is audited as `auth.failure` and
 `conn.close` with `result = "revoked"`, and counts toward bans.
 
 **Removed users.** With `reload.disconnect_removed_users = true`, a reload

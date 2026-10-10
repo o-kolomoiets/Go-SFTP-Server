@@ -771,3 +771,36 @@ func TestNegativeLimits(t *testing.T) {
 		t.Errorf("zero timeouts: idle %v, keepalive %v, want the defaults", zc.IdleTimeout, zc.KeepaliveInterval)
 	}
 }
+
+// A login with the right key of an expired account is refused like any
+// other failure, and the audit log says why.
+func TestRefusalReasonAudited(t *testing.T) {
+	t.Parallel()
+
+	key := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Keys: keys, Expires: time.Now().Add(-time.Hour)}})
+	}})
+	if c, err := e.dialAs(t, "bob", key); err == nil {
+		c.Close()
+		t.Fatal("an expired account logged in")
+	}
+	if c, err := e.dialAs(t, "bob", signer(t)); err == nil {
+		c.Close()
+		t.Fatal("a wrong key logged in")
+	}
+	waitForMsg(t, func() bool { return strings.Count(e.auditLog.String(), `"event":"auth.failure"`) == 2 },
+		func() string { return "auth.failure events:\n" + e.auditLog.String() })
+	lines := auditLines(t, e.auditLog.String())
+	checkSchema(t, lines)
+	var reasons []any
+	for _, l := range lines {
+		if l["event"] == "auth.failure" {
+			reasons = append(reasons, l["reason"])
+		}
+	}
+	if len(reasons) != 2 || reasons[0] != "expired" || reasons[1] != nil {
+		t.Errorf("auth.failure reasons = %v, want [expired <nil>]", reasons)
+	}
+}

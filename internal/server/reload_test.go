@@ -88,8 +88,10 @@ func (s *slowSigner) Sign(rand io.Reader, data []byte) (*ssh.Signature, error) {
 }
 
 // x/crypto remembers that a key was accepted when the client asked, and
-// does not ask the callback again for the signed request: a key removed by
-// a reload in between is caught after the handshake.
+// does not ask PublicKeyCallback again for the signed request: a key
+// removed by a reload in between is refused by VerifiedPublicKeyCallback,
+// which checks the current configuration (and, behind it, by the recheck
+// after the handshake).
 func TestReloadRevokesLoginInFlight(t *testing.T) {
 	t.Parallel()
 
@@ -117,8 +119,8 @@ func TestReloadRevokesLoginInFlight(t *testing.T) {
 		}
 		r.c.Close()
 	}
-	waitForMsg(t, func() bool { return strings.Contains(e.auditLog.String(), `"result":"revoked"`) },
-		func() string { return "the login was not refused after the handshake:\n" + e.auditLog.String() })
+	waitForMsg(t, func() bool { return strings.Contains(e.auditLog.String(), `"reason":"removed"`) },
+		func() string { return "the login was not refused with reason removed:\n" + e.auditLog.String() })
 	if strings.Contains(e.auditLog.String(), `"event":"auth.success"`) {
 		t.Errorf("a revoked login was audited as a success:\n%s", e.auditLog.String())
 	}

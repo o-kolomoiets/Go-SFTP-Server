@@ -428,7 +428,8 @@ is given: run it as a dedicated user.
 | `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions. |
 | `gosftpd config show` | Prints the effective configuration. |
 | `gosftpd config example [--full]` | Prints an example. |
-| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append; writes nothing. `--password-hash` adds a password. |
+| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, `--expires` an expiry (`720h` or a date). With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name). |
+| `gosftpd user disable\|enable\|remove NAME` | Changes a user defined in an included file, keeping the rest of the file and its comments; `remove` deletes a file left without users. The main configuration file is never rewritten. A reload applies the change. |
 | `gosftpd user hash-password [--stdin]` | Asks for a password twice (or reads one line with `--stdin`) and prints its argon2id hash. |
 | `gosftpd user list` | Lists users with access, key count, password, expiry and status (`off` when `auth.methods` leaves the method out). |
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |

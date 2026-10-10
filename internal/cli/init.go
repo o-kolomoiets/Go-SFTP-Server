@@ -117,7 +117,8 @@ func runInit(w io.Writer, o initOptions) error {
 	fmt.Fprintf(&b, "# gosftpd configuration, created by gosftpd init.\n")
 	fmt.Fprintf(&b, "# Reference of every key: gosftpd config example --full\n")
 	fmt.Fprintf(&b, "# Check it with: gosftpd config validate --check-fs\n")
-	fmt.Fprintf(&b, "config_version = %d\n\n", config.Version)
+	fmt.Fprintf(&b, "config_version = %d\n", config.Version)
+	fmt.Fprintf(&b, "include = [\"users.d/*.toml\"]  # gosftpd user add --write puts users there\n\n")
 	fmt.Fprintf(&b, "[server]\nlisten = [\":2022\"]\n")
 	fmt.Fprintf(&b, "host_keys = %s\n", tomlStrings([]string{keyPath}))
 	fmt.Fprintf(&b, "host_key_auto_generate = true\n\n")
@@ -127,7 +128,7 @@ func runInit(w io.Writer, o initOptions) error {
 		fmt.Fprintf(&b, "\n[mounts.%s]\npath = %s\ncreate = true\n", tomlKey(m.name), tomlString(m.path))
 		access = append(access, tomlKey(m.name)+" = \"full\"")
 	}
-	fmt.Fprintf(&b, "\n# Add users with: gosftpd user add NAME --key FILE --access MOUNT=upload\n")
+	fmt.Fprintf(&b, "\n# Add users with: gosftpd user add NAME --key FILE --access MOUNT=upload --write\n")
 	fmt.Fprintf(&b, "[users.%s]\n", tomlKey(name))
 	if keysFile != "" {
 		fmt.Fprintf(&b, "authorized_keys_file = %s\n", tomlString(keysFile))
@@ -160,7 +161,7 @@ func runInit(w io.Writer, o initOptions) error {
 		fmt.Fprintf(w, "\nNo authorized_keys found: paste your public key into %s first.\n", o.out)
 	}
 	fmt.Fprintf(w, "\nNext steps:\n")
-	fmt.Fprintf(w, "  gosftpd user add NAME --key FILE --access %s=upload >> %s\n", mounts[0].name, o.out)
+	fmt.Fprintf(w, "  gosftpd user add NAME --key FILE --access %s=upload --write\n", mounts[0].name)
 	fmt.Fprintf(w, "  gosftpd config validate --check-fs\n")
 	fmt.Fprintf(w, "  gosftpd serve\n")
 	return nil

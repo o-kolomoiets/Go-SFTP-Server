@@ -150,6 +150,7 @@ printf '#!/bin/sh\necho "%s"\n' "$COURIER_PASSWORD" >"$WORK/askpass"; chmod 700 
 PORT=$((20000 + RANDOM % 20000))
 cat >"$C/gosftpd.toml" <<TOML
 config_version = 1
+include = ["users.d/*.toml"]
 
 [server]
 listen = ["127.0.0.1:$PORT"]
@@ -456,6 +457,31 @@ if sftp -P "$PORT" $(as partner) -b "$C/pwd.batch" partner@127.0.0.1 >/dev/null 
 echo "put $WORK/local/short.txt held2.txt" >&4
 exec 4>&-
 if wait "$HELD_PID" && [ -e "$C/inbox/held2.txt" ]; then pass "reload: an open session keeps its configuration"; else fail "reload: open session: $(tail -3 "$C/held.out")"; fi
+
+# user add --write, then disable: each applied by a reload.
+ssh-keygen -q -t ed25519 -N '' -C carol -f "$WORK/id_carol"
+if "$WORK/gosftpd" user add carol --key "$WORK/id_carol.pub" --access public=read --write --config "$C/gosftpd.toml" \
+	--host 127.0.0.1 >"$C/carol.out" 2>&1 && grep -q "connect: sftp -P $PORT carol@127.0.0.1" "$C/carol.out"; then
+	pass "user add --write: file and connection details"
+else
+	fail "user add --write: $(cat "$C/carol.out")"
+fi
+hup || fail "reload after user add"
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as carol) -b "$C/pwd.batch" carol@127.0.0.1 >/dev/null 2>&1 && pass "user add --write: the user logs in after a reload" || fail "user add --write: carol cannot log in"
+"$WORK/gosftpd" user disable carol --config "$C/gosftpd.toml" >/dev/null || fail "user disable"
+hup || fail "reload after user disable"
+# shellcheck disable=SC2046
+if sftp -P "$PORT" $(as carol) -b "$C/pwd.batch" carol@127.0.0.1 >/dev/null 2>&1; then
+	fail "user disable: carol still logs in"
+else
+	pass "user disable: the login is refused after a reload"
+fi
+for _ in $(seq 50); do
+	if grep -q '"event":"auth.failure".*"reason":"disabled"' "$C/audit.jsonl"; then break; fi
+	sleep 0.1
+done
+grep -q '"event":"auth.failure".*"reason":"disabled"' "$C/audit.jsonl" && pass "user disable: audit has reason disabled" || fail "user disable: no auth.failure with reason disabled"
 
 # An invalid configuration is refused; the running one stays.
 printf '[server\n' >>"$C/gosftpd.toml"

@@ -440,7 +440,12 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		log.Debug("handshake failed", "err", err)
 		if ca.accepted.Load() {
 			u, _ := ca.attemptedUser.Load().(string)
-			al.Event("auth.failure", slog.String("user", u), slog.Int("attempts", int(ca.failures.Load())))
+			attrs := []slog.Attr{slog.String("user", u), slog.Int("attempts", int(ca.failures.Load()))}
+			if reason, _ := ca.reason.Load().(string); reason != "" {
+				log.Info("login refused", "user", u, "reason", reason)
+				attrs = append(attrs, slog.String("reason", reason))
+			}
+			al.Event("auth.failure", attrs...)
 			ca.closedWithoutLogin()
 			closed("error")
 		}
@@ -507,6 +512,7 @@ type connAuth struct {
 	isIP bool
 
 	user          pinnedUser
+	reason        atomic.Value // why valid credentials were refused (auth.Reason*)
 	accepted      atomic.Bool
 	failures      atomic.Int32 // every failed attempt
 	keyFailures   atomic.Int32 // failed attempts other than passwords
@@ -524,6 +530,9 @@ func (s *Server) newConnAuth(c net.Conn, al *audit.Logger) *connAuth {
 func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 	cfg := *sn.ssh
 	if sn.publicKey {
+		// The key is looked up when the client offers it, and the account
+		// checked once the client has proved that it holds the key: only
+		// then does a refusal have a reason worth auditing.
 		cfg.PublicKeyCallback = func(md ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if !ca.user.same(md.User()) {
 				return nil, errUserChanged
@@ -532,7 +541,16 @@ func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 			if !cur.publicKey {
 				return nil, errMethodOff
 			}
-			return cur.cfg.Auth.PublicKey(md, key)
+			return cur.cfg.Auth.KnownKey(md, key)
+		}
+		cfg.VerifiedPublicKeyCallback = func(md ssh.ConnMetadata, key ssh.PublicKey, perms *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+			cur := ca.s.snap.Load()
+			if !cur.publicKey {
+				return nil, errMethodOff
+			}
+			perms, err := cur.cfg.Auth.VerifiedKey(md, key, perms)
+			ca.refused(err)
+			return perms, err
 		}
 	}
 	if sn.password {
@@ -552,6 +570,7 @@ func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 				return nil, errMethodOff
 			}
 			perms, wait, err := cur.cfg.Auth.CheckPassword(md, password)
+			ca.refused(err)
 			if err != nil {
 				// Count before the wait, so that the source's other
 				// connections see a ban as early as possible.
@@ -584,6 +603,13 @@ func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 		}
 	}
 	return &cfg
+}
+
+// refused records why a login with valid credentials was refused.
+func (ca *connAuth) refused(err error) {
+	if re, ok := errors.AsType[*auth.RefusedError](err); ok {
+		ca.reason.Store(re.Reason)
+	}
 }
 
 func (ca *connAuth) banned() bool {
