@@ -237,3 +237,20 @@ func TestUserAddCertificate(t *testing.T) {
 		t.Errorf("--key with a cert-authority line: exit %d: %s%s", code, out, errOut)
 	}
 }
+
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]string{
+		"alice":              "alice",
+		"alice@corp.example": "alice@corp.example",
+		"Alice Smith":        "'Alice Smith'",
+		"it's":               `'it'\''s'`,
+		"$(rm -rf x)":        "'$(rm -rf x)'",
+		"":                   "''",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

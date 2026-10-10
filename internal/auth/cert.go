@@ -11,6 +11,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -127,10 +128,10 @@ func (r *RevokedKeys) Len() int {
 // valid UTF-8), its serial as a decimal string (CAs use random 64-bit
 // serials, which JSON numbers do not keep) and the fingerprint of its CA.
 func CertAudit(cert *ssh.Certificate) (keyID, serial, caFingerprint string) {
-	keyID = cert.KeyId
+	keyID = strings.ToValidUTF8(cert.KeyId, "\uFFFD")
 	if len(keyID) > maxKeyIDLen {
 		keyID = keyID[:maxKeyIDLen]
-		for !utf8.ValidString(keyID) && keyID != "" {
+		for !utf8.ValidString(keyID) { // only the cut can split a rune
 			keyID = keyID[:len(keyID)-1]
 		}
 	}
@@ -165,7 +166,7 @@ func (a *Authenticator) authentic(cert *ssh.Certificate) bool {
 		checkKeyType(cert.Key) != nil || checkKeyType(cert.SignatureKey) != nil {
 		return false
 	}
-	return a.verified.verify(cert)
+	return a.verified.check(cert)
 }
 
 func (a *Authenticator) knownCA(k ssh.PublicKey) bool {
@@ -212,7 +213,7 @@ func (a *Authenticator) certRefusal(acc *account, name string, conn ssh.ConnMeta
 	if !addrAllowed(acc.allowFrom, addr) {
 		return ReasonAddress, "allow_from", true
 	}
-	if sa, ok := cert.CriticalOptions[sourceAddress]; ok && !sourceAllowed(sa, addr) {
+	if sa, ok := cert.CriticalOptions[sourceAddress]; ok && !sourceAddressAllows(sa, addr) {
 		return ReasonAddress, "the certificate's source-address", true
 	}
 	best := -1
@@ -257,7 +258,7 @@ func (a *Authenticator) sourceRefusal(acc *account, name string, addr net.Addr, 
 	if line == nil {
 		return 4, "", ""
 	}
-	if line.from != nil && !addrAllowed(line.from, addr) {
+	if line.sourceAddress != "" && !sourceAddressAllows(line.sourceAddress, addr) {
 		return 1, ReasonAddress, "from= of " + line.Source
 	}
 	if _, noTouch := cert.Extensions[noTouchRequired]; noTouch && isSK(cert.Key) && !line.noTouchRequire {
@@ -306,7 +307,7 @@ func certInvalid(cert *ssh.Certificate) string {
 		v := cert.CriticalOptions[n]
 		switch n {
 		case sourceAddress:
-			if _, err := parsePrefixes(v); err != nil {
+			if !validSourceAddress(v) {
 				return fmt.Sprintf("invalid source-address %q", v)
 			}
 		case forceCommand:
@@ -332,11 +333,6 @@ func certValidity(cert *ssh.Certificate, now time.Time) string {
 	return ""
 }
 
-func sourceAllowed(list string, addr net.Addr) bool {
-	p, err := parsePrefixes(list)
-	return err == nil && addrAllowed(p, addr)
-}
-
 func isSK(k ssh.PublicKey) bool {
 	t := k.Type()
 	return t == ssh.KeyAlgoSKED25519 || t == ssh.KeyAlgoSKECDSA256
@@ -347,13 +343,16 @@ func isSK(k ssh.PublicKey) bool {
 // the same signatures again and again. Keyed by the whole certificate,
 // signature included.
 type certCache struct {
-	mu sync.Mutex
-	ok map[[sha256.Size]byte]struct{}
+	mu     sync.Mutex
+	ok     map[[sha256.Size]byte]struct{}
+	verify func(*ssh.Certificate) bool // verifySignature; tests count calls
 }
 
-func newCertCache() *certCache { return &certCache{ok: map[[sha256.Size]byte]struct{}{}} }
+func newCertCache() *certCache {
+	return &certCache{ok: map[[sha256.Size]byte]struct{}{}, verify: verifySignature}
+}
 
-func (c *certCache) verify(cert *ssh.Certificate) bool {
+func (c *certCache) check(cert *ssh.Certificate) bool {
 	sum := sha256.Sum256(cert.Marshal())
 	c.mu.Lock()
 	_, hit := c.ok[sum]
@@ -361,7 +360,7 @@ func (c *certCache) verify(cert *ssh.Certificate) bool {
 	if hit {
 		return true
 	}
-	if !verifySignature(cert) {
+	if !c.verify(cert) {
 		return false
 	}
 	c.mu.Lock()

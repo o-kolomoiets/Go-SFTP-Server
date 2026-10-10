@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -111,6 +112,14 @@ func TestCertificateChecks(t *testing.T) {
 	ca, other := newSigner(t), newSigner(t)
 	key := newKey(t)
 	rsaCA := rsaSHA1Signer(t)
+	smallRSA, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weak, err := ssh.NewPublicKey(&smallRSA.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	alice := User{Name: "alice"}
 	cas := []ssh.PublicKey{ca.PublicKey(), rsaCA.PublicKey()}
 	in, out := tcp("10.1.2.3"), tcp("192.0.2.9")
@@ -120,7 +129,7 @@ func TestCertificateChecks(t *testing.T) {
 		users []User
 		cas   []ssh.PublicKey
 		rev   []ssh.PublicKey
-		cert  *ssh.Certificate
+		cert  ssh.PublicKey
 		conn  fakeConn
 		want  string
 	}{
@@ -145,10 +154,18 @@ func TestCertificateChecks(t *testing.T) {
 		{"source-address matches", nil, nil, nil, issue(t, ca, key, critical(sourceAddress, "10.0.0.0/8")), fakeConn{user: "alice", addr: in}, "ok"},
 		{"source-address does not match", nil, nil, nil, issue(t, ca, key, critical(sourceAddress, "10.0.0.0/8")), fakeConn{user: "alice", addr: out}, ReasonAddress},
 		{"invalid source-address", nil, nil, nil, issue(t, ca, key, critical(sourceAddress, "*.example.org")), fakeConn{user: "alice", addr: in}, ReasonCertInvalid},
+		{"source-address with a space, as x/crypto reads it", nil, nil, nil, issue(t, ca, key, critical(sourceAddress, "10.0.0.0/8, 192.0.2.9")), fakeConn{user: "alice", addr: out}, ReasonCertInvalid},
+		{"source-address with a leading zero in the prefix length", nil, nil, nil, issue(t, ca, key, critical(sourceAddress, "10.0.0.0/08")), fakeConn{user: "alice", addr: in}, "ok"},
+		{"weak certified key", nil, nil, nil, issue(t, ca, weak, nil), fakeConn{user: "alice"}, "denied"},
+		{"expired certificate with a forbidden option", nil, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) {
+			c.ValidBefore = uint64(certNow.Unix())
+			c.CriticalOptions = map[string]string{forceCommand: "/bin/sh"}
+		}), fakeConn{user: "alice"}, ReasonCertInvalid},
 		{"SHA-1 CA signature", nil, nil, nil, issue(t, rsaCA, key, nil), fakeConn{user: "alice"}, ReasonCertInvalid},
 		{"certified key revoked", nil, nil, []ssh.PublicKey{key}, issue(t, ca, key, nil), fakeConn{user: "alice"}, ReasonKeyRevoked},
 		{"CA revoked", nil, nil, []ssh.PublicKey{ca.PublicKey()}, issue(t, ca, key, nil), fakeConn{user: "alice"}, ReasonKeyRevoked},
 		{"revoked before disabled", []User{{Name: "alice", Disabled: true}}, nil, []ssh.PublicKey{key}, issue(t, ca, key, nil), fakeConn{user: "alice"}, ReasonKeyRevoked},
+		{"revoked plain key before disabled", []User{{Name: "alice", Disabled: true, Keys: []Key{{Key: key}}}}, nil, []ssh.PublicKey{key}, key, fakeConn{user: "alice"}, ReasonKeyRevoked},
 		{"disabled before expired certificate", []User{{Name: "alice", Disabled: true}}, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidAfter, c.ValidBefore = 0, 1 }), fakeConn{user: "alice"}, ReasonDisabled},
 		{"account expired", []User{{Name: "alice", Expires: certNow.Add(-time.Second)}}, nil, nil, issue(t, ca, key, nil), fakeConn{user: "alice"}, ReasonExpired},
 		{"allow_from", []User{{Name: "alice", AllowFrom: mustPrefixes(t, "10.0.0.0/8")}}, nil, nil, issue(t, ca, key, nil), fakeConn{user: "alice", addr: out}, ReasonAddress},
@@ -160,7 +177,8 @@ func TestCertificateChecks(t *testing.T) {
 		{"CA line principals=", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,principals="alice@corp,ops"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, func(c *ssh.Certificate) { c.ValidPrincipals = []string{"ops"} }), fakeConn{user: "alice"}, "ok"},
 		{"CA line principals= replaces the name", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,principals="ops"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, nil), fakeConn{user: "alice"}, ReasonCertPrincipal},
 		{"CA line from=", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,from="10.0.0.0/8"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, nil), fakeConn{user: "alice", addr: out}, ReasonAddress},
-		{"CA line from= and source-address both apply", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,from="192.0.2.0/24"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, critical(sourceAddress, "10.0.0.0/8")), fakeConn{user: "alice", addr: out}, ReasonAddress},
+		{"CA line from= and source-address: the source-address refuses", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,from="192.0.2.0/24"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, critical(sourceAddress, "10.0.0.0/8")), fakeConn{user: "alice", addr: out}, ReasonAddress},
+		{"CA line from= and source-address: from= refuses", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,from="192.0.2.0/24"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, critical(sourceAddress, "10.0.0.0/8")), fakeConn{user: "alice", addr: in}, ReasonAddress},
 		{"CA line expiry-time", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,expiry-time="20261231"`, other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, nil), fakeConn{user: "alice"}, ReasonKeyExpired},
 		{"another user's CA line", []User{alice, {Name: "bob", Keys: []Key{caLineFor(t, "cert-authority", other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, nil), fakeConn{user: "alice"}, "denied"},
 		{"second CA line accepts", []User{{Name: "alice", Keys: []Key{caLineFor(t, `cert-authority,principals="x"`, other), caLineFor(t, "cert-authority", other)}}}, []ssh.PublicKey{}, nil, issue(t, other, key, nil), fakeConn{user: "alice"}, "ok"},
@@ -191,6 +209,49 @@ func TestCertificateChecks(t *testing.T) {
 }
 
 func tcp(ip string) net.Addr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: 22} }
+
+// The operational log learns why: the detail names the cause, and the
+// source that got furthest.
+func TestCertificateRefusalDetail(t *testing.T) {
+	t.Parallel()
+
+	ca, key := newSigner(t), newKey(t)
+	two := []Key{caLineFor(t, `cert-authority,from="10.0.0.0/8"`, ca), caLineFor(t, `cert-authority,from="10.0.0.0/16"`, ca)}
+	two[0].Source, two[1].Source = "first:1", "second:1"
+	for _, tt := range []struct {
+		name   string
+		users  []User
+		cert   *ssh.Certificate
+		detail string
+	}{
+		{"SHA-1", nil, issue(t, rsaSHA1Signer(t), key, nil), "ssh-rsa"},
+		{"force-command", nil, issue(t, ca, key, critical(forceCommand, "/bin/sh")), "force-command"},
+		{"unknown option", nil, issue(t, ca, key, critical("x@y", "")), "unsupported critical option"},
+		{"empty principal", nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidPrincipals = []string{""} }), "empty principal"},
+		{"certified key revoked", nil, issue(t, ca, key, nil), "certified key"},
+		{"principal", nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidPrincipals = []string{"bob"} }), "no principal"},
+		{"tie: the first line", []User{{Name: "alice", Principals: []string{}, Keys: two}}, issue(t, ca, key, nil), "from= of first:1"},
+	} {
+		users := tt.users
+		if users == nil {
+			users = []User{{Name: "alice"}}
+		}
+		var rev *RevokedKeys
+		if tt.name == "certified key revoked" {
+			rev = revokedOf(t, key)
+		}
+		cas := []ssh.PublicKey{ca.PublicKey()}
+		if tt.name == "SHA-1" {
+			cas = []ssh.PublicKey{tt.cert.SignatureKey}
+		}
+		a := trusting(users, cas, rev)
+		_, err := a.KnownKey(fakeConn{user: "alice", addr: tcp("192.0.2.9")}, tt.cert)
+		re, ok := errors.AsType[*RefusedError](err)
+		if !ok || !strings.Contains(re.Detail, tt.detail) || re.Cert == nil || re.Key == nil {
+			t.Errorf("%s: %v (detail %q), want detail with %q", tt.name, err, re.Detail, tt.detail)
+		}
+	}
+}
 
 func critical(name, value string) func(*ssh.Certificate) {
 	return func(c *ssh.Certificate) { c.CriticalOptions = map[string]string{name: value} }
@@ -405,6 +466,32 @@ func TestRevokedKeys(t *testing.T) {
 	}
 }
 
+// A key revoked by a reload is refused after the handshake and closes open
+// connections.
+func TestRevokedPlainKeyRecheck(t *testing.T) {
+	t.Parallel()
+
+	key := newKey(t)
+	users := []User{{Name: "alice", Keys: []Key{{Key: key}}}}
+	conn := fakeConn{user: "alice"}
+	perms, err := trusting(users, nil, nil).KnownKey(conn, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := trusting(users, nil, revokedOf(t, key))
+	if got := b.Refusal(conn, perms); got != ReasonKeyRevoked {
+		t.Errorf("Refusal = %q", got)
+	}
+	if b.Recheck(conn, perms) {
+		t.Error("Recheck keeps a connection with a revoked key")
+	}
+	_, err = b.VerifiedKey(conn, key, perms)
+	re, ok := errors.AsType[*RefusedError](err)
+	if !ok || re.Reason != ReasonKeyRevoked || re.Key == nil || re.Cert != nil {
+		t.Errorf("VerifiedKey: %v", err)
+	}
+}
+
 func TestRevokedKeysFailClosed(t *testing.T) {
 	t.Parallel()
 
@@ -505,6 +592,8 @@ func TestCertificateRecheck(t *testing.T) {
 		_, err := tt.a.VerifiedKey(conn, cert, perms)
 		if re, ok := errors.AsType[*RefusedError](err); (tt.refusal == "") != (err == nil) || ok && (re.Cert == nil || re.Reason != tt.refusal) {
 			t.Errorf("%s: VerifiedKey error %v", tt.name, err)
+		} else if ok && (tt.refusal == ReasonCertPrincipal || tt.refusal == ReasonKeyRevoked || tt.refusal == ReasonRemoved) && re.Detail == "" {
+			t.Errorf("%s: VerifiedKey refusal without a detail", tt.name)
 		}
 	}
 }
@@ -528,11 +617,36 @@ func TestCertificateVerification(t *testing.T) {
 	if len(a.verified.ok) != 1 {
 		t.Error("a forged certificate was cached")
 	}
+	calls := 0
+	a.verified.verify = func(c *ssh.Certificate) bool { calls++; return verifySignature(c) }
+	alice := issue(t, ca, key, nil)
+	for range 3 {
+		outcome(t, a, fakeConn{user: "alice"}, alice)
+	}
+	if calls != 1 {
+		t.Errorf("verified the same certificate %d times", calls)
+	}
 	for range maxVerified + 1 {
 		a.verified.verify(issue(t, ca, key, nil))
 	}
 	if len(a.verified.ok) > maxVerified {
 		t.Errorf("cache grew to %d", len(a.verified.ok))
+	}
+}
+
+func TestCertAuditKeyID(t *testing.T) {
+	t.Parallel()
+
+	for name, id := range map[string]string{
+		"invalid byte":            "a\xffb",
+		"long, early invalid":     "\xff" + strings.Repeat("a", 400),
+		"256 invalid bytes":       strings.Repeat("\xff", 256),
+		"long, cut inside a rune": "a" + strings.Repeat("é", 200),
+	} {
+		got, _, _ := CertAudit(&ssh.Certificate{KeyId: id, SignatureKey: newKey(t)})
+		if !utf8.ValidString(got) || len(got) > maxKeyIDLen || got == "" {
+			t.Errorf("%s: %d bytes, valid %v", name, len(got), utf8.ValidString(got))
+		}
 	}
 }
 
@@ -595,6 +709,9 @@ func TestParseCertAuthorityLines(t *testing.T) {
 		{authorizedLine(t, `cert-authority,principals="a,,b"`, k), "empty principal"},
 		{authorizedLine(t, `cert-authority="x"`, k), "unsupported option"},
 		{authorizedLine(t, `command="internal-sftp -R"`, k), "command="},
+		{authorizedLine(t, `cert-authority,principals="a",principals="b"`, k), "principals= given twice"},
+		{authorizedLine(t, `from="10.0.0.1",from="0.0.0.0/0"`, k), "from= given twice"},
+		{authorizedLine(t, `from="10.0.0.0/08"`, k), ""},
 		{cert, "this is a certificate"},
 	} {
 		keys, warns := ParseAuthorizedKeys([]byte(tt.line), "keys")
@@ -607,5 +724,20 @@ func TestParseCertAuthorityLines(t *testing.T) {
 		if len(keys) != 0 || len(warns) != 1 || !strings.Contains(warns[0], tt.warning) {
 			t.Errorf("%q: keys %d, warnings %q, want %q", tt.line, len(keys), warns, tt.warning)
 		}
+	}
+}
+
+// A repeated expiry-time keeps the earliest, as in OpenSSH.
+func TestRepeatedExpiryKeepsEarliest(t *testing.T) {
+	t.Parallel()
+
+	k := newKey(t)
+	keys, warns := ParseAuthorizedKeys([]byte(authorizedLine(t, `expiry-time="20200101",expiry-time="20990101"`, k)), "keys")
+	if len(keys) != 1 || len(warns) != 0 {
+		t.Fatal(warns)
+	}
+	a := trusting([]User{{Name: "alice", Keys: keys}}, nil, nil)
+	if got := outcome(t, a, fakeConn{user: "alice"}, k); got != ReasonKeyExpired {
+		t.Errorf("KnownKey = %s, want %s", got, ReasonKeyExpired)
 	}
 }

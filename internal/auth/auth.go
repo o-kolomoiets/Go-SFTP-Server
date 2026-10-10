@@ -216,7 +216,24 @@ func (a *Authenticator) Inherit(prev *Authenticator) {
 // configuration current after the handshake (a reload may have come in
 // between).
 func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) string {
-	return a.recheck(conn, perms, false)
+	reason, _ := a.recheck(conn, perms, false)
+	return reason
+}
+
+// Refused is Refusal as a *RefusedError, with the detail, the key and the
+// certificate; nil when the login would succeed.
+func (a *Authenticator) Refused(conn ssh.ConnMetadata, perms *ssh.Permissions) *RefusedError {
+	reason, detail := a.recheck(conn, perms, false)
+	if reason == "" {
+		return nil
+	}
+	re := &RefusedError{Reason: reason, Detail: detail}
+	if cert, err := parseCert(perms.Extensions[extKey]); err == nil {
+		re.Key, re.Cert = cert.Key, cert
+	} else if k, err := ssh.ParsePublicKey([]byte(perms.Extensions[extKey])); err == nil {
+		re.Key = k
+	}
+	return re
 }
 
 // Recheck reports whether a connection logged in with perms may stay open
@@ -224,17 +241,18 @@ func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) s
 // Refusal, but a certificate whose validity period has passed since the
 // login does not count, as in sshd.
 func (a *Authenticator) Recheck(conn ssh.ConnMetadata, perms *ssh.Permissions) bool {
-	return a.recheck(conn, perms, true) == ""
+	reason, _ := a.recheck(conn, perms, true)
+	return reason == ""
 }
 
-func (a *Authenticator) recheck(conn ssh.ConnMetadata, perms *ssh.Permissions, open bool) string {
+func (a *Authenticator) recheck(conn ssh.ConnMetadata, perms *ssh.Permissions, open bool) (reason, detail string) {
 	user, ok := UserFrom(perms)
 	if !ok {
-		return ReasonRemoved
+		return ReasonRemoved, ""
 	}
 	acc := a.lookup(user)
 	if acc == nil {
-		return ReasonRemoved
+		return ReasonRemoved, "the user"
 	}
 	switch perms.Extensions[ExtMethod] {
 	case MethodPublicKey:
@@ -243,30 +261,30 @@ func (a *Authenticator) recheck(conn ssh.ConnMetadata, perms *ssh.Permissions, o
 		if !ok {
 			cert, err := parseCert(blob)
 			if err != nil {
-				return ReasonRemoved
+				return ReasonRemoved, "the key"
 			}
 			// The certificate is the one the login verified.
-			reason, _, users := a.certRefusal(acc, user, conn, cert, open)
+			reason, detail, users := a.certRefusal(acc, user, conn, cert, open)
 			if !users {
-				return ReasonRemoved
+				return ReasonRemoved, "the CA"
 			}
-			return reason
+			return reason, detail
 		}
 		_, noTouch := perms.Extensions[noTouchRequired]
 		if k.noTouchRequire != noTouch || k.sourceAddress != perms.CriticalOptions[sourceAddress] {
-			return ReasonRemoved // the key's options changed
+			return ReasonRemoved, "the key's options" // changed
 		}
-		return a.keyRefusal(acc, k, conn)
+		return a.keyRefusal(acc, k, conn), ""
 	case MethodPassword:
 		if reason := a.refusal(acc, conn); reason != "" {
-			return reason
+			return reason, ""
 		}
 		if acc.password == nil || acc.password.id() != perms.Extensions[extPassword] {
-			return ReasonRemoved // the password changed
+			return ReasonRemoved, "the password" // changed
 		}
-		return ""
+		return "", ""
 	}
-	return ReasonRemoved
+	return ReasonRemoved, ""
 }
 
 // Len returns the number of accepted keys and cert-authority lines.
@@ -360,13 +378,7 @@ func (a *Authenticator) certificate(conn ssh.ConnMetadata, cert *ssh.Certificate
 // reload happened in between: x/crypto does not ask KnownKey again for the
 // signed request.
 func (a *Authenticator) VerifiedKey(conn ssh.ConnMetadata, _ ssh.PublicKey, perms *ssh.Permissions) (*ssh.Permissions, error) {
-	if reason := a.Refusal(conn, perms); reason != "" {
-		re := &RefusedError{Reason: reason}
-		if cert, err := parseCert(perms.Extensions[extKey]); err == nil {
-			re.Key, re.Cert = cert.Key, cert
-		} else if k, err := ssh.ParsePublicKey([]byte(perms.Extensions[extKey])); err == nil {
-			re.Key = k
-		}
+	if re := a.Refused(conn, perms); re != nil {
 		return nil, re
 	}
 	return perms, nil

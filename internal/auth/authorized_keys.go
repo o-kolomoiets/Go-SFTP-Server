@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"path"
 	"slices"
 	"strings"
@@ -27,9 +26,8 @@ type Key struct {
 	Comment string
 	Source  string // "file:line", for messages and audit
 
-	sourceAddress  string         // validated from="..." value (comma-separated IPs/CIDRs)
-	from           []netip.Prefix // sourceAddress, parsed
-	expires        time.Time      // expiry-time="..."; zero means never
+	sourceAddress  string    // validated from="..." value (comma-separated IPs/CIDRs)
+	expires        time.Time // expiry-time="..."; zero means never
 	noTouchRequire bool
 	certAuthority  bool
 	principals     []string // principals= of a cert-authority line; nil: the login name
@@ -82,9 +80,16 @@ func parseLine(line []byte) (Key, error) {
 		return Key{}, err
 	}
 	k := Key{Key: pub, Comment: comment}
+	seen := map[string]bool{}
 	for _, opt := range options {
 		name, value, hasValue := strings.Cut(opt, "=")
 		name = strings.ToLower(name)
+		// A repeated option would silently replace the first, as OpenSSH
+		// refuses to; a repeated expiry-time keeps the earliest, as there.
+		if seen[name] && (name == "from" || name == "principals" || name == "command") {
+			return Key{}, fmt.Errorf("%s= given twice, line rejected", name)
+		}
+		seen[name] = true
 		switch {
 		case ignoredOptions[name] && !hasValue:
 		case name == "from" && hasValue:
@@ -98,7 +103,9 @@ func parseLine(line []byte) (Key, error) {
 			if err != nil {
 				return Key{}, err
 			}
-			k.expires = t
+			if k.expires.IsZero() || t.Before(k.expires) {
+				k.expires = t
+			}
 		case name == "no-touch-required" && !hasValue:
 			k.noTouchRequire = true
 		case name == "cert-authority" && !hasValue:
@@ -121,13 +128,6 @@ func parseLine(line []byte) (Key, error) {
 	}
 	if k.principals != nil && !k.certAuthority {
 		return Key{}, errors.New("principals= is valid only with cert-authority, line rejected")
-	}
-	if k.sourceAddress != "" {
-		from, err := parsePrefixes(k.sourceAddress)
-		if err != nil {
-			return Key{}, fmt.Errorf("from=%q: %w", k.sourceAddress, err)
-		}
-		k.from = from
 	}
 	return k, nil
 }
@@ -192,18 +192,38 @@ func parseFrom(v string) (string, error) {
 	return strings.Join(parts, ","), nil
 }
 
-// parsePrefixes parses a comma-separated list of IP addresses and CIDR
-// blocks, as a certificate's source-address.
-func parsePrefixes(list string) ([]netip.Prefix, error) {
-	var out []netip.Prefix
+// validSourceAddress reports whether list is a source address list that
+// x/crypto can enforce: IP addresses and CIDR blocks separated by commas,
+// without spaces, as it parses them.
+func validSourceAddress(list string) bool {
 	for s := range strings.SplitSeq(list, ",") {
-		p, err := ParsePrefix(s)
-		if err != nil {
-			return nil, err
+		if net.ParseIP(s) == nil {
+			if _, _, err := net.ParseCIDR(s); err != nil {
+				return false
+			}
 		}
-		out = append(out, p)
 	}
-	return out, nil
+	return true
+}
+
+// sourceAddressAllows matches addr against a source address list as
+// x/crypto enforces source-address: only a TCP address, against each entry
+// as given.
+func sourceAddressAllows(list string, addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	for s := range strings.SplitSeq(list, ",") {
+		if ip := net.ParseIP(s); ip != nil {
+			if ip.Equal(tcp.IP) {
+				return true
+			}
+		} else if _, n, err := net.ParseCIDR(s); err == nil && n.Contains(tcp.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseExpiry parses OpenSSH's YYYYMMDD[HHMM[SS]][Z] timespec; without Z it

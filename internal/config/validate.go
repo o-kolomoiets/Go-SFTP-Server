@@ -369,6 +369,11 @@ func (c *Config) validateUsers(p *problems) {
 			if slices.Contains(*u.Principals, "") {
 				p.errorf(k("principals"), "empty principal")
 			}
+			for _, pr := range *u.Principals {
+				if strings.ContainsAny(pr, ", \t") {
+					p.warnf(k("principals"), "%q contains a comma or a space, which ssh-keygen -n cannot sign", pr)
+				}
+			}
 			if !c.Auth.TrustsCAs() {
 				p.warnf(k("principals"), "not used: no auth.trusted_user_ca_keys")
 			}

@@ -148,10 +148,13 @@ random 64-bit serials, which JSON numbers do not keep) and `cert_ca_fp`.
 ### Validation and commands
 
 `config validate` warns when certificate settings are set but `publickey`
-is not enabled, when `users.NAME.principals` is set without trusted CAs,
-when a trusted CA or a user's CA is revoked, when a `cert-authority` CA is
-also trusted for every user (its line then restricts nothing), and when an
-`authorized_keys` line holds a certificate ("trust its CA instead"). A user
+is not enabled and when `users.NAME.principals` is set without trusted CAs;
+an inline `authorized_keys` entry that holds a certificate is an error
+("trust its CA instead"), and a file line is skipped with that warning.
+Reading the files, `config validate --check-fs`, `serve` and a reload also
+warn when a trusted CA, a user's CA or a user's key is revoked, and when a
+`cert-authority` CA is also trusted for every user (its line then restricts
+nothing). A user
 without keys or password can log in by certificate when trusted CAs are set
 and its principals are not empty, so it gets no "cannot log in" warning;
 `user add --write` accepts such a user and prints the principal to sign.

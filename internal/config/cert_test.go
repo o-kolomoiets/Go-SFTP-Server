@@ -108,6 +108,16 @@ access = { m = "read" }
 principals = []
 authorized_keys = ["cert-authority `+authorized(ca.PublicKey())+`"]
 access = { m = "read" }
+[users.dave]
+authorized_keys = ["cert-authority `+authorized(ca.PublicKey())+`"]
+access = { m = "read" }
+[users.erin]
+principals = []
+authorized_keys = ["cert-authority `+authorized(revokedCA.PublicKey())+`"]
+access = { m = "read" }
+[users.frank]
+authorized_keys = ["`+authorized(gone)+`"]
+access = { m = "read" }
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -135,12 +145,17 @@ access = { m = "read" }
 	}
 	for _, want := range []string{
 		"cas.pub:2: a CA key line takes no options",
-		"is revoked",                           // the inline trusted CA
-		"is also in auth.trusted_user_ca_keys", // carol's line
+		"auth.trusted_user_ca_keys: CA SHA256:",
+		"users.dave: users.dave.authorized_keys[1]:1: this CA is also in auth.trusted_user_ca_keys",
+		"users.erin: users.erin.authorized_keys[1]:1: the CA is revoked",
+		"users.frank: users.frank.authorized_keys[1]:1: the key is revoked",
 	} {
 		if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, want) }) {
 			t.Errorf("no warning %q in %q", want, warns)
 		}
+	}
+	if slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "users.carol") }) {
+		t.Errorf("carol, kept away from the trusted CAs, is warned about: %q", warns)
 	}
 	for _, tt := range []struct {
 		user string
@@ -180,6 +195,29 @@ access = { m = "read" }
 	if err := os.Rename(cas+".old", cas); err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS != "windows" {
+		write(cas, authorized(ca.PublicKey())+"\n", 0o666)
+		if _, _, _, err := c.BuildAuthenticator(AuthOptions{}); err == nil {
+			t.Error("a CA file others can write accepted at start")
+		}
+		a, _, _, err := c.BuildAuthenticator(AuthOptions{Reload: true})
+		if err != nil || login(a, "alice", certOf(t, ca, key, "alice")) != "denied" {
+			t.Errorf("a CA file others can write trusted on reload: %v", err)
+		}
+		if _, err := c.CheckFS(); err == nil || !strings.Contains(err.Error(), "cas.pub") {
+			t.Errorf("CheckFS of a writable CA file: %v", err)
+		}
+	}
+	c.Auth.TrustedUserCAKeys = nil
+	write(cas, "cert-authority "+authorized(ca.PublicKey())+"\n", 0o600)
+	_, _, warns, err = c.BuildAuthenticator(AuthOptions{})
+	if err == nil || !strings.Contains(err.Error(), "auth.trusted_user_ca_keys_file: "+cas+" has no usable CA keys") || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "takes no options") }) {
+		t.Errorf("a CA file without usable keys at start: %v, %q", err, warns)
+	}
+	if _, _, warns, err := c.BuildAuthenticator(AuthOptions{Reload: true}); err != nil || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "no CA is trusted") }) {
+		t.Errorf("a CA file without usable keys on reload: %v, %q", err, warns)
+	}
+	write(cas, authorized(ca.PublicKey())+"\n", 0o600)
 
 	// The revocation list fails closed, also on reload.
 	broken := map[string]string{
@@ -343,5 +381,102 @@ func TestZeroConfigCertAuthority(t *testing.T) {
 	}
 	if got := login(a, "alice", certOf(t, ca, key, "alice")); got != "ok" {
 		t.Errorf("alice: %s", got)
+	}
+}
+
+// The certificate files are read only when publickey is enabled.
+func TestCertificateFilesNeedPublickey(t *testing.T) {
+	t.Parallel()
+
+	c, _ := load(t, `
+config_version = 1
+[server]
+host_keys = ["/k"]
+[auth]
+methods = ["password"]
+trusted_user_ca_keys_file = "missing.pub"
+revoked_keys_file = "missing"
+[mounts.m]
+path = "/m"
+[users.alice]
+password_hash = "`+mustHash(t)+`"
+access = { m = "read" }
+`)
+	mustValidate(t, c)
+	if _, _, _, err := c.BuildAuthenticator(AuthOptions{}); err != nil {
+		t.Errorf("certificate files read without publickey: %v", err)
+	}
+}
+
+func TestPrincipalsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	c, _ := load(t, `
+config_version = 1
+[server]
+host_keys = ["/k"]
+[auth]
+trusted_user_ca_keys = ["`+authorized(newCA(t).PublicKey())+`"]
+[mounts.m]
+path = "/m"
+[users.none]
+principals = []
+access = { m = "read" }
+[users.unset]
+access = { m = "read" }
+[users.mapped]
+principals = ["a@corp", "b"]
+access = { m = "read" }
+[users.comma]
+principals = ["a,b"]
+access = { m = "read" }
+`)
+	warns := mustValidate(t, c)
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "ssh-keygen -n cannot sign") }) {
+		t.Errorf("no warning about a principal with a comma: %q", warns)
+	}
+	data, err := c.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(writeConfig(t, t.TempDir(), string(data)))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, data)
+	}
+	for _, name := range []string{"none", "unset", "mapped"} {
+		if got, want := again.CertificatePrincipals(name), c.CertificatePrincipals(name); !slices.Equal(got, want) || (got == nil) != (want == nil) {
+			t.Errorf("%s: principals %q after a round trip, want %q", name, got, want)
+		}
+	}
+	if again.CertificatePrincipals("none") != nil || !slices.Equal(again.CertificatePrincipals("unset"), []string{"unset"}) {
+		t.Error("principals = [] and unset are not kept apart")
+	}
+}
+
+// Zero-config: a file with only principal-less cert-authority lines has no
+// usable keys without --user; with --user the lines work.
+func TestZeroConfigOnlyIgnoredLines(t *testing.T) {
+	t.Parallel()
+
+	ca, key := newCA(t), newCA(t).PublicKey()
+	keys := filepath.Join(t.TempDir(), "authorized_keys")
+	if err := os.WriteFile(keys, []byte("cert-authority "+authorized(ca.PublicKey())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	zero := Default()
+	zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: keys}
+	if _, _, _, err := zero.BuildAuthenticator(AuthOptions{}); err == nil || !errors.Is(err, errNoKeys) {
+		t.Errorf("start with only ignored lines: %v", err)
+	}
+	if _, _, warns, err := zero.BuildAuthenticator(AuthOptions{Reload: true}); err != nil || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "nobody can log in") }) {
+		t.Errorf("reload with only ignored lines: %v, %q", err, warns)
+	}
+	zero.AnyUser.Name = "alice"
+	a, _, warns, err := zero.BuildAuthenticator(AuthOptions{})
+	if err != nil || len(warns) != 0 {
+		t.Fatalf("--user alice: %v, %q", err, warns)
+	}
+	if got := login(a, "alice", certOf(t, ca, key, "alice")); got != "ok" {
+		t.Errorf("--user alice with a cert-authority line: %s", got)
 	}
 }

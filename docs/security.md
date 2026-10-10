@@ -16,8 +16,9 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
   password or a certificate of a known user (its CA signature is verified
   either way). Only the audit log says why (`auth.failure` `reason`).
   Identity flows only through the SSH library's permissions, never through
-  state captured during authentication (CVE-2024-45337), and nothing of a
-  certificate's own options is copied into them.
+  state captured during authentication (CVE-2024-45337). They are built
+  afresh for a certificate: of its options only `source-address` is
+  carried over, so that the SSH library enforces it.
 - **Open SFTP sessions**, nothing else: shell, exec, PTY, environment, agent
   and port forwarding requests are refused.
 - **Work inside its mounts** with the permissions of its user, see
@@ -61,8 +62,9 @@ The SFTP protocol is served by `pkg/sftp`'s request server; gosftpd's
 handlers see only parsed requests. The parsers that face clients and
 administrators are fuzzed in CI on every change and nightly: path
 resolution inside and outside a tree with symlinks, names of conflict
-copies, the configuration, `authorized_keys`, and a stream of arbitrary
-SFTP packets against the real handlers, with the race detector. Fuzzing
+copies, the configuration, `authorized_keys`, certificates offered at
+login, and a stream of arbitrary SFTP packets against the real handlers,
+with the race detector. Fuzzing
 found a data race in `pkg/sftp` v1.13: a request with a guessed handle that
 is processed while an OPEN is in progress races with it, which could crash
 the server. gosftpd keeps them apart: an OPEN is passed on once every

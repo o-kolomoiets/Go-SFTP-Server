@@ -31,15 +31,17 @@ file, `serve --read-only` makes every mount read-only, `--on-conflict` sets
 the policy of every mount, `--host-key` replaces `server.host_keys`, and
 `--listen`, `--log-level`, `--log-format`, `--audit-output` replace their keys.
 
-Relative paths in the file (host keys, `authorized_keys_file`, `audit.output`,
+Relative paths in the file (host keys, `authorized_keys_file`,
+`auth.trusted_user_ca_keys_file`, `auth.revoked_keys_file`, `audit.output`,
 `include`) are relative to the directory of the file. Mount paths must be
 absolute.
 
 ### File permissions
 
 Like sshd's `StrictModes`, gosftpd refuses to start if the configuration file,
-an included file, a host key or an `authorized_keys` file is writable by group
-or others, or belongs to anyone but root or the user running gosftpd. Host keys
+an included file, a host key, an `authorized_keys` file, the trusted CA keys
+or the revocation list is writable by group or others, or belongs to anyone
+but root or the user running gosftpd. Host keys
 must also not be readable by others (`chmod 600`). A configuration readable by
 everyone gives a warning. `gosftpd init` writes its file with mode 0600.
 
@@ -106,9 +108,11 @@ the proxy to `auth.ban.exempt`.
 |---|---|---|
 | `methods` | `["publickey"]` | Login methods: `publickey`, and `password` for users with `password_hash`. Either one is enough to log in; a method that is not listed is refused. Without a configuration file only `publickey` is possible. |
 | `trusted_user_ca_keys` | none | CA public keys, one per entry, whose user certificates log in as any configured user whose `principals` they carry. See [Certificates](#certificates). |
-| `trusted_user_ca_keys_file` | none | A file of CA public keys, one per line. On reload, a missing or unsafe file trusts no CA, with a warning. |
+| `trusted_user_ca_keys_file` | none | A file of CA public keys, one per line. At start a missing or unsafe file, or no usable CA key at all, refuses the configuration; on reload it trusts no CA, with a warning. |
 | `revoked_keys` | none | Revoked public keys or certificates, one per entry. A certificate revokes its key. |
-| `revoked_keys_file` | none | A file of revoked keys or certificates, one per line. It fails closed: a line that is not a key, a KRL, or a missing or unsafe file is an error at start and fails a reload. |
+| `revoked_keys_file` | none | A file of revoked keys or certificates, one per line (at most 1 MiB, like every file gosftpd reads; a plain public key is the shortest entry). It fails closed: a line that is not a key, a KRL, or a missing or unsafe file is an error at start and fails a reload. |
+
+The certificate settings are read only when `methods` includes `publickey`.
 
 A connection keeps the user name of its first authentication request, as
 sshd does: a client cannot try one user's password and then log in as
@@ -280,7 +284,7 @@ same way as a wrong key.
 | `allow_from` | any | Client addresses or CIDR blocks the user may log in from. |
 | `expires` | never | TOML date-time after which logins are refused, e.g. `2026-12-31T23:59:59Z`. |
 | `disabled` | `false` | Refuse all logins of this user. |
-| `principals` | the user name | Principals a certificate from a CA of `auth.trusted_user_ca_keys` needs one of to log in as this user, e.g. `["alice@corp.example"]`; `[]` keeps those CAs away from the user. |
+| `principals` | the user name | A certificate from a trusted CA (`auth.trusted_user_ca_keys` or `trusted_user_ca_keys_file`) must carry one of these principals to log in as this user, e.g. `["alice@corp.example"]`; `[]` keeps those CAs away from the user. |
 | `access` | none | Mount name to permissions, e.g. `{ inbox = "upload", home = "full" }`. |
 
 Supported key types: ed25519, ECDSA (P-256, P-384, P-521), RSA with at least
@@ -329,8 +333,8 @@ ssh-keygen -L -f id_ed25519-cert.pub                # inspect the certificate
 (names) the certificate is valid for, `-V` its validity period (`-V
 -5m:+8h` allows for clock skew), `-z` a serial number. An RSA CA must sign
 with SHA-2: `ssh-keygen -t rsa-sha2-512 -s user_ca.rsa …`. OpenSSH's `ssh`
-and `sftp` use `id_ed25519-cert.pub` next to the key by itself, or
-`-o CertificateFile=…`.
+and `sftp` pick up `id_ed25519-cert.pub` automatically when it sits next to
+the key; otherwise use `-o CertificateFile=…`.
 
 Trust the CA in one of two ways:
 
@@ -354,17 +358,21 @@ principals, is outside its validity period, is signed with SHA-1
 `sftp-server` without arguments (gosftpd serves only SFTP); `verify-required`
 cannot be enforced and is refused. A security-key certificate with the
 extension `no-touch-required` needs `no-touch-required` on the
-`cert-authority` line that accepts it; a CA in `trusted_user_ca_keys`
-decides alone. The audit log records the key ID, serial and CA of every
+`cert-authority` line that accepts it; for a CA in `trusted_user_ca_keys`,
+the certificate's own extension applies. The audit log records the key ID, serial and CA of every
 certificate login, and the reason of a refusal (see the
 [audit log](audit-log.md)).
 
 **Revoking.** Add the user's key or certificate to `auth.revoked_keys_file`
-and reload; open connections with it stay unless
-`reload.disconnect_removed_users = true`:
+and reload. The entry takes effect only after a successful reload: check
+the file first, and the result after (the reload's status line, or the
+latest `server.reload` event with `"result":"ok"`). Open connections with
+the key stay unless `reload.disconnect_removed_users = true`.
 
 ```sh
-cat id_ed25519-cert.pub >> /etc/gosftpd/revoked_keys && systemctl reload gosftpd
+{ echo; cat id_ed25519-cert.pub; } >> /etc/gosftpd/revoked_keys   # echo: in case the file lacks a final newline
+gosftpd config validate --check-fs --config /etc/gosftpd/config.toml && systemctl reload gosftpd
+systemctl status gosftpd | grep Status
 ```
 
 As in sshd, a revoked certificate revokes its key, and with it every
@@ -499,10 +507,12 @@ unless `NAME=` is given) and one implicit user: every SSH user name (or only
 `~/.ssh/authorized_keys`) and has full access. The host key is generated in
 `--state-dir` (default `<user config dir>/gosftpd`). `--read-only` and
 `--on-conflict` apply to every mount. Every other setting has its default.
-`--authorized-keys` may hold `cert-authority` lines; since any user name is
-accepted, a line without `principals=` is ignored unless `--user` is given,
-and the login name must be one of the line's principals and of the
-certificate's.
+`--authorized-keys` may hold `cert-authority` lines. Without `--user`, any
+user name is accepted, so a line needs `principals=` (one without is ignored
+with a warning), and the login name must be one of the line's principals
+and of the certificate's. With `--user NAME` the usual rules apply: a
+principal of the certificate must be in `principals=`, or be `NAME` when the
+line has none.
 
 `gosftpd serve` refuses to run as root (exit code 2) unless `--allow-root`
 is given: run it as a dedicated user.

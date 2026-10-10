@@ -4,7 +4,6 @@ package config
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net/netip"
@@ -114,6 +113,17 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		if c.AnyUser.Name == "" {
+			// Any login name is accepted, so such a line would let in every
+			// principal of the CA.
+			keys = slices.DeleteFunc(keys, func(k auth.Key) bool {
+				if k.CertAuthority() && k.Principals() == nil {
+					warns = append(warns, "--authorized-keys: "+k.Source+": cert-authority without principals= is ignored: any login name is accepted, so it would let in every principal of the CA; add principals=\"NAME\" or use --user")
+					return true
+				}
+				return false
+			})
+		}
 		if len(keys) == 0 {
 			if !o.Reload {
 				return nil, nil, warns, noKeysError(path)
@@ -121,13 +131,6 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 			warns = append(warns, "--authorized-keys: "+path+" has no usable keys; nobody can log in")
 		}
 		files.remember(path, keys)
-		if c.AnyUser.Name == "" {
-			for _, k := range keys {
-				if k.CertAuthority() && k.Principals() == nil {
-					warns = append(warns, "--authorized-keys: "+k.Source+": cert-authority without principals= is ignored: any login name is accepted, so it would let in every principal of the CA; add principals=\"NAME\" or use --user")
-				}
-			}
-		}
 		return auth.New(c.AnyUser.Name, keys), files, warns, nil
 	}
 
@@ -191,10 +194,10 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 	a := auth.NewUsers(users)
 	if c.Auth.HasMethod(auth.MethodPublicKey) {
 		cas, ws, err := o.readCAKeys(c)
-		if err != nil {
-			return nil, nil, nil, err
-		}
 		warns = append(warns, ws...)
+		if err != nil {
+			return nil, nil, warns, err
+		}
 		revoked, err := o.readRevoked(c)
 		if err != nil {
 			return nil, nil, nil, err
@@ -234,10 +237,14 @@ func (o AuthOptions) readCAKeys(c *Config) ([]ssh.PublicKey, []string, error) {
 		}
 	}
 	if c.Auth.TrustsCAs() && len(cas) == 0 {
-		if !o.Reload {
-			return nil, warns, errors.New("auth.trusted_user_ca_keys: no usable CA keys")
+		where := "auth.trusted_user_ca_keys"
+		if len(c.Auth.TrustedUserCAKeys) == 0 {
+			where = k + ": " + c.Auth.TrustedUserCAKeysFile
 		}
-		warns = append(warns, "auth.trusted_user_ca_keys: no usable CA keys; no CA is trusted for every user")
+		if !o.Reload {
+			return nil, warns, fmt.Errorf("%s has no usable CA keys", where)
+		}
+		warns = append(warns, where+" has no usable CA keys; no CA is trusted for every user")
 	}
 	return cas, warns, nil
 }
@@ -296,7 +303,7 @@ func certWarnings(users []auth.User, cas []ssh.PublicKey, revoked *auth.RevokedK
 			switch {
 			case k.CertAuthority() && revoked.Revoked(k.Key):
 				warns = append(warns, key("users", u.Name)+": "+k.Source+": the CA is revoked")
-			case k.CertAuthority() && trusted[string(k.Key.Marshal())]:
+			case k.CertAuthority() && trusted[string(k.Key.Marshal())] && (u.Principals == nil || len(u.Principals) > 0):
 				warns = append(warns, key("users", u.Name)+": "+k.Source+": this CA is also in auth.trusted_user_ca_keys, which accepts its certificates without the line's restrictions")
 			case !k.CertAuthority() && revoked.Revoked(k.Key):
 				warns = append(warns, key("users", u.Name)+": "+k.Source+": the key is revoked")

@@ -442,7 +442,7 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 			u, _ := ca.attemptedUser.Load().(string)
 			attrs := []slog.Attr{slog.String("user", u), slog.Int("attempts", int(ca.failures.Load()))}
 			if re := ca.reason.Load(); re != nil {
-				logRefused(log, u, re)
+				logRefused(log, false, u, re)
 				attrs = append(attrs, slog.String("reason", re.Reason))
 				attrs = append(attrs, keyAttrs(re.Key, re.Cert)...)
 			}
@@ -483,10 +483,10 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	if serial, ok := ext[auth.ExtCertSerial]; ok {
 		keyFields = append(keyFields, slog.String("cert_key_id", ext[auth.ExtCertKeyID]), slog.String("cert_serial", serial), slog.String("cert_ca_fp", ext[auth.ExtCertCA]))
 	}
-	if reason := sn.cfg.Auth.Refusal(sconn, sconn.Permissions); reason != "" {
-		log.Info("login refused: revoked by a configuration reload", "reason", reason)
+	if re := sn.cfg.Auth.Refused(sconn, sconn.Permissions); re != nil {
+		logRefused(log, true, name, re)
 		ca.fail()
-		al.Event("auth.failure", append([]slog.Attr{slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1), slog.String("reason", reason)}, keyFields...)...)
+		al.Event("auth.failure", append([]slog.Attr{slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1), slog.String("reason", re.Reason)}, keyFields...)...)
 		closed("revoked")
 		return
 	}
@@ -635,8 +635,9 @@ func keyAttrs(key ssh.PublicKey, cert *ssh.Certificate) []slog.Attr {
 }
 
 // logRefused tells the operator why a login with the user's credentials
-// was refused; the audit log has the reason only.
-func logRefused(log *slog.Logger, user string, re *auth.RefusedError) {
+// was refused; the audit log has the reason only. afterReload says that a
+// reload during the login revoked it.
+func logRefused(log *slog.Logger, afterReload bool, user string, re *auth.RefusedError) {
 	args := []any{"user", user, "reason", re.Reason}
 	if re.Detail != "" {
 		args = append(args, "detail", re.Detail)
@@ -644,6 +645,10 @@ func logRefused(log *slog.Logger, user string, re *auth.RefusedError) {
 	if re.Cert != nil {
 		id, serial, _ := auth.CertAudit(re.Cert)
 		args = append(args, "cert_key_id", id, "cert_serial", serial)
+	}
+	if afterReload {
+		log.Info("login refused: revoked by a configuration reload", args...)
+		return
 	}
 	log.Info("login refused", args...)
 }

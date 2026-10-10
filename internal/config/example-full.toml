@@ -82,7 +82,7 @@ versions = { keep = 5 }
 authorized_keys = ["<paste alice's public key>"]
 authorized_keys_file = "/etc/gosftpd/keys/alice.pub"
 allow_from = ["10.0.0.0/8", "192.168.0.0/16"]
-principals = ["alice", "alice@corp.example"]  # certificates from trusted CAs; default: the user name
+# principals = ["alice", "alice@corp.example"]  # with trusted CAs: names her certificates may carry; default: the user name
 access = { public = "read", inbox = "upload", home = "full" }
 
 [users.partner-acme]

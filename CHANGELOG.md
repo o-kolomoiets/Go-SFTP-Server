@@ -78,9 +78,11 @@ Incompatible changes are prefixed with **BREAKING:**.
 - Every login is checked once more after the SSH handshake against the
   configuration current then: a key removed by a reload while a client was
   logging in is refused.
-- `cert-authority` lines in `authorized_keys` files, which were skipped with
-  a warning, now take effect: check existing files before upgrading. In
-  zero-config mode without `--user`, such a line needs `principals=`.
+- `cert-authority` lines in `authorized_keys` files, and lines with
+  `command="internal-sftp"` (or a path to `sftp-server`), which were skipped
+  with a warning, now take effect: check existing files before upgrading. In
+  zero-config mode without `--user`, a `cert-authority` line needs
+  `principals=`.
 
 ### Fixed
 
