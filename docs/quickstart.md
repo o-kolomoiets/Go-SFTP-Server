@@ -66,10 +66,16 @@ own, and the host key. It serves `./share` with full access for `alice`. Add
 a partner who may only drop files into it:
 
 ```sh
-gosftpd user add partner --key partner.pub --access share=upload --expires 720h >> gosftpd.toml
-gosftpd config validate --check-fs
+gosftpd user add partner --key partner.pub --access share=upload --expires 720h --write
 gosftpd serve
 ```
+
+`user add --write` checks the configuration with the new user, writes
+`users.d/partner.toml` (`gosftpd init` includes that directory) and prints the
+connection details to send to the partner: host, port, host key fingerprint
+and the `sftp` command. On a running server, `kill -HUP` (or `systemctl reload
+gosftpd`) applies it without a restart; `gosftpd user disable partner`,
+`enable` and `remove` change the file the same way.
 
 `partner` can list and upload, but not download, delete or overwrite; an
 upload over an existing name becomes a copy. See

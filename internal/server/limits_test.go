@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -770,4 +771,82 @@ func TestNegativeLimits(t *testing.T) {
 	if zc := zero.snap.Load().cfg; zc.IdleTimeout != DefaultIdleTimeout || zc.KeepaliveInterval != DefaultKeepaliveInterval {
 		t.Errorf("zero timeouts: idle %v, keepalive %v, want the defaults", zc.IdleTimeout, zc.KeepaliveInterval)
 	}
+}
+
+// A login with the right key of an expired account is refused like any
+// other failure, and the audit log says why.
+func TestRefusalReasonAudited(t *testing.T) {
+	t.Parallel()
+
+	key := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Keys: keys, Expires: time.Now().Add(-time.Hour)}})
+	}})
+	if c, err := e.dialAs(t, "bob", key); err == nil {
+		c.Close()
+		t.Fatal("an expired account logged in")
+	}
+	if c, err := e.dialAs(t, "bob", signer(t)); err == nil {
+		c.Close()
+		t.Fatal("a wrong key logged in")
+	}
+	waitForMsg(t, func() bool { return strings.Count(e.auditLog.String(), `"event":"auth.failure"`) == 2 },
+		func() string { return "auth.failure events:\n" + e.auditLog.String() })
+	lines := auditLines(t, e.auditLog.String())
+	checkSchema(t, lines)
+	var reasons []any
+	for _, l := range lines {
+		if l["event"] == "auth.failure" {
+			reasons = append(reasons, l["reason"])
+		}
+	}
+	if len(reasons) != 2 || reasons[0] != "expired" || reasons[1] != nil {
+		t.Errorf("auth.failure reasons = %v, want [expired <nil>]", reasons)
+	}
+}
+
+// probeSigner holds only a public key; a client calls Sign only after the
+// server accepted the key in a query (PK_OK).
+type probeSigner struct {
+	pub    ssh.PublicKey
+	signed atomic.Bool
+}
+
+func (p *probeSigner) PublicKey() ssh.PublicKey { return p.pub }
+
+func (p *probeSigner) Sign(io.Reader, []byte) (*ssh.Signature, error) {
+	p.signed.Store(true)
+	return nil, errors.New("no private key")
+}
+
+// Offering the public key of an account that may not log in fails like an
+// unknown key: no PK_OK reveals the account, and the attempt counts toward
+// a ban. The audit log has the reason.
+func TestNoKeyOracle(t *testing.T) {
+	t.Parallel()
+
+	key := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Keys: keys, Disabled: true}})
+		c.Bans = auth.NewBanTable(auth.BanOptions{AfterFailures: 1})
+	}})
+	probe := &probeSigner{pub: key.PublicKey()}
+	if c, err := e.dialAs(t, "bob", probe); err == nil {
+		c.Close()
+		t.Fatal("logged in without a private key")
+	}
+	if probe.signed.Load() {
+		t.Error("the server accepted the key of a disabled account in a query (PK_OK)")
+	}
+	waitForMsg(t, func() bool { return strings.Contains(e.auditLog.String(), `"reason":"disabled"`) },
+		func() string { return "no auth.failure with reason disabled:\n" + e.auditLog.String() })
+	waitForMsg(t, func() bool {
+		c, err := e.dialAs(t, "bob", key)
+		if err == nil {
+			c.Close()
+		}
+		return strings.Contains(e.auditLog.String(), `"reason":"banned"`)
+	}, func() string { return "the probe did not count toward a ban:\n" + e.auditLog.String() })
 }

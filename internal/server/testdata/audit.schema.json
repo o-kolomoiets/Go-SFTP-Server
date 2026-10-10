@@ -12,7 +12,7 @@
     "conn.accept": {"required": ["client_version"]},
     "conn.close": {"required": ["duration_ms", "result"]},
     "auth.success": {"required": ["auth_method", "failed_attempts"], "optional": ["key_fp"]},
-    "auth.failure": {"required": ["attempts"]},
+    "auth.failure": {"required": ["attempts"], "optional": ["reason"]},
     "auth.ban": {"required": ["source", "duration_ms"]},
     "session.start": {},
     "session.end": {"required": ["duration_ms", "exit_status"]},

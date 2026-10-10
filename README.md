@@ -30,6 +30,7 @@ exchange point that you can run next to it as an ordinary user. See
 | Public-key login, OpenSSH `authorized_keys` with `from=` and `expiry-time=` | beta |
 | Mounts confined with `os.Root`, per-user home directories (`{user}`) | beta |
 | Users and permissions in one TOML file (`read`, `upload`, `readwrite`, `full`) | beta |
+| `user add --write`, `user disable`, `enable`, `remove` (files in `users.d/`) | alpha |
 | Upload conflicts: `rename` (default), `reject`, `overwrite`, `version` (keeps old versions) | beta |
 | Resumable uploads that can only append | beta |
 | JSON audit log with a stable schema, fail-closed | beta |
@@ -61,8 +62,7 @@ Or set up users with a configuration file:
 
 ```sh
 gosftpd init --user alice --authorized-keys ~/.ssh/id_ed25519.pub
-gosftpd user add partner --key partner.pub --access share=upload >> gosftpd.toml
-gosftpd config validate --check-fs
+gosftpd user add partner --key partner.pub --access share=upload --write
 gosftpd serve
 ```
 

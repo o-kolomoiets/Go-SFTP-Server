@@ -162,26 +162,40 @@ func (a *Authenticator) Inherit(prev *Authenticator) {
 // against the current configuration, and, if configured to, every open
 // connection.
 func (a *Authenticator) Recheck(conn ssh.ConnMetadata, perms *ssh.Permissions) bool {
+	return a.Refusal(conn, perms) == ""
+}
+
+// Refusal returns why Recheck refuses the login that produced perms, or "".
+func (a *Authenticator) Refusal(conn ssh.ConnMetadata, perms *ssh.Permissions) string {
 	user, ok := UserFrom(perms)
 	if !ok {
-		return false
+		return ReasonRemoved
 	}
 	acc := a.lookup(user)
-	if !a.allowed(acc, conn) {
-		return false
+	if acc == nil {
+		return ReasonRemoved
 	}
 	switch perms.Extensions[ExtMethod] {
 	case MethodPublicKey:
 		k, ok := acc.keys[perms.Extensions[extKey]]
-		if !ok || !k.expires.IsZero() && a.now().After(k.expires) {
-			return false
+		if !ok {
+			return ReasonRemoved
 		}
 		_, noTouch := perms.Extensions["no-touch-required"]
-		return k.noTouchRequire == noTouch && k.sourceAddress == perms.CriticalOptions["source-address"]
+		if k.noTouchRequire != noTouch || k.sourceAddress != perms.CriticalOptions["source-address"] {
+			return ReasonRemoved // the key's options changed
+		}
+		return a.keyRefusal(acc, k, conn)
 	case MethodPassword:
-		return acc.password != nil && acc.password.id() == perms.Extensions[extPassword]
+		if reason := a.refusal(acc, conn); reason != "" {
+			return reason
+		}
+		if acc.password == nil || acc.password.id() != perms.Extensions[extPassword] {
+			return ReasonRemoved // the password changed
+		}
+		return ""
 	}
-	return false
+	return ReasonRemoved
 }
 
 // Len returns the number of accepted keys.
@@ -210,6 +224,19 @@ func (a *Authenticator) lookup(name string) *account {
 // unknown users, wrong keys, disabled or expired accounts and disallowed
 // source addresses all fail the same way.
 func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	perms, err := a.KnownKey(conn, key)
+	if err != nil {
+		return nil, errDenied
+	}
+	return perms, nil
+}
+
+// KnownKey is PublicKey for a server that audits why logins fail: the
+// client sees the same failure, but when key is one of the user's keys and
+// the account or the key may not log in, the error is a *RefusedError with
+// the reason. The client has only offered the key, so the reason is about
+// the key, not about who offered it.
+func (a *Authenticator) KnownKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 	name := conn.User()
 	acc := a.lookup(name)
 	keys := noKeys.keys
@@ -217,11 +244,11 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 		keys = acc.keys
 	}
 	k, ok := keys[string(key.Marshal())]
-	if !ok || !a.allowed(acc, conn) {
+	if !ok {
 		return nil, errDenied
 	}
-	if !k.expires.IsZero() && a.now().After(k.expires) {
-		return nil, errDenied
+	if reason := a.keyRefusal(acc, k, conn); reason != "" {
+		return nil, &RefusedError{Reason: reason}
 	}
 	perms := newPermissions(name, MethodPublicKey)
 	perms.Extensions[ExtFingerprint] = ssh.FingerprintSHA256(key)
@@ -235,6 +262,47 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 	}
 	return perms, nil
 }
+
+// VerifiedKey is a VerifiedPublicKeyCallback: the client has proved that
+// it holds the key KnownKey accepted with perms. It checks the login again
+// against a, which is the authenticator of a newer configuration when a
+// reload happened in between: x/crypto does not ask KnownKey again for the
+// signed request.
+func (a *Authenticator) VerifiedKey(conn ssh.ConnMetadata, _ ssh.PublicKey, perms *ssh.Permissions) (*ssh.Permissions, error) {
+	if reason := a.Refusal(conn, perms); reason != "" {
+		return nil, &RefusedError{Reason: reason}
+	}
+	return perms, nil
+}
+
+// keyRefusal returns why acc may not log in with k now, or "".
+func (a *Authenticator) keyRefusal(acc *account, k Key, conn ssh.ConnMetadata) string {
+	if reason := a.refusal(acc, conn); reason != "" {
+		return reason
+	}
+	if !k.expires.IsZero() && a.now().After(k.expires) {
+		return ReasonKeyExpired
+	}
+	return ""
+}
+
+// Reasons a login is refused although the key offered is one of the
+// user's or the password is right (RefusedError).
+const (
+	ReasonDisabled   = "disabled"    // the account is disabled
+	ReasonExpired    = "expired"     // the account has expired
+	ReasonAddress    = "address"     // allow_from does not match the client
+	ReasonKeyExpired = "key_expired" // the key's expiry-time has passed
+	ReasonRemoved    = "removed"     // a reload removed or changed the user, the key or the password
+)
+
+// RefusedError refuses a login with credentials of the user: one of the
+// user's keys (offered; the client may not hold the private key) or the
+// right password. The client is told no more than for any failure; Reason
+// is for the audit log.
+type RefusedError struct{ Reason string }
+
+func (e *RefusedError) Error() string { return "authentication failed: " + e.Reason }
 
 // Password is an ssh.ServerConfig.PasswordCallback: CheckPassword, and a
 // failure waits as long as CheckPassword says.
@@ -267,8 +335,11 @@ func (a *Authenticator) CheckPassword(conn ssh.ConnMetadata, password []byte) (*
 	took := time.Since(start)
 	a.release(n)
 	a.pad.observe(took)
-	if !ok || acc == nil || acc.password == nil || !a.allowed(acc, conn) {
+	if !ok || acc == nil || acc.password == nil {
 		return nil, a.pad.rest(took), errDenied
+	}
+	if reason := a.refusal(acc, conn); reason != "" {
+		return nil, a.pad.rest(took), &RefusedError{Reason: reason}
 	}
 	perms := newPermissions(name, MethodPassword)
 	perms.Extensions[extPassword] = acc.password.id()
@@ -295,15 +366,17 @@ func (a *Authenticator) release(n int) {
 	}
 }
 
-// allowed checks the account-wide conditions of a login.
-func (a *Authenticator) allowed(acc *account, conn ssh.ConnMetadata) bool {
+// refusal returns why the account-wide conditions refuse a login, or "".
+func (a *Authenticator) refusal(acc *account, conn ssh.ConnMetadata) string {
 	switch {
-	case acc == nil, acc.disabled:
-		return false
+	case acc.disabled:
+		return ReasonDisabled
 	case !acc.expires.IsZero() && a.now().After(acc.expires):
-		return false
+		return ReasonExpired
+	case !addrAllowed(acc.allowFrom, conn.RemoteAddr()):
+		return ReasonAddress
 	}
-	return addrAllowed(acc.allowFrom, conn.RemoteAddr())
+	return ""
 }
 
 func newPermissions(user, method string) *ssh.Permissions {

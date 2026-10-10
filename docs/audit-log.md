@@ -44,7 +44,7 @@ never host paths. Strings from clients are JSON-escaped.
 | `conn.accept` | conn | `client_version` (after the client sent its version line) |
 | `conn.close` | conn | `duration_ms`, `result` (`ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked`: a reload refused the login, or closed the connection with `reload.disconnect_removed_users`) |
 | `auth.success` | auth | `auth_method` (`publickey` or `password`), `key_fp` (SHA256 fingerprint, public keys only), `failed_attempts` |
-| `auth.failure` | auth | `attempts`, `user` (the last name tried); written when a connection ends without login |
+| `auth.failure` | auth | `attempts`, `user` (the last name tried); `reason` when the login was refused although the key offered is one of the user's or the password is right: `disabled`, `expired`, `address` (`allow_from`), `key_expired` (`expiry-time=` of the key) or `removed` (a reload removed or changed the user, the key or the password during the login). For a key, the client may only have offered it without proving that it holds it: public keys are often public. Written when a connection ends without login. The client is never told the reason |
 | `auth.ban` | auth | `source` (IPv4 address or IPv6 /64), `duration_ms` |
 | `session.start` | session | |
 | `session.end` | session | `duration_ms`, `exit_status` |
