@@ -405,11 +405,11 @@ access = { m = "upload" }
 		got[i] = space.ReplaceAllString(strings.TrimSpace(l), " ")
 	}
 	want := []string{
-		"USER ACCESS KEYS PASSWORD EXPIRES STATUS",
-		"alice m=full 1 - - active",
-		"bob m=upload 2 - 2001-01-01T00:00:00Z expired",
-		"carol m=read 0 - - disabled",
-		"dave m=upload 0 off - active",
+		"USER ACCESS KEYS CERT PASSWORD EXPIRES STATUS",
+		"alice m=full 1 - - - active",
+		"bob m=upload 2 - - 2001-01-01T00:00:00Z expired",
+		"carol m=read 0 - - - disabled",
+		"dave m=upload 0 - off - active",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("user list:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -422,7 +422,7 @@ access = { m = "upload" }
 	}
 	writeFile(t, path, string(data)+"[auth]\nmethods = [\"password\"]\n")
 	_, stdout, _ = execute(t, "user", "list", "--config", path)
-	for _, want := range []string{"alice m=full off - - active", "dave m=upload off yes - active"} {
+	for _, want := range []string{"alice m=full off - - - active", "dave m=upload off - yes - active"} {
 		if !strings.Contains(space.ReplaceAllString(stdout, " "), want) {
 			t.Errorf("password-only user list lacks %q:\n%s", want, stdout)
 		}

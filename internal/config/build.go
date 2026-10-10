@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
@@ -112,6 +113,17 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		if c.AnyUser.Name == "" {
+			// Any login name is accepted, so such a line would let in every
+			// principal of the CA.
+			keys = slices.DeleteFunc(keys, func(k auth.Key) bool {
+				if k.CertAuthority() && k.Principals() == nil {
+					warns = append(warns, "--authorized-keys: "+k.Source+": cert-authority without principals= is ignored: any login name is accepted, so it would let in every principal of the CA; add principals=\"NAME\" or use --user")
+					return true
+				}
+				return false
+			})
+		}
 		if len(keys) == 0 {
 			if !o.Reload {
 				return nil, nil, warns, noKeysError(path)
@@ -132,6 +144,9 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 		au := auth.User{Name: name, Disabled: u.Disabled}
 		if u.Expires != nil {
 			au.Expires = *u.Expires
+		}
+		if u.Principals != nil {
+			au.Principals = append([]string{}, *u.Principals...)
 		}
 		if c.canUsePassword(u) {
 			h, err := auth.ParsePasswordHash(u.PasswordHash)
@@ -171,12 +186,131 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 			}
 			au.AllowFrom = append(au.AllowFrom, p)
 		}
-		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled {
+		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled && !c.certificateLogin(u) {
 			warns = append(warns, key("users", name)+": no usable keys, the user cannot log in")
 		}
 		users = append(users, au)
 	}
-	return auth.NewUsers(users), files, warns, nil
+	a := auth.NewUsers(users)
+	if c.Auth.HasMethod(auth.MethodPublicKey) {
+		cas, ws, err := o.readCAKeys(c)
+		warns = append(warns, ws...)
+		if err != nil {
+			return nil, nil, warns, err
+		}
+		revoked, err := o.readRevoked(c)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		a.Trust(cas, revoked)
+		warns = append(warns, certWarnings(users, cas, revoked)...)
+	}
+	return a, files, warns, nil
+}
+
+// readCAKeys reads the CAs trusted for every configured user. At start a
+// missing or unreadable file, or no usable CA, is an error; with Reload it
+// trusts no CA from the file, with a warning, as a deleted
+// authorized_keys_file revokes its keys.
+func (o AuthOptions) readCAKeys(c *Config) ([]ssh.PublicKey, []string, error) {
+	var (
+		cas   []ssh.PublicKey
+		warns []string
+	)
+	for i, line := range c.Auth.TrustedUserCAKeys {
+		ks, ws := auth.ParseCAKeys([]byte(line), key("auth", "trusted_user_ca_keys")+"["+strconv.Itoa(i+1)+"]")
+		cas = append(cas, ks...)
+		warns = append(warns, ws...)
+	}
+	const k = "auth.trusted_user_ca_keys_file"
+	if f := c.Auth.TrustedUserCAKeysFile; f != "" {
+		data, err := readTrustedFile(f)
+		switch {
+		case err != nil && !o.Reload:
+			return nil, warns, fmt.Errorf("%s: %w", k, err)
+		case err != nil:
+			warns = append(warns, fmt.Sprintf("%s: %v; its CAs are not trusted", k, err))
+		default:
+			ks, ws := auth.ParseCAKeys(data, f)
+			cas = append(cas, ks...)
+			warns = append(warns, ws...)
+		}
+	}
+	if c.Auth.TrustsCAs() && len(cas) == 0 {
+		where := "auth.trusted_user_ca_keys"
+		if len(c.Auth.TrustedUserCAKeys) == 0 {
+			where = k + ": " + c.Auth.TrustedUserCAKeysFile
+		}
+		if !o.Reload {
+			return nil, warns, fmt.Errorf("%s has no usable CA keys", where)
+		}
+		warns = append(warns, where+" has no usable CA keys; no CA is trusted for every user")
+	}
+	return cas, warns, nil
+}
+
+// readRevoked reads the revocation list. It fails closed, also on reload:
+// a list that cannot be read or parsed would revoke less, so the reload
+// fails and the running configuration, with its list, stays.
+func (o AuthOptions) readRevoked(c *Config) (*auth.RevokedKeys, error) {
+	r := &auth.RevokedKeys{}
+	for i, line := range c.Auth.RevokedKeys {
+		if err := r.Add([]byte(line), key("auth", "revoked_keys")+"["+strconv.Itoa(i+1)+"]"); err != nil {
+			return nil, err
+		}
+	}
+	if f := c.Auth.RevokedKeysFile; f != "" {
+		data, err := readTrustedFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("auth.revoked_keys_file: %w", err)
+		}
+		if err := r.Add(data, f); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
+}
+
+// readTrustedFile reads a file gosftpd trusts: a regular file that only
+// its owner (root or the user running gosftpd) can change.
+func readTrustedFile(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return nil, err
+	case !fi.Mode().IsRegular():
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if err := checkOwner(path, fi); err != nil {
+		return nil, err
+	}
+	return readFile(path)
+}
+
+// certWarnings points out revoked CAs and keys, and cert-authority lines
+// that restrict nothing because their CA is trusted for every user.
+func certWarnings(users []auth.User, cas []ssh.PublicKey, revoked *auth.RevokedKeys) []string {
+	var warns []string
+	trusted := map[string]bool{}
+	for _, ca := range cas {
+		trusted[string(ca.Marshal())] = true
+		if revoked.Revoked(ca) {
+			warns = append(warns, "auth.trusted_user_ca_keys: CA "+ssh.FingerprintSHA256(ca)+" is revoked")
+		}
+	}
+	for _, u := range users {
+		for _, k := range u.Keys {
+			switch {
+			case k.CertAuthority() && revoked.Revoked(k.Key):
+				warns = append(warns, key("users", u.Name)+": "+k.Source+": the CA is revoked")
+			case k.CertAuthority() && trusted[string(k.Key.Marshal())] && (u.Principals == nil || len(u.Principals) > 0):
+				warns = append(warns, key("users", u.Name)+": "+k.Source+": this CA is also in auth.trusted_user_ca_keys, which accepts its certificates without the line's restrictions")
+			case !k.CertAuthority() && revoked.Revoked(k.Key):
+				warns = append(warns, key("users", u.Name)+": "+k.Source+": the key is revoked")
+			}
+		}
+	}
+	return warns
 }
 
 // remember records the keys of path if it is a pipe.
@@ -214,9 +348,31 @@ func (o AuthOptions) readKeys(path, k string) ([]auth.Key, []string, error) {
 	return keys, warns, nil
 }
 
-// usesKeys reports whether u has keys that may be used.
+// usesKeys reports whether u has keys that may be used, or can log in
+// with a certificate from a trusted CA.
 func (c *Config) usesKeys(u *User) bool {
-	return (len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != "") && c.Auth.HasMethod(auth.MethodPublicKey)
+	return (len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != "" || c.certificateLogin(u)) && c.Auth.HasMethod(auth.MethodPublicKey)
+}
+
+// CertificatePrincipals returns the principals a certificate from a CA
+// trusted for every user needs one of to log in as name, or nil when it
+// cannot log in that way.
+func (c *Config) CertificatePrincipals(name string) []string {
+	u := c.Users[name]
+	if u == nil || !c.Auth.HasMethod(auth.MethodPublicKey) || !c.certificateLogin(u) {
+		return nil
+	}
+	if u.Principals == nil {
+		return []string{name}
+	}
+	return *u.Principals
+}
+
+// certificateLogin reports whether u can log in with a certificate from a
+// CA trusted for every user: CAs are trusted and u's principals are not
+// empty.
+func (c *Config) certificateLogin(u *User) bool {
+	return c.Auth.TrustsCAs() && (u.Principals == nil || len(*u.Principals) > 0)
 }
 
 // canUsePassword reports whether u has a password that may be used.

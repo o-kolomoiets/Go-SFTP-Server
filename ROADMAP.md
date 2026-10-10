@@ -589,8 +589,8 @@ flowchart LR
   - ready-made instructions for the partner are printed: host, port, fingerprint.
 - [ ] **SSH user certificates:**
   - `cert-authority` + `principals=` lines in `authorized_keys` start being accepted (before M4 they are rejected);
-  - `auth.trusted_user_ca_keys` → `ssh.CertChecker{IsUserAuthority: ..., IsRevoked: ..., SupportedCriticalOptions: []string{"source-address"}}`;
-  - the principal must match the user name; `force-command` and unknown critical options are rejected;
+  - `auth.trusted_user_ca_keys` with per-user `principals`, and `auth.revoked_keys`; gosftpd checks certificates itself, because `ssh.CertChecker` accepts a certificate without principals for every user and SHA-1 CA signatures, and checks the signature last (ADR 0007; `CheckCert` only verifies the signature);
+  - the principal must match the user name (or `principals`); `force-command` other than an SFTP server and unknown critical options are rejected;
   - `key_id` and `serial` are written to the audit log;
   - requires x/crypto ≥ v0.52.0: GO-2026-5014, 5015 and 5019.
 - [ ] **`VerifiedPublicKeyCallback`** (x/crypto ≥ v0.43.0) is the place for key-related side effects. Returning `PartialSuccessError` together with non-nil `Permissions` is not allowed.
@@ -794,7 +794,7 @@ Two streams. The **operational log** is written to stderr in text or JSON format
 | `remote_addr`, `local_addr` | string | always | `203.0.113.7:53122` |
 | `client_version` | string ≤ 128 | after KEX | `SSH-2.0-OpenSSH_9.6p1 ...` |
 | `auth_method`, `key_fp` | string | auth.* | `publickey`, `SHA256:...` |
-| `cert_key_id`, `cert_serial` | string, int | with a certificate | |
+| `cert_key_id`, `cert_serial`, `cert_ca_fp` | string (the serial as a decimal string: CAs use random 64-bit serials) | with a certificate | `alice-laptop`, `"42"`, `SHA256:...` |
 | `mount`, `path`, `target_path`, `final_path` | virtual paths | fs.* | `/inbox/report.pdf` |
 | `conflict` | `none` / `renamed` / `rejected` / `overwritten` / `versioned` | fs.upload, fs.rename | `renamed` |
 | `open_flags` | string | fs.upload | `WRITE+CREAT+TRUNC` |
@@ -830,7 +830,7 @@ The filter is set in `audit.events` by category: `conn`, `server` (always on), `
 - **Virtual users** run under a single unprivileged service account. The name must match `^[a-z0-9][a-z0-9._-]{0,31}$`.
 - **Identity flow.** The callback returns `Permissions.Extensions["gosftpd-user"]` and `["pubkey-fp"]`. After the handshake, the identity is read **only** from `sconn.Permissions`; state in closures is forbidden (CVE-2024-45337). Side effects are performed in `VerifiedPublicKeyCallback`.
 - **Methods.** The default is `["publickey"]`. `password` is enabled explicitly (M3). `keyboard-interactive` with a single "Password:" prompt — on request from WinSCP/FileZilla users (check the flags during implementation). GSSAPI is not supported.
-- **Options in authorized_keys.** Allowlist: `from=` (CIDR only, carried over to `source-address`), `expiry-time=`, `no-touch-required` (carried over to `Permissions.Extensions["no-touch-required"]`; x/crypto ≥ v0.52.0 honors it on its own), `restrict`; `cert-authority` + `principals=` only from M4, until then such a line is rejected. `verify-required` is **rejected**: for an SK signature x/crypto checks only the user presence flag (0x01) and does not check the user verification flag, and the application does not see the signature, so the option would silently weaken protection. The restrictions `no-pty`, `no-port-forwarding`, `no-agent-forwarding`, `no-X11-forwarding`, `no-user-rc` are ignored, because they always apply. A line with `command=`, `permitopen=` or any other option is **rejected** with a `file:line` warning. `ssh.ParseAuthorizedKey` only returns the options and does not apply them itself.
+- **Options in authorized_keys.** Allowlist: `from=` (CIDR only, carried over to `source-address`), `expiry-time=`, `no-touch-required` (carried over to `Permissions.Extensions["no-touch-required"]`; x/crypto ≥ v0.52.0 honors it on its own), `restrict`; from M4, `cert-authority` + `principals=` (ADR 0007) and `command=` only as an SFTP server (`internal-sftp`, or a path to `sftp-server` without arguments). `verify-required` is **rejected**: for an SK signature x/crypto checks only the user presence flag (0x01) and does not check the user verification flag, and the application does not see the signature, so the option would silently weaken protection. The restrictions `no-pty`, `no-port-forwarding`, `no-agent-forwarding`, `no-X11-forwarding`, `no-user-rc` are ignored, because they always apply. A line with another `command=`, `permitopen=` or any other option is **rejected** with a `file:line` warning. `ssh.ParseAuthorizedKey` only returns the options and does not apply them itself.
 - **Keys.** Allowed: ed25519, ecdsa, rsa ≥ 2048 (x/crypto does not enforce a minimum, so when `authorized_keys` is loaded, a line with `k.(ssh.CryptoPublicKey).CryptoPublicKey().(*rsa.PublicKey).N.BitLen() < 2048` is rejected with a `file:line` warning; signatures only `rsa-sha2-256`/`512`), `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-...`.
 - **User attributes:** `disabled`, `expires` (RFC 3339), `allow_from` (CIDR), `authorized_keys_file` (re-read on reload), `password_hash` (PHC).
 - **Protection against brute force and enumeration.** `MaxAuthTries = 6`, as in sshd and the x/crypto default. A value of 3 would cut off agents with many keys, because x/crypto counts a rejected offer as a failure. An unknown user goes through the same path and takes the same time as a wrong key.
@@ -867,7 +867,7 @@ max_auth_tries = 6
 
 [auth]
 methods = ["publickey", "password"]     # "password" from M3; without it partner-acme cannot log in
-# trusted_user_ca_keys = "/etc/gosftpd/user_ca.pub"   # M4
+# trusted_user_ca_keys_file = "/etc/gosftpd/user_ca.pub"   # M4
 
 [auth.ban]
 after_failures = 10
@@ -1232,6 +1232,7 @@ Per-version results are kept in `docs/interop.md`, including a "known limitation
 | `FuzzConflictName` | `internal/vfs` | The name is in the same directory, ≤ 255 bytes, and for n > 0 differs from the input |
 | `FuzzParseConfig` | `internal/config` | No panic on arbitrary bytes; `Validate()` does not panic |
 | `FuzzAuthorizedKeys` | `internal/auth` | No panic; the options allowlist is enforced |
+| `FuzzCertificate` | `internal/auth` | Arbitrary bytes offered as a certificate (M4): a login is accepted, or a reason recorded, only when the CA signature verifies; an accepted certificate has an allowed principal, is valid now, carries no refused option, and nothing of its own options but `source-address` reaches `Permissions` |
 | `FuzzRequestServer` | `internal/sftpd` | A random stream of SFTP v3 packets via `net.Pipe` into `sftp.NewRequestServer` with real handlers on `t.TempDir()`; server responses are read by a separate goroutine, otherwise writing to `net.Pipe` blocks. Invariants: the sentinel outside the directory is unchanged, no panic, handles ≤ the limit |
 
 Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run only the client target. That is why `FuzzRequestServer` is especially valuable. Seeds come from `f.Add` and the committed `testdata/fuzz/<Target>/`. Every crash found is committed as a seed. In PRs each target runs for 60 s (job `fuzz-smoke`, from M3); nightly, 10 minutes per target.

@@ -38,6 +38,7 @@ func newUserCmd() *cobra.Command {
 
 type userAddOptions struct {
 	keys         []string
+	principals   []string
 	passwordHash string
 	access       []string
 	expires      string
@@ -60,11 +61,16 @@ new user, and print the connection details to send to the user. The main
 configuration file is never rewritten. A running server applies the new
 file on reload (systemctl reload gosftpd, or kill -HUP).
 
+A user needs a --key or a --password-hash, unless the configuration trusts
+CAs (auth.trusted_user_ca_keys) and --write is given: the user then logs
+in with a certificate for its name, or for a --principal.
+
 Permissions are a preset (read, upload, readwrite, full) or a list of flags
 (list, read, write, overwrite, delete, rename, mkdir, rmdir, setstat).`,
 		Example: `  gosftpd user add partner --key partner.pub --access inbox=upload --expires 720h --write
   gosftpd user add partner --key partner.pub --access inbox=upload >> gosftpd.toml
-  gosftpd user add alice --key "ssh-ed25519 AAAA... alice@laptop" --access home=full --access public=read`,
+  gosftpd user add alice --key "ssh-ed25519 AAAA... alice@laptop" --access home=full --access public=read
+  gosftpd user add bob --principal bob@corp.example --access inbox=upload --write`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
 				return usageError{err}
@@ -89,6 +95,7 @@ Permissions are a preset (read, upload, readwrite, full) or a list of flags
 	f.StringVar(&o.host, "host", "", "with --write: host name in the connection details (default: from listen, or this host's name)")
 	f.BoolVar(&o.force, "force", false, "with --write: write a user that could not log in (disabled, expired, no usable key or password)")
 	f.StringArrayVar(&o.keys, "key", nil, "public key, or a file with public keys (repeatable)")
+	f.StringArrayVar(&o.principals, "principal", nil, "certificate principal for trusted CAs, instead of the user name (repeatable)")
 	f.StringVar(&o.passwordHash, "password-hash", "", "password hash from 'gosftpd user hash-password'")
 	f.StringArrayVar(&o.access, "access", nil, "MOUNT=PERMISSIONS (repeatable)")
 	f.StringVar(&o.expires, "expires", "", "account expiry: a duration from now (72h) or a date (2026-12-31, RFC 3339)")
@@ -101,8 +108,11 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 	if !auth.ValidUserName(name) {
 		return "", fmt.Errorf("invalid user name %q: use lowercase letters, digits, '.', '_' and '-' (max 32)", name)
 	}
-	if len(o.keys) == 0 && o.passwordHash == "" {
-		return "", errors.New("at least one --key or a --password-hash is required")
+	if len(o.keys) == 0 && o.passwordHash == "" && !o.write {
+		return "", errors.New("at least one --key or a --password-hash is required (with --write, a user of a configuration that trusts CAs may have neither)")
+	}
+	if slices.Contains(o.principals, "") {
+		return "", errors.New("--principal: empty principal")
 	}
 	if o.passwordHash != "" {
 		if _, err := auth.ParsePasswordHash(o.passwordHash); err != nil {
@@ -148,6 +158,9 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 	fmt.Fprintf(&b, "\n[users.%s]\n", tomlKey(name))
 	if len(keys) > 0 {
 		fmt.Fprintf(&b, "authorized_keys = %s\n", tomlStrings(keys))
+	}
+	if len(o.principals) > 0 {
+		fmt.Fprintf(&b, "principals = %s\n", tomlStrings(o.principals))
 	}
 	if o.passwordHash != "" {
 		fmt.Fprintf(&b, "password_hash = %s\n", tomlString(o.passwordHash))
@@ -330,7 +343,7 @@ func keyLines(arg string) ([]string, error) {
 
 func looksLikeKey(s string) bool {
 	s = strings.TrimSpace(s)
-	for _, p := range []string{"ssh-", "ecdsa-", "sk-", "from=", "expiry-time=", "restrict", "no-"} {
+	for _, p := range []string{"ssh-", "ecdsa-", "sk-", "from=", "expiry-time=", "restrict", "no-", "cert-authority", "principals=", "command="} {
 		if strings.HasPrefix(s, p) {
 			return true
 		}
@@ -370,7 +383,7 @@ func newUserListCmd() *cobra.Command {
 			}
 			slices.Sort(names)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "USER\tACCESS\tKEYS\tPASSWORD\tEXPIRES\tSTATUS")
+			fmt.Fprintln(w, "USER\tACCESS\tKEYS\tCERT\tPASSWORD\tEXPIRES\tSTATUS")
 			keysOn, pwOn := c.Auth.HasMethod(auth.MethodPublicKey), c.Auth.HasMethod(auth.MethodPassword)
 			now := time.Now()
 			for _, name := range names {
@@ -392,6 +405,12 @@ func newUserListCmd() *cobra.Command {
 				if !keysOn {
 					keys = "off" // auth.methods
 				}
+				cert := "-" // principals for trusted CAs
+				if ps := c.CertificatePrincipals(name); len(ps) > 0 {
+					cert = strings.Join(ps, ",")
+				} else if c.Auth.TrustsCAs() && !keysOn {
+					cert = "off"
+				}
 				password := "-"
 				if u.PasswordHash != "" {
 					password = "yes"
@@ -409,7 +428,7 @@ func newUserListCmd() *cobra.Command {
 				if u.Disabled {
 					status = "disabled"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, strings.Join(access, ", "), keys, password, expires, status)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, strings.Join(access, ", "), keys, cert, password, expires, status)
 			}
 			return w.Flush()
 		},

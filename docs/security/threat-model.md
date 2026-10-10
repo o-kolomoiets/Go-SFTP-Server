@@ -11,7 +11,7 @@ in [../security.md](../security.md); how to deploy them is in
 |---|---|
 | AS1 | Files in the mounts: their content, names and existence |
 | AS2 | Private host keys |
-| AS3 | Credentials: `authorized_keys`, password hashes |
+| AS3 | Credentials: `authorized_keys`, password hashes, trusted CA keys, the revocation list |
 | AS4 | The rest of the host's filesystem |
 | AS5 | Availability: CPU, memory, file descriptors, disk |
 | AS6 | Integrity and completeness of the audit log |
@@ -48,7 +48,8 @@ trusted.
 | Spoofing | Authentication bypass through state captured in callbacks (CVE-2024-45337) | Identity only from `ssh.Permissions`; `x/crypto` ≥ v0.57.0 | auth tests |
 | Spoofing | Guessing passwords of one user under another user's connection | The user name is pinned to the connection | server tests, paramiko interop |
 | Spoofing | Enumerating users by response time | One hash checked per attempt; unknown users against a stand-in of the costliest hash; failures padded | timing test (medians within 10%) |
-| Spoofing | A key, password or user revoked by a reload still logging in, or staying logged in | Every login is rechecked after the handshake against the configuration current then (x/crypto caches accepted keys); `reload.disconnect_removed_users` closes open connections whose login is revoked; a deleted `authorized_keys` file revokes its keys on reload | server and cli reload tests, interop |
+| Spoofing | A certificate logging in as a user its CA did not name, or with restrictions gosftpd cannot enforce (no principals, a SHA-1 CA signature, `force-command`, `verify-required`) | gosftpd checks certificates itself (ADR 0007): at least one principal, matched against the user's `principals` or the `cert-authority` line; SHA-2 CA signatures only; critical options limited to `source-address` and an SFTP-only `force-command`; the CA signature verified before the user is looked up, so unknown users cost the same | auth tests, interop with OpenSSH certificates |
+| Spoofing | A key, password or user revoked by a reload still logging in, or staying logged in | Every login is rechecked after the handshake against the configuration current then (x/crypto caches accepted keys); `reload.disconnect_removed_users` closes open connections whose login is revoked; a deleted `authorized_keys` file revokes its keys on reload; the revocation list fails closed (an invalid list fails the reload, and a revoked certificate revokes its key) | server and cli reload tests, interop |
 | Spoofing | MITM on first connection (N2) | Host key fingerprint and `known_hosts` line printed at start; SHA-2 signatures only | — |
 | Tampering | Leaving a mount through `..`, absolute paths, symlinks (N3) | One `resolve` for every path; `os.Root` per mount; links cannot be created | `FuzzResolve`, `FuzzResolveInRoot`, `FuzzRequestServer`, interop |
 | Tampering | Swapping a `{user}` home or a mount for a symlink or another mount (N4) | Parent `os.Root`, `Lstat` and `os.SameFile` for homes; `require_mountpoint` | vfs tests |

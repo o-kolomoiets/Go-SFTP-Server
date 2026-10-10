@@ -412,6 +412,7 @@ if sftp -P "$PORT" $(as admin) -b "$C/admin.batch" mallory@127.0.0.1 >/dev/null 
 
 # --- reload on SIGHUP (ROADMAP M4) ------------------------------------------
 reloads() { grep -c '"event":"server.reload"' "$C/audit.jsonl" || true; }
+reload_errors() { grep -c '"event":"server.reload".*"result":"error"' "$C/audit.jsonl" || true; }
 hup() { # hup: SIGHUP the configuration server and wait for its server.reload event
 	local n
 	n=$(reloads)
@@ -483,9 +484,58 @@ for _ in $(seq 50); do
 done
 grep -q '"event":"auth.failure".*"reason":"disabled"' "$C/audit.jsonl" && pass "user disable: audit has reason disabled" || fail "user disable: no auth.failure with reason disabled"
 
+# --- SSH user certificates (ADR 0007) -----------------------------------------
+audit_has() { # audit_has PATTERN: wait until the audit log matches PATTERN
+	for _ in $(seq 50); do
+		if grep -q "$1" "$C/audit.jsonl"; then return 0; fi
+		sleep 0.1
+	done
+	return 1
+}
+ssh-keygen -q -t ed25519 -N '' -C user_ca -f "$WORK/user_ca"
+for u in dana eve fred; do ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$WORK/id_$u"; done
+ssh-keygen -q -s "$WORK/user_ca" -I dana-laptop -n dana -V -5m:+1h -z 42 "$WORK/id_dana.pub"
+ssh-keygen -q -s "$WORK/user_ca" -I eve -n mallory -V -5m:+1h "$WORK/id_eve.pub"
+ssh-keygen -q -s "$WORK/user_ca" -I fred-sftp -n dana -V -5m:+1h -O force-command=internal-sftp "$WORK/id_fred.pub"
+cp "$WORK/user_ca.pub" "$C/user_ca.pub"
+: >"$C/revoked"
+chmod 600 "$C/user_ca.pub" "$C/revoked"
+sed -i "s|^methods = \[\"publickey\", \"password\"\]|&\ntrusted_user_ca_keys_file = \"$C/user_ca.pub\"\nrevoked_keys_file = \"$C/revoked\"|" "$C/gosftpd.toml"
+cat >>"$C/gosftpd.toml" <<TOML
+
+[users.dana]
+access = { public = "read" }
+TOML
+hup || fail "reload with certificates"
+# ssh uses id_dana-cert.pub next to the key by itself.
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as dana) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1 && pass "certificate: a certificate from a trusted CA logs in" || fail "certificate: dana cannot log in"
+audit_has '"event":"auth.success".*"cert_key_id":"dana-laptop","cert_serial":"42"' && pass "certificate: the audit log names the certificate" || fail "certificate: no cert_key_id and cert_serial in auth.success"
+# shellcheck disable=SC2046
+if sftp -P "$PORT" $(as eve) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1; then fail "certificate: another principal logged in"; else pass "certificate: another principal is refused"; fi
+audit_has '"event":"auth.failure".*"reason":"cert_principal"' && pass "certificate: audit has reason cert_principal" || fail "certificate: no reason cert_principal"
+# shellcheck disable=SC2046
+sftp -P "$PORT" $(as fred) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1 && pass "certificate: force-command=internal-sftp is accepted" || fail "certificate: force-command=internal-sftp refused"
+cat "$WORK/id_dana-cert.pub" >>"$C/revoked"
+hup || fail "reload after revoking"
+# shellcheck disable=SC2046
+if sftp -P "$PORT" $(as dana) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1; then fail "certificate: a revoked certificate logged in"; else pass "certificate: a revoked certificate is refused after a reload"; fi
+audit_has '"event":"auth.failure".*"reason":"key_revoked"' && pass "certificate: audit has reason key_revoked" || fail "certificate: no reason key_revoked"
+cp "$C/revoked" "$C/revoked.txt"
+ssh-keygen -q -k -f "$C/revoked" "$WORK/id_dana.pub"
+errors=$(reload_errors)
+if hup && [ "$(reload_errors)" -gt "$errors" ] && grep -q 'KRL' "$C/server.log"; then
+	pass "certificate: a KRL fails the reload"
+else
+	fail "certificate: a KRL did not fail the reload"
+fi
+cp "$C/revoked.txt" "$C/revoked"
+hup || fail "reload with the text revocation list"
+
 # An invalid configuration is refused; the running one stays.
 printf '[server\n' >>"$C/gosftpd.toml"
-if hup && grep -q '"event":"server.reload".*"result":"error"' "$C/audit.jsonl" && kill -0 "$CFG_PID" 2>/dev/null; then
+errors=$(reload_errors)
+if hup && [ "$(reload_errors)" -gt "$errors" ] && kill -0 "$CFG_PID" 2>/dev/null; then
 	pass "reload: an invalid configuration is refused"
 else
 	fail "reload: invalid configuration not refused"

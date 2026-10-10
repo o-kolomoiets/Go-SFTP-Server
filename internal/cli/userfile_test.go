@@ -201,3 +201,56 @@ func TestPartnerInstructionsIPv6(t *testing.T) {
 		t.Errorf("instructions:\n%s", out)
 	}
 }
+
+// A configuration that trusts CAs takes users without keys: they log in
+// with a certificate for their name or principals.
+func TestUserAddCertificate(t *testing.T) {
+	t.Parallel()
+
+	path := userConfig(t)
+	ca := authorizedKey(newSigner(t))
+	if code, _, errOut := execute(t, "user", "add", "dave", "--access", "inbox=upload", "--write", "--config", path); code != exitUsage || !strings.Contains(errOut, "could not log in") {
+		t.Errorf("a user without keys and no trusted CA: exit %d: %s", code, errOut)
+	}
+	if code, _, errOut := execute(t, "user", "add", "dave", "--access", "inbox=upload"); code != exitUsage || !strings.Contains(errOut, "--key") {
+		t.Errorf("a printed block without keys: exit %d: %s", code, errOut)
+	}
+	data, _ := os.ReadFile(path)
+	writeFile(t, path, strings.Replace(string(data), "[mounts.inbox]", "[auth]\ntrusted_user_ca_keys = [\""+ca+"\"]\n[mounts.inbox]", 1))
+
+	code, out, errOut := execute(t, "user", "add", "carol", "--principal", "carol@corp", "--access", "inbox=upload", "--write", "--config", path)
+	if code != exitOK {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	for _, want := range []string{"for the principal carol@corp", "ssh-keygen -s CA_KEY -I carol -n carol@corp -V +52w"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("instructions lack %q:\n%s", want, out)
+		}
+	}
+	_, out, _ = execute(t, "user", "list", "--config", path)
+	if !strings.Contains(strings.Join(strings.Fields(out), " "), "carol inbox=upload 0 carol@corp - - active") {
+		t.Errorf("user list:\n%s", out)
+	}
+
+	code, out, errOut = execute(t, "user", "add", "erin", "--key", `cert-authority,principals="erin" `+ca, "--access", "inbox=read")
+	if code != exitOK || !strings.Contains(out, "cert-authority,principals=") {
+		t.Errorf("--key with a cert-authority line: exit %d: %s%s", code, out, errOut)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]string{
+		"alice":              "alice",
+		"alice@corp.example": "alice@corp.example",
+		"Alice Smith":        "'Alice Smith'",
+		"it's":               `'it'\''s'`,
+		"$(rm -rf x)":        "'$(rm -rf x)'",
+		"":                   "''",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

@@ -206,6 +206,7 @@ jobs:
           - { pkg: ./internal/vfs, fn: FuzzConflictName }
           - { pkg: ./internal/config, fn: FuzzParseConfig }
           - { pkg: ./internal/auth, fn: FuzzAuthorizedKeys }
+          - { pkg: ./internal/auth, fn: FuzzCertificate }
           - { pkg: ./internal/sftpd, fn: FuzzRequestServer }
     runs-on: ubuntu-24.04
     steps:

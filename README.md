@@ -50,7 +50,8 @@ exchange point that you can run next to it as an ordinary user. See
 | Opt-in password login (argon2id) | alpha |
 | Atomic uploads, file size and free space limits | alpha |
 | Reload on SIGHUP without dropping connections, `sd_notify` | alpha |
-| Metrics, hooks, systemd unit, SSH certificates | planned (v0.4) |
+| OpenSSH user certificates (trusted CAs, `cert-authority`), revoked keys | alpha |
+| Metrics, hooks, systemd unit | planned (v0.4) |
 | Docker image, deb/rpm packages, signed releases | planned (v0.5) |
 
 ## Quick start
@@ -161,8 +162,9 @@ log.
 ## Plan
 
 The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md);
-progress is tracked in [TASKS.md](TASKS.md). Next (v0.4): user management
-commands, SSH certificates, metrics, hooks and systemd integration.
+progress is tracked in [TASKS.md](TASKS.md). Done for v0.4: reload on
+SIGHUP, user management commands, SSH user certificates. Next: host key
+rotation and host certificates, metrics, hooks and systemd integration.
 
 ## Contributing
 

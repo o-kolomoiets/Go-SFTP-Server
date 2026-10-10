@@ -359,11 +359,11 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 
 	authn, keyFiles, keyWarns, err := c.BuildAuthenticator(config.AuthOptions{})
+	for _, w := range keyWarns { // also when they explain the error
+		log.WarnContext(ctx, "configuration", "detail", w)
+	}
 	if err != nil {
 		return configError{err}
-	}
-	for _, w := range keyWarns {
-		log.WarnContext(ctx, "skipping authorized key", "detail", w)
 	}
 	keys, keyInfo, err := loadHostKeys(c.Server.HostKeys, c.Server.HostKeyAutoGenerate)
 	if err != nil {

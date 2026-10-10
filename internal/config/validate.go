@@ -180,6 +180,26 @@ func (c *Config) validateAuth(p *problems) {
 			p.warnf("users", "password hashes of %d different kinds or costs: under parallel attempts the response time can show which users exist; re-hash them with 'gosftpd user hash-password'", len(classes))
 		}
 	}
+	if a.usesCertificates() && !a.HasMethod(auth.MethodPublicKey) {
+		p.warnf("auth", "trusted_user_ca_keys and revoked_keys are not used: auth.methods does not include \"publickey\"")
+	}
+	for i, line := range a.TrustedUserCAKeys {
+		keys, warns := auth.ParseCAKeys([]byte(line), "entry "+strconv.Itoa(i+1))
+		for _, w := range warns {
+			p.errorf("auth.trusted_user_ca_keys", "%s", w)
+		}
+		if len(keys) == 0 && len(warns) == 0 {
+			p.errorf("auth.trusted_user_ca_keys", "entry %d is empty", i+1)
+		}
+	}
+	for i, line := range a.RevokedKeys {
+		r := &auth.RevokedKeys{}
+		if err := r.Add([]byte(line), "entry "+strconv.Itoa(i+1)); err != nil {
+			p.errorf("auth.revoked_keys", "%v", err)
+		} else if r.Len() == 0 {
+			p.errorf("auth.revoked_keys", "entry %d is empty", i+1)
+		}
+	}
 	b := a.Ban
 	if b.AfterFailures < 0 || b.AfterFailures > maxBanFailures {
 		p.errorf("auth.ban.after_failures", "must be between 0 (no bans) and %d", maxBanFailures)
@@ -345,12 +365,25 @@ func (c *Config) validateUsers(p *problems) {
 				p.warnf(k("password_hash"), "ignored: auth.methods does not include \"password\"")
 			}
 		}
+		if u.Principals != nil {
+			if slices.Contains(*u.Principals, "") {
+				p.errorf(k("principals"), "empty principal")
+			}
+			for _, pr := range *u.Principals {
+				if strings.ContainsAny(pr, ", \t") {
+					p.warnf(k("principals"), "%q contains a comma or a space, which ssh-keygen -n cannot sign", pr)
+				}
+			}
+			if !c.Auth.TrustsCAs() {
+				p.warnf(k("principals"), "not used: no auth.trusted_user_ca_keys")
+			}
+		}
 		hasKeys := len(u.AuthorizedKeys) > 0 || u.AuthorizedKeysFile != ""
 		if hasKeys && !c.Auth.HasMethod(auth.MethodPublicKey) {
 			p.warnf(where, "keys not used: auth.methods does not include \"publickey\"")
 		}
 		if !c.usesKeys(u) && !c.canUsePassword(u) {
-			p.warnf(where, "no usable authorized_keys or password_hash: the user cannot log in")
+			p.warnf(where, "no usable authorized_keys, password_hash or principals for trusted CAs: the user cannot log in")
 		}
 	}
 }
