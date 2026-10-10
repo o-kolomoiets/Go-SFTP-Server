@@ -128,7 +128,7 @@
 |---|---|---|---|
 | M4-01 | Reload по SIGHUP, переоткрытие mount'ов | ✅ | ADR 0005 после трёх ревью дизайна; снимки конфигурации, поколения таблицы mount'ов, перепроверка входа после рукопожатия, `reload.disconnect_removed_users`, событие `server.reload` |
 | M4-02 | sd_notify, drop-in для systemd < 253 | ✅ | `READY`/`RELOADING`+`MONOTONIC_USEC`/`STOPPING`; drop-in `legacy-notify.conf` ставится с пакетами (M4-08) |
-| M4-03 | `user add --write`, `disable`, `remove` | 🔄 | `users.d/NAME.toml` с проверкой конфига и инструкцией для партнёра; `disable`/`enable`/`remove` без потери комментариев; `reason=expired` (и другие) в `auth.failure` через `VerifiedPublicKeyCallback`; ждёт PR |
+| M4-03 | `user add --write`, `disable`, `remove` | 🔄 | `users.d/NAME.toml` с проверкой конфига и инструкцией для партнёра; `disable`/`enable`/`remove` без потери комментариев; `reason=expired` (и другие) в `auth.failure`; ключ такой учётки отклоняется уже при предъявлении (без «оракула»), `VerifiedPublicKeyCallback` перепроверяет после подписи; ждёт PR |
 | M4-04 | SSH user certificates | ⬜ |
 | M4-05 | Ротация host keys, host certificates | ⬜ |
 | M4-06 | Admin listener (`/metrics`, `/healthz`, `/readyz`), `healthcheck` | ⬜ |

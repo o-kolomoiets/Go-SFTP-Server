@@ -9,8 +9,11 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 
 - **Authenticate** with a public key, or with a password where
   `auth.methods` allows it. Unknown users, wrong keys or passwords, disabled
-  or expired accounts and disallowed addresses all fail the same way, and an
-  unknown user takes as long to refuse as a wrong password. Identity flows
+  or expired accounts and disallowed addresses all fail the same way (the
+  key of a disabled account is not accepted even as a query, so holding a
+  public key reveals nothing), and an unknown user takes as long to refuse
+  as a wrong password. Only the audit log says why (`auth.failure`
+  `reason`). Identity flows
   only through the SSH library's permissions, never through state captured
   during authentication (CVE-2024-45337).
 - **Open SFTP sessions**, nothing else: shell, exec, PTY, environment, agent

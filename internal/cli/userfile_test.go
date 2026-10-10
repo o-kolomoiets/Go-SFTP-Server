@@ -65,6 +65,9 @@ func TestUserAddWrite(t *testing.T) {
 	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("mode %v, want that of the configuration (0600)", fi.Mode().Perm())
 	}
+	if di, err := os.Stat(filepath.Dir(file)); err != nil || runtime.GOOS != "windows" && di.Mode().Perm() != 0o700 {
+		t.Errorf("users.d mode: %v, %v; want 0700 for a 0600 configuration, whatever the umask", di.Mode().Perm(), err)
+	}
 	c, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -168,5 +171,33 @@ func TestUserDisableEnableRemove(t *testing.T) {
 	}
 	if _, _, errOut := execute(t, "user", "remove", "admin", "--config", path); !strings.Contains(errOut, "does not rewrite") {
 		t.Errorf("removing a user of the main file: %s", errOut)
+	}
+}
+
+// A user that could not log in is refused unless --force; the warnings say
+// why.
+func TestUserAddWriteUnusable(t *testing.T) {
+	t.Parallel()
+
+	path := userConfig(t)
+	hash := "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI"
+	args := []string{"user", "add", "pat", "--password-hash", hash, "--access", "inbox=upload", "--write", "--config", path}
+	code, _, errOut := execute(t, args...)
+	if code != exitUsage || !strings.Contains(errOut, "could not log in") || !strings.Contains(errOut, `auth.methods does not include "password"`) {
+		t.Errorf("password user with publickey only: exit %d: %s", code, errOut)
+	}
+	if code, _, errOut := execute(t, append(args, "--force")...); code != exitOK {
+		t.Errorf("--force: exit %d: %s", code, errOut)
+	}
+}
+
+func TestPartnerInstructionsIPv6(t *testing.T) {
+	t.Parallel()
+
+	c := &config.Config{}
+	c.Server.Listen = []string{"[2001:db8::1]:2022"}
+	out := partnerInstructions(c, "bob", "")
+	if !strings.Contains(out, "connect: sftp -P 2022 bob@[2001:db8::1]") {
+		t.Errorf("instructions:\n%s", out)
 	}
 }

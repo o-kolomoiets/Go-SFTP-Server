@@ -27,6 +27,15 @@ func usersFileMode(cfg fs.FileInfo) fs.FileMode {
 	return cfg.Mode().Perm()&0o640 | 0o600
 }
 
+// usersDirMode is the mode of a new directory for users files: the group
+// may list it if it may read the configuration file.
+func usersDirMode(cfg fs.FileInfo) fs.FileMode {
+	if cfg.Mode().Perm()&0o040 != 0 {
+		return 0o750
+	}
+	return 0o700
+}
+
 // writeUsersFile writes data to path through a temporary file in the same
 // directory, so that a reload never reads half a file. The file gets mode
 // and, where the platform allows, the owner and group of like (the main
@@ -35,10 +44,15 @@ func usersFileMode(cfg fs.FileInfo) fs.FileMode {
 func writeUsersFile(path string, data []byte, mode fs.FileMode, like fs.FileInfo, exclusive bool) error {
 	dir := filepath.Dir(path)
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		if err := os.Mkdir(dir, 0o750); err != nil {
+		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
 		chownLike(dir, like)
+		// Not subject to the umask: the server's group must be able to
+		// list the directory, or the include would find nothing.
+		if err := os.Chmod(dir, usersDirMode(like)); err != nil {
+			return err
+		}
 	}
 	if exclusive {
 		if _, err := os.Lstat(path); err == nil {
@@ -112,7 +126,11 @@ func partnerInstructions(c *config.Config, name, host string) string {
 	if port != 22 {
 		portFlag = fmt.Sprintf("-P %d ", port)
 	}
-	fmt.Fprintf(&b, "  connect: sftp %s%s@%s\n", portFlag, name, host)
+	dest := host
+	if strings.Contains(host, ":") {
+		dest = "[" + host + "]" // an IPv6 address
+	}
+	fmt.Fprintf(&b, "  connect: sftp %s%s@%s\n", portFlag, name, dest)
 	fmt.Fprintln(&b, "Check the host key fingerprint on the first connection.")
 	return b.String()
 }

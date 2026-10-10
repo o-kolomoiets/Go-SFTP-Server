@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -1361,5 +1362,41 @@ access = { m = "read" }
 	a, _, warns, err = zero.BuildAuthenticator(AuthOptions{Reload: true})
 	if err != nil || a.Len() != 0 || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "nobody can log in") }) {
 		t.Errorf("zero-config reload without keys = %d keys, %q, %v", a.Len(), warns, err)
+	}
+}
+
+// Include skips names that start with a dot (editor and user add temporary
+// files) and refuses a directory it cannot read instead of matching nothing.
+func TestIncludeSkipsDotFilesAndUnreadable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	users := filepath.Join(dir, "users.d")
+	if err := os.Mkdir(users, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(users, ".bob.toml.1234.tmp"), []byte("[users.bob]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(users, "carol.toml"), []byte("[users.carol]\naccess = { m = \"read\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeConfig(t, dir, "config_version = 1\ninclude = [\"users.d/*\"]\n")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Users["bob"]; ok || c.Users["carol"] == nil {
+		t.Errorf("users = %v; want carol only", slices.Sorted(maps.Keys(c.Users)))
+	}
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return // no unreadable directories for this user
+	}
+	if err := os.Chmod(users, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(users, 0o700) })
+	if _, err := Load(path); err == nil {
+		t.Error("an unreadable include directory was taken as empty")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -23,8 +24,15 @@ import (
 func (c *Config) UsersFile(name string) (string, error) {
 	dir := filepath.Dir(c.File)
 	for _, pattern := range c.Include {
+		// Like globInclude: a relative pattern is matched inside dir, which
+		// is not a pattern itself even if its name has [ or *.
+		base := ""
 		if !filepath.IsAbs(pattern) {
-			pattern = filepath.Join(dir, pattern)
+			pattern = filepath.Clean(pattern)
+			if pattern == ".." || strings.HasPrefix(pattern, ".."+string(filepath.Separator)) {
+				continue
+			}
+			base = dir
 		}
 		d := filepath.Dir(pattern)
 		if strings.ContainsAny(d, "*?[") {
@@ -32,10 +40,21 @@ func (c *Config) UsersFile(name string) (string, error) {
 		}
 		file := filepath.Join(d, name+".toml")
 		if ok, err := filepath.Match(pattern, file); err == nil && ok {
-			return file, nil
+			return filepath.Join(base, file), nil
 		}
 	}
 	return "", fmt.Errorf("%s includes no directory for user files; add include = [\"users.d/*.toml\"] to it", c.File)
+}
+
+// CanLogIn reports whether the user name exists and could log in now: not
+// disabled or expired, with a key or password that auth.methods allows.
+func (c *Config) CanLogIn(name string) bool {
+	u := c.Users[name]
+	switch {
+	case u == nil, u.Disabled, u.Expires != nil && u.Expires.Before(time.Now()):
+		return false
+	}
+	return c.usesKeys(u) || c.canUsePassword(u)
 }
 
 // ParseUsers decodes the [users.NAME] tables of an included file, as Load
@@ -93,6 +112,14 @@ func EditUser(file string, data []byte, name string, edit UserEdit) (out []byte,
 	}
 	switch edit {
 	case RemoveUser:
+		// The comment lines right above the table go with it; comment and
+		// blank lines right before the next table stay with that one.
+		for start > 0 && isComment(lines[start-1]) {
+			start--
+		}
+		for end < len(lines) && end > start+1 && (isComment(lines[end-1]) || strings.TrimSpace(lines[end-1]) == "") {
+			end--
+		}
 		lines = append(lines[:start], lines[end:]...)
 		delete(before, name)
 	case DisableUser, EnableUser:
@@ -113,6 +140,8 @@ var (
 	arrayRE    = regexp.MustCompile(`^\s*\[\[`)
 	disabledRE = regexp.MustCompile(`^(\s*disabled\s*=\s*)(true|false)(\s*(?:#.*)?)$`)
 )
+
+func isComment(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "#") }
 
 // userSection returns the lines [start, end) of the [users.NAME] table and
 // its sub-tables, or start = -1.

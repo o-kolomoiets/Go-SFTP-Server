@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -141,7 +142,8 @@ func Fingerprint(key ssh.PublicKey) string {
 // KnownHostsLine returns the line a client adds to ~/.ssh/known_hosts for
 // this key served at host:port.
 func KnownHostsLine(host string, port int, key ssh.PublicKey) string {
-	return knownhosts.Line([]string{knownhosts.Normalize(host + ":" + strconv.Itoa(port))}, key)
+	// JoinHostPort brackets an IPv6 address, so that Normalize can split it.
+	return knownhosts.Line([]string{knownhosts.Normalize(net.JoinHostPort(host, strconv.Itoa(port)))}, key)
 }
 
 // restrictRSA makes RSA host keys sign with SHA-2 only (never ssh-rsa/SHA-1).

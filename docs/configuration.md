@@ -56,7 +56,7 @@ check follows symlinks and, on Linux, bind mounts.
 | Key | Default | Meaning |
 |---|---|---|
 | `config_version` | required | Schema version; this release understands `1`. |
-| `include` | none | Glob patterns of files with `[users.NAME]` tables only, e.g. `["users.d/*.toml"]`. Relative patterns must stay inside the configuration directory. A user may be defined once. |
+| `include` | none | Glob patterns of files with `[users.NAME]` tables only, e.g. `["users.d/*.toml"]`. Relative patterns must stay inside the configuration directory. A user may be defined once. Names that start with a dot are skipped; a directory that exists but cannot be read is an error. |
 
 ## `[server]`
 
@@ -428,7 +428,7 @@ is given: run it as a dedicated user.
 | `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions. |
 | `gosftpd config show` | Prints the effective configuration. |
 | `gosftpd config example [--full]` | Prints an example. |
-| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, `--expires` an expiry (`720h` or a date). With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name). |
+| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, `--expires` an expiry (`720h` or a date). With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name). A user that could not log in (disabled, expired, no key or password that `auth.methods` allows) is refused unless `--force`. |
 | `gosftpd user disable\|enable\|remove NAME` | Changes a user defined in an included file, keeping the rest of the file and its comments; `remove` deletes a file left without users. The main configuration file is never rewritten. A reload applies the change. |
 | `gosftpd user hash-password [--stdin]` | Asks for a password twice (or reads one line with `--stdin`) and prints its argon2id hash. |
 | `gosftpd user list` | Lists users with access, key count, password, expiry and status (`off` when `auth.methods` leaves the method out). |

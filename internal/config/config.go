@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -530,23 +531,59 @@ func (c *Config) loadIncludes(dir string) error {
 // globInclude expands an include pattern. A relative pattern is matched
 // inside dir without treating dir itself as a pattern (it may contain [ or
 // *), and must stay below it.
+//
+// Glob skips directories it cannot read; an include whose fixed directory
+// exists but cannot be read is an error instead, or its users would be
+// left out without a word. Names that start with a dot are skipped, as
+// shells do: editor swap files and the temporary files of user add.
 func globInclude(dir, pattern string) ([]string, error) {
+	var files []string
 	if filepath.IsAbs(pattern) {
-		return filepath.Glob(pattern)
+		if err := readableDir(filepath.Dir(pattern)); err != nil {
+			return nil, err
+		}
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+		files = matches
+	} else {
+		rel := filepath.ToSlash(filepath.Clean(pattern))
+		if rel == ".." || strings.HasPrefix(rel, "../") {
+			return nil, errors.New("a relative pattern must stay inside the configuration directory; use an absolute path")
+		}
+		if err := readableDir(filepath.Join(dir, filepath.FromSlash(path.Dir(rel)))); err != nil {
+			return nil, err
+		}
+		matches, err := fs.Glob(os.DirFS(dir), rel)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range matches {
+			files = append(files, filepath.Join(dir, filepath.FromSlash(m)))
+		}
 	}
-	rel := filepath.ToSlash(filepath.Clean(pattern))
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return nil, errors.New("a relative pattern must stay inside the configuration directory; use an absolute path")
+	return slices.DeleteFunc(files, func(f string) bool { return strings.HasPrefix(filepath.Base(f), ".") }), nil
+}
+
+// readableDir fails if d is a directory without wildcards that exists but
+// cannot be read.
+func readableDir(d string) error {
+	if strings.ContainsAny(d, "*?[") {
+		return nil
 	}
-	matches, err := fs.Glob(os.DirFS(dir), rel)
-	if err != nil {
-		return nil, err
+	f, err := os.Open(d)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	files := make([]string, len(matches))
-	for i, m := range matches {
-		files[i] = filepath.Join(dir, filepath.FromSlash(m))
+	if err == nil {
+		_, err = f.ReadDir(1)
+		_ = f.Close()
+		if err == nil || errors.Is(err, io.EOF) {
+			return nil
+		}
 	}
-	return files, nil
+	return err
 }
 
 func (c *Config) loadInclude(file string) error {

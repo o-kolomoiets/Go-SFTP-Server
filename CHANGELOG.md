@@ -31,11 +31,16 @@ Incompatible changes are prefixed with **BREAKING:**.
   disable`, `enable` and `remove` change a user's file without touching the
   rest of it; the main configuration file is never rewritten. `gosftpd init`
   includes `users.d/*.toml`.
-- `auth.failure` has a `reason` when the credentials were right but the
-  login was refused: `disabled`, `expired`, `address`, `key_expired` or
-  `removed`. A key's account is checked once the client has proved that it
-  holds the key (`VerifiedPublicKeyCallback`), so the reason is never
-  recorded for someone who only knows a public key.
+- `auth.failure` has a `reason` when the login was refused although the key
+  offered is one of the user's or the password is right: `disabled`,
+  `expired`, `address`, `key_expired` or `removed`. The client is told
+  nothing more, and the key of such an account is refused already when
+  offered, as before. A key is checked again once the client has proved
+  that it holds it (`VerifiedPublicKeyCallback`), against the configuration
+  current then.
+- `user add --write` prints the warnings about the new user and refuses one
+  that could not log in (for example a password while `auth.methods` has
+  only `publickey`) unless `--force`.
 
 ### Changed
 
@@ -54,6 +59,12 @@ Incompatible changes are prefixed with **BREAKING:**.
   logging in is refused.
 
 ### Fixed
+
+- `known_hosts` lines for IPv6 addresses (`serve` banner, `hostkey show`,
+  `user add --write`) are written as `[addr]:port`, which OpenSSH matches.
+- An `include` whose directory exists but cannot be read is an error
+  instead of silently adding no users; names that start with a dot are
+  skipped (editor and temporary files).
 
 - TOML errors no longer print control characters or "line 0" for an escape
   cut off at the end of the file.

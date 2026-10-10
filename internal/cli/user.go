@@ -43,6 +43,7 @@ type userAddOptions struct {
 	expires      string
 	allowFrom    []string
 	write        bool
+	force        bool
 	config       string
 	host         string
 }
@@ -79,13 +80,14 @@ Permissions are a preset (read, upload, readwrite, full) or a list of flags
 				_, err = fmt.Fprint(cmd.OutOrStdout(), block)
 				return err
 			}
-			return writeUser(cmd.OutOrStdout(), args[0], block, o)
+			return writeUser(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], block, o)
 		},
 	}
 	f := cmd.Flags()
 	f.BoolVar(&o.write, "write", false, "write users.d/NAME.toml instead of printing the block")
 	f.StringVar(&o.config, "config", "", "with --write: configuration file (default: the one serve would use)")
 	f.StringVar(&o.host, "host", "", "with --write: host name in the connection details (default: from listen, or this host's name)")
+	f.BoolVar(&o.force, "force", false, "with --write: write a user that could not log in (disabled, expired, no usable key or password)")
 	f.StringArrayVar(&o.keys, "key", nil, "public key, or a file with public keys (repeatable)")
 	f.StringVar(&o.passwordHash, "password-hash", "", "password hash from 'gosftpd user hash-password'")
 	f.StringArrayVar(&o.access, "access", nil, "MOUNT=PERMISSIONS (repeatable)")
@@ -166,7 +168,7 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 
 // writeUser writes the block of user name to its own file, after checking
 // the whole configuration with it.
-func writeUser(out io.Writer, name, block string, o userAddOptions) error {
+func writeUser(out, errOut io.Writer, name, block string, o userAddOptions) error {
 	c, err := loadConfig(o.config, os.Getenv)
 	if err != nil {
 		return err
@@ -187,8 +189,18 @@ func writeUser(out io.Writer, name, block string, o userAddOptions) error {
 	u.From = path
 	c.Users[name] = u
 	c.Files = append(c.Files, path)
-	if _, err := checkConfig(c, false); err != nil {
+	warns, err := checkConfig(c, false)
+	if err != nil {
 		return err
+	}
+	prefix := "users." + tomlKey(name)
+	for _, w := range warns {
+		if strings.HasPrefix(w, prefix+".") || strings.HasPrefix(w, prefix+" ") || strings.HasPrefix(w, prefix+":") {
+			fmt.Fprintln(errOut, "warning:", w)
+		}
+	}
+	if !c.CanLogIn(name) && !o.force {
+		return usageError{fmt.Errorf("%s could not log in (see the warnings); pass --force to write it anyway", name)}
 	}
 	cfg, err := os.Stat(c.File)
 	if err != nil {

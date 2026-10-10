@@ -160,10 +160,14 @@ func runInit(w io.Writer, o initOptions) error {
 	if keysFile == "" {
 		fmt.Fprintf(w, "\nNo authorized_keys found: paste your public key into %s first.\n", o.out)
 	}
+	cfgFlag := ""
+	if o.out != config.LocalFile {
+		cfgFlag = " --config " + o.out // not the file that serve finds by itself
+	}
 	fmt.Fprintf(w, "\nNext steps:\n")
-	fmt.Fprintf(w, "  gosftpd user add NAME --key FILE --access %s=upload --write\n", mounts[0].name)
-	fmt.Fprintf(w, "  gosftpd config validate --check-fs\n")
-	fmt.Fprintf(w, "  gosftpd serve\n")
+	fmt.Fprintf(w, "  gosftpd user add NAME --key FILE --access %s=upload --write%s\n", mounts[0].name, cfgFlag)
+	fmt.Fprintf(w, "  gosftpd config validate --check-fs%s\n", cfgFlag)
+	fmt.Fprintf(w, "  gosftpd serve%s\n", cfgFlag)
 	return nil
 }
 

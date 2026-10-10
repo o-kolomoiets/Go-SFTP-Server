@@ -279,15 +279,29 @@ func TestRecheck(t *testing.T) {
 	}
 }
 
-// KnownKey accepts a user's key whatever the account's state; VerifiedKey,
-// after the client proved that it holds the key, says why it refuses.
-func TestVerifiedKeyReasons(t *testing.T) {
+// KnownKey refuses a user's key like any other failure when the account or
+// the key may not log in, with the reason; VerifiedKey checks again after
+// the signature, against the configuration current then.
+func TestKeyRefusalReasons(t *testing.T) {
 	t.Parallel()
 
 	k := newKey(t)
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	expiring, _ := ParseAuthorizedKeys([]byte(authorizedLine(t, `expiry-time="20261001"`, k)), "test")
+	fenced, _ := ParseAuthorizedKeys([]byte(authorizedLine(t, `from="10.0.0.0/8"`, k)), "test")
 	conn := fakeConn{user: "alice", addr: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1}}
+	reasonOf := func(err error) string {
+		if re, ok := errors.AsType[*RefusedError](err); ok {
+			return re.Reason
+		}
+		return ""
+	}
+	users := func(u User) *Authenticator {
+		u.Name = "alice"
+		a := NewUsers([]User{u})
+		a.now = func() time.Time { return now }
+		return a
+	}
 	for _, tt := range []struct {
 		name   string
 		user   User
@@ -299,39 +313,44 @@ func TestVerifiedKeyReasons(t *testing.T) {
 		{"address", User{Keys: []Key{{Key: k}}, AllowFrom: mustPrefixes(t, "10.0.0.0/8")}, ReasonAddress},
 		{"key expired", User{Keys: expiring}, ReasonKeyExpired},
 	} {
-		tt.user.Name = "alice"
-		a := NewUsers([]User{tt.user})
-		a.now = func() time.Time { return now }
-		perms, err := a.KnownKey(conn, k)
-		if err != nil {
-			t.Errorf("%s: KnownKey refused a configured key: %v", tt.name, err)
-			continue
+		a := users(tt.user)
+		_, err := a.KnownKey(conn, k)
+		if (err == nil) != (tt.reason == "") || reasonOf(err) != tt.reason {
+			t.Errorf("%s: KnownKey = %v, want reason %q", tt.name, err, tt.reason)
 		}
-		_, err = a.VerifiedKey(conn, k, perms)
-		var re *RefusedError
-		switch {
-		case tt.reason == "" && err != nil:
-			t.Errorf("%s: VerifiedKey: %v", tt.name, err)
-		case tt.reason != "" && (!errors.As(err, &re) || re.Reason != tt.reason):
-			t.Errorf("%s: VerifiedKey = %v, want reason %s", tt.name, err, tt.reason)
-		}
-		if _, err := a.PublicKey(conn, k); (err == nil) != (tt.reason == "") {
+		if _, err := a.PublicKey(conn, k); (err == nil) != (tt.reason == "") || reasonOf(err) != "" {
 			t.Errorf("%s: PublicKey = %v", tt.name, err)
-		}
-		if _, err := a.PublicKey(conn, k); err != nil && errors.As(err, &re) {
-			t.Errorf("%s: PublicKey tells the reason: %v", tt.name, err)
 		}
 	}
 
-	a := NewUsers([]User{{Name: "alice", Keys: []Key{{Key: k}}}})
-	if _, err := a.KnownKey(conn, newKey(t)); err == nil || errors.As(err, new(*RefusedError)) {
-		t.Errorf("KnownKey with another key = %v", err)
+	a := users(User{Keys: []Key{{Key: k}}})
+	if _, err := a.KnownKey(conn, newKey(t)); err == nil || reasonOf(err) != "" {
+		t.Errorf("KnownKey with another key = %v; want a failure without a reason", err)
 	}
-	perms, _ := a.KnownKey(conn, k)
-	var re *RefusedError
-	reloaded := NewUsers(nil) // a reload removed alice between the two calls
-	if _, err := reloaded.VerifiedKey(conn, k, perms); !errors.As(err, &re) || re.Reason != ReasonRemoved {
-		t.Errorf("VerifiedKey after a reload removed the user = %v", err)
+	if _, err := NewUsers(nil).KnownKey(conn, k); err == nil || reasonOf(err) != "" {
+		t.Errorf("KnownKey of an unknown user = %v; want a failure without a reason", err)
+	}
+	perms, err := a.KnownKey(conn, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.VerifiedKey(conn, k, perms); err != nil {
+		t.Errorf("VerifiedKey without a reload: %v", err)
+	}
+	// A reload between the query and the signature.
+	for _, tt := range []struct {
+		name   string
+		a      *Authenticator
+		reason string
+	}{
+		{"user removed", NewUsers(nil), ReasonRemoved},
+		{"key removed", users(User{Keys: []Key{{Key: newKey(t)}}}), ReasonRemoved},
+		{"key restricted", users(User{Keys: fenced}), ReasonRemoved},
+		{"disabled", users(User{Keys: []Key{{Key: k}}, Disabled: true}), ReasonDisabled},
+	} {
+		if _, err := tt.a.VerifiedKey(conn, k, perms); reasonOf(err) != tt.reason {
+			t.Errorf("%s: VerifiedKey = %v, want reason %s", tt.name, err, tt.reason)
+		}
 	}
 }
 

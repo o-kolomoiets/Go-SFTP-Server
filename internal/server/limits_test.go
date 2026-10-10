@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -803,4 +804,49 @@ func TestRefusalReasonAudited(t *testing.T) {
 	if len(reasons) != 2 || reasons[0] != "expired" || reasons[1] != nil {
 		t.Errorf("auth.failure reasons = %v, want [expired <nil>]", reasons)
 	}
+}
+
+// probeSigner holds only a public key; a client calls Sign only after the
+// server accepted the key in a query (PK_OK).
+type probeSigner struct {
+	pub    ssh.PublicKey
+	signed atomic.Bool
+}
+
+func (p *probeSigner) PublicKey() ssh.PublicKey { return p.pub }
+
+func (p *probeSigner) Sign(io.Reader, []byte) (*ssh.Signature, error) {
+	p.signed.Store(true)
+	return nil, errors.New("no private key")
+}
+
+// Offering the public key of an account that may not log in fails like an
+// unknown key: no PK_OK reveals the account, and the attempt counts toward
+// a ban. The audit log has the reason.
+func TestNoKeyOracle(t *testing.T) {
+	t.Parallel()
+
+	key := signer(t)
+	keys, _ := auth.ParseAuthorizedKeys(ssh.MarshalAuthorizedKey(key.PublicKey()), "test")
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.Auth = auth.NewUsers([]auth.User{{Name: "bob", Keys: keys, Disabled: true}})
+		c.Bans = auth.NewBanTable(auth.BanOptions{AfterFailures: 1})
+	}})
+	probe := &probeSigner{pub: key.PublicKey()}
+	if c, err := e.dialAs(t, "bob", probe); err == nil {
+		c.Close()
+		t.Fatal("logged in without a private key")
+	}
+	if probe.signed.Load() {
+		t.Error("the server accepted the key of a disabled account in a query (PK_OK)")
+	}
+	waitForMsg(t, func() bool { return strings.Contains(e.auditLog.String(), `"reason":"disabled"`) },
+		func() string { return "no auth.failure with reason disabled:\n" + e.auditLog.String() })
+	waitForMsg(t, func() bool {
+		c, err := e.dialAs(t, "bob", key)
+		if err == nil {
+			c.Close()
+		}
+		return strings.Contains(e.auditLog.String(), `"reason":"banned"`)
+	}, func() string { return "the probe did not count toward a ban:\n" + e.auditLog.String() })
 }

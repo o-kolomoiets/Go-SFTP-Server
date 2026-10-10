@@ -20,6 +20,10 @@ func TestUsersFile(t *testing.T) {
 	if got, err := c.UsersFile("bob"); err != nil || got != filepath.Join(dir, "users.d", "bob.toml") {
 		t.Errorf("UsersFile = %q, %v", got, err)
 	}
+	odd := &Config{File: filepath.Join(dir, "etc[1]", "gosftpd.toml"), Include: []string{"users.d/*.toml"}}
+	if got, err := odd.UsersFile("bob"); err != nil || got != filepath.Join(dir, "etc[1]", "users.d", "bob.toml") {
+		t.Errorf("UsersFile in a directory with [ = %q, %v", got, err)
+	}
 	abs := filepath.Join(dir, "partners")
 	c.Include = []string{filepath.Join(abs, "p-*.toml"), filepath.Join(abs, "*.toml")}
 	if got, err := c.UsersFile("bob"); err != nil || got != filepath.Join(abs, "bob.toml") {
@@ -87,6 +91,19 @@ func TestEditUser(t *testing.T) {
 	inline := []byte("[users]\nalice = { access = { inbox = \"read\" } }\n")
 	if _, _, err := EditUser("f.toml", inline, "alice", DisableUser); err == nil || !strings.Contains(err.Error(), "by hand") {
 		t.Errorf("an inline table: %v", err)
+	}
+}
+
+// Removing a user takes its own comment with it and leaves the comment
+// of the next user above that user.
+func TestRemoveUserKeepsComments(t *testing.T) {
+	t.Parallel()
+
+	data := "# Team file\n\n# Partner A, ticket 1\n[users.a]\naccess = { inbox = \"read\" }\n\n# Partner B, keep until 2027\n[users.b]\naccess = { inbox = \"read\" }\n"
+	out, changed, err := EditUser("f.toml", []byte(data), "a", RemoveUser)
+	want := "# Team file\n\n\n# Partner B, keep until 2027\n[users.b]\naccess = { inbox = \"read\" }\n"
+	if err != nil || !changed || string(out) != want {
+		t.Errorf("remove a (%v, %v):\n%s\nwant:\n%s", changed, err, out, want)
 	}
 }
 

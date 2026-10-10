@@ -474,10 +474,10 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		return
 	}
 	defer sn.cfg.Mounts.Close()
-	if !sn.cfg.Auth.Recheck(sconn, sconn.Permissions) {
-		log.Info("login refused: revoked by a configuration reload")
+	if reason := sn.cfg.Auth.Refusal(sconn, sconn.Permissions); reason != "" {
+		log.Info("login refused: revoked by a configuration reload", "reason", reason)
 		ca.fail()
-		al.Event("auth.failure", slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1))
+		al.Event("auth.failure", slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1), slog.String("reason", reason))
 		closed("revoked")
 		return
 	}
@@ -530,9 +530,9 @@ func (s *Server) newConnAuth(c net.Conn, al *audit.Logger) *connAuth {
 func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 	cfg := *sn.ssh
 	if sn.publicKey {
-		// The key is looked up when the client offers it, and the account
-		// checked once the client has proved that it holds the key: only
-		// then does a refusal have a reason worth auditing.
+		// The key is checked when the client offers it, and again once the
+		// client has proved that it holds it: x/crypto does not ask the
+		// first callback again, and a reload may have come in between.
 		cfg.PublicKeyCallback = func(md ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if !ca.user.same(md.User()) {
 				return nil, errUserChanged
@@ -541,7 +541,9 @@ func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 			if !cur.publicKey {
 				return nil, errMethodOff
 			}
-			return cur.cfg.Auth.KnownKey(md, key)
+			perms, err := cur.cfg.Auth.KnownKey(md, key)
+			ca.refused(err)
+			return perms, err
 		}
 		cfg.VerifiedPublicKeyCallback = func(md ssh.ConnMetadata, key ssh.PublicKey, perms *ssh.Permissions, _ string) (*ssh.Permissions, error) {
 			cur := ca.s.snap.Load()

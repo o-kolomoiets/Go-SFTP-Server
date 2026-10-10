@@ -157,3 +157,20 @@ func TestGenerateTypes(t *testing.T) {
 		t.Error("dsa accepted")
 	}
 }
+
+func TestKnownHostsLineIPv6(t *testing.T) {
+	t.Parallel()
+
+	s, err := Generate(filepath.Join(t.TempDir(), "k"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for host, want := range map[string]string{"2001:db8::1": "[2001:db8::1]:2022 ", "example.org": "[example.org]:2022 "} {
+		if got := KnownHostsLine(host, 2022, s.PublicKey()); !strings.HasPrefix(got, want) {
+			t.Errorf("KnownHostsLine(%s) = %q", host, got)
+		}
+	}
+	if got := KnownHostsLine("::1", 22, s.PublicKey()); !strings.HasPrefix(got, "::1 ") {
+		t.Errorf("port 22: %q", got)
+	}
+}
