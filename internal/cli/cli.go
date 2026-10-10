@@ -50,7 +50,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "gosftpd",
-		Short:         "A secure-by-default SFTP server",
+		Short:         "Turn a folder into an SFTP drop-box with an audit log",
 		Args:          noArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,

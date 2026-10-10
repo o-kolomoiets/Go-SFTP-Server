@@ -126,6 +126,10 @@ func TestResolve(t *testing.T) {
 		{in: "/one/a\x00b", wantErr: ErrInvalidPath},
 		{in: "/one/\xff", wantErr: ErrInvalidPath},
 		{in: "/one/" + strings.Repeat("d/", maxDepth+1), wantErr: ErrInvalidPath},
+		{in: "/one/" + strings.Repeat("a", maxPathLen-5), mount: "one", rel: strings.Repeat("a", maxPathLen-5)},
+		// The limit applies to the canonical path, which starts with "/":
+		// a path that resolves is one that REALPATH can return.
+		{in: "one/" + strings.Repeat("a", maxPathLen-4), wantErr: ErrInvalidPath},
 	}
 	for _, tt := range tests {
 		v, rel, err := s.resolve(tt.in)
@@ -611,7 +615,7 @@ func TestSplitExtAndCandidate(t *testing.T) {
 			t.Errorf("candidate(%q) = %q, want %q", in, got, want)
 		}
 	}
-	long := strings.Repeat("я", 200) + ".txt"
+	long := strings.Repeat("λ", 200) + ".txt"
 	stem, ext := splitExt(long, DefaultCompoundExtensions)
 	got := candidate(DefaultRenameTemplate, stem, "1", ext)
 	if len(got) > maxNameLen || !strings.HasSuffix(got, " (1).txt") || !utf8Valid(got) {

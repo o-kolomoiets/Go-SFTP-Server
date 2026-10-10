@@ -17,7 +17,7 @@
 | D14 | Minimum Go version      | `go 1.26.5`: required by x/crypto ≥ v0.56.0 and by the `os.Root` escape fix GO-2026-4970                 | roadmap recommendation        |
 | D16 | Contributor terms       | DCO (`git commit -s`), no CLA                                                                            | roadmap recommendation        |
 | D17 | Time budget             | ~12 hours per week; the estimates in ROADMAP.md §5 assume this                                           | assumed, owner may correct    |
-| D19 | Language                | English for README, `docs/`, CHANGELOG, commits and issue templates; ROADMAP.md and TASKS.md in Russian  | roadmap recommendation        |
+| D19 | Language                | English everywhere, ROADMAP.md and TASKS.md included (until 2026-10-10 those two were in Russian)        | owner decision, ADR 0006      |
 
 Decisions marked "roadmap recommendation" were adopted by default and can be
 revisited by the owner; record any change as a new ADR.

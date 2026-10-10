@@ -22,6 +22,7 @@ func fuzzPathSeeds(f *testing.F) {
 		"/share/evil/secret.txt", "../outside/secret.txt", "/share/.gosftpd-1.part",
 		"/share/.versions/a.txt", "C:\\Windows", "\\\\server\\share", "a\x00b", "/share/" + strings.Repeat("x/", 70),
 		"/share/aux", "/share/a.", "/share/a ", "\xff\xfe", "/ŝhare/ä",
+		strings.Repeat("a", maxPathLen), // found by fuzz-smoke: its client path was 1 byte too long
 	} {
 		f.Add(s)
 	}
@@ -153,7 +154,7 @@ func FuzzResolveInRoot(f *testing.F) {
 func FuzzConflictName(f *testing.F) {
 	for _, s := range []string{
 		"report.pdf", "archive.tar.gz", ".env", "README", "a (1).txt", "x.",
-		strings.Repeat("я", 127) + ".txt", strings.Repeat("a", 251) + " (1)",
+		strings.Repeat("λ", 127) + ".txt", strings.Repeat("a", 251) + " (1)",
 		"a." + strings.Repeat("e", 252), strings.Repeat("b", 255),
 	} {
 		f.Add(s, uint8(3), DefaultRenameTemplate)

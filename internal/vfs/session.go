@@ -180,6 +180,10 @@ func (s *Session) resolve(vp string) (v *view, rel string, err error) {
 		return nil, "", ErrInvalidPath
 	}
 	p := path.Clean("/" + vp)
+	if len(p) > maxPathLen {
+		// The canonical path, which REALPATH returns, must resolve too.
+		return nil, "", ErrInvalidPath
+	}
 
 	var rest string
 	switch {
