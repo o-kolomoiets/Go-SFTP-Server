@@ -43,6 +43,14 @@ or others, or belongs to anyone but root or the user running gosftpd. Host keys
 must also not be readable by others (`chmod 600`). A configuration readable by
 everyone gives a warning. `gosftpd init` writes its file with mode 0600.
 
+None of these files, nor the audit log, may lie inside a mount that clients
+can write to: a client could add itself a key or a user, which a reload would
+then apply. On reload that includes the mounts that connections opened
+under an earlier configuration still use. Host keys and configuration files
+(which may hold password hashes) may not lie inside any mount, since clients
+could read them. An audit log inside a read-only mount gives a warning. The
+check follows symlinks and, on Linux, bind mounts.
+
 ## Top level
 
 | Key | Default | Meaning |
@@ -345,6 +353,59 @@ See [audit-log.md](audit-log.md) for the format.
 | `output` | `"stdout"` | `stdout` or a file, opened for appending (mode 0600). |
 | `events` | `["conn", "auth", "session", "transfer", "modify", "denied"]` | Categories to record; also `list` and `stat`. `server` events are always recorded. |
 | `on_error` | `"fail-closed"` | When the audit log cannot be written: `fail-closed` refuses new connections and changes until it works again; `fail-open` keeps serving and writes the events to stderr. |
+
+## `[reload]`
+
+`kill -HUP` (or `systemctl reload gosftpd`) applies the configuration again
+without a restart; see [Reload](#reload).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `disconnect_removed_users` | `false` | After a reload, close the connections whose login the new configuration would refuse: the user was removed, disabled or has expired, the key or password used was removed or changed, or `allow_from` no longer matches. Otherwise open connections keep the configuration they logged in under. |
+
+## Reload
+
+On SIGHUP gosftpd first reopens the audit log file (for logrotate), then
+reads the same configuration file as at start again, with the same
+command-line flags and environment, and checks it like `config validate
+--check-fs`. Only if that succeeds does it switch:
+
+- **New logins** use the new users, keys, passwords, mounts, permissions,
+  limits, bans settings and log level. Every login is checked against the
+  configuration current when it completes, so a key removed by a reload is
+  refused even for a client that was half-way through logging in.
+- **Open connections** keep the configuration they logged in under, for all
+  their sessions, unless `disconnect_removed_users` closes them. A changed or
+  remounted mount directory is opened anew for new logins; old connections
+  keep the old directory until they end.
+- **Carried over:** bans (with the new `[auth.ban]` settings; turning bans off
+  drops them), connection counts (connections above a lowered limit stay; new
+  ones are refused, as `conn.reject`, until the count is below it) and
+  running transfers.
+- **Restart only:** `server.listen`, `server.host_keys`,
+  `server.host_key_auto_generate`, `server.crypto_policy`, `log.format`,
+  `audit.events` and `audit.on_error`. A change is logged as a warning and
+  listed in the `server.reload` audit event; the running value stays.
+
+Problems that concern one user or one mount do not stop a reload: an
+`authorized_keys_file` that is missing, unsafe, empty or not a regular file
+gives that user no keys (so deleting the file, or linking it to `/dev/null`,
+revokes them), and a mount that fails its checks (a disk that is not
+mounted with `require_mountpoint`, a missing directory, a missing `--dir`)
+is unavailable until the next reload. Only a pipe, such as that of
+`--authorized-keys <(...)`, which can be read once, keeps the keys read
+from it before.
+Anything else (a syntax error, an invalid value, an unsafe configuration
+file) keeps the running configuration; the error goes to the log, and the
+audit log gets `server.reload` with `"result":"error"`.
+
+A value that a flag or the environment sets (`--log-level`,
+`GOSFTPD_LOG_LEVEL`, `--audit-output`) keeps overriding the file; a reload
+warns when the file says otherwise. With zero-config (`--dir`), a reload
+reads `--authorized-keys` again and reopens the audit log.
+
+Under systemd, gosftpd reports `RELOADING=1` and then `READY=1` with a status
+line that says whether the reload worked (`Type=notify-reload`).
 
 ## Zero-config
 

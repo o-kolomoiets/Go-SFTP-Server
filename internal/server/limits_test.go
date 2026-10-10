@@ -55,8 +55,46 @@ func TestLimiter(t *testing.T) {
 	for _, x := range []*admission{a1, a2, b1} {
 		x.release()
 	}
-	if l.total != 0 || len(l.sources) != 0 || len(l.preauth) != 0 {
-		t.Errorf("after release: total %d, sources %v, preauth %d", l.total, l.sources, len(l.preauth))
+	if l.total != 0 || len(l.sources) != 0 || l.preauth != 0 {
+		t.Errorf("after release: total %d, sources %v, preauth %d", l.total, l.sources, l.preauth)
+	}
+}
+
+// A reload lowers a limit: connections above it stay, new ones are
+// refused until the count is below it.
+func TestLimiterSetLimits(t *testing.T) {
+	t.Parallel()
+
+	l := newLimiter(10, 10, 10)
+	var held []*admission
+	for range 3 {
+		a, r := l.admit(netip.Prefix{})
+		if a == nil {
+			t.Fatalf("admit: %q", r)
+		}
+		held = append(held, a)
+	}
+	l.setLimits(2, 10, 10)
+	if _, r := l.admit(netip.Prefix{}); r != rejectMaxConns {
+		t.Fatalf("above a lowered limit: reason %q", r)
+	}
+	held[0].release()
+	if _, r := l.admit(netip.Prefix{}); r != rejectMaxConns {
+		t.Fatalf("at a lowered limit: reason %q", r)
+	}
+	held[1].release()
+	a, r := l.admit(netip.Prefix{})
+	if a == nil {
+		t.Fatalf("below a lowered limit: %q", r)
+	}
+	l.setLimits(10, 10, 1)
+	if _, r := l.admit(netip.Prefix{}); r != rejectPreauth {
+		t.Errorf("lowered pre-authentication limit: reason %q", r)
+	}
+	a.release()
+	held[2].release()
+	if l.total != 0 || l.preauth != 0 {
+		t.Errorf("after release: total %d, preauth %d", l.total, l.preauth)
 	}
 }
 
@@ -635,7 +673,7 @@ func TestUserNameChange(t *testing.T) {
 	for _, first := range []string{"none", auth.MethodPassword} {
 		sc, cc := net.Pipe()
 		ca := srv.newConnAuth(sc, audit.Discard())
-		cfg := ca.config()
+		cfg := ca.config(srv.snap.Load())
 		bob := fakeMeta{user: "bob"}
 		if first == "none" {
 			cfg.AuthLogCallback(bob, "none", errors.New("none"))
@@ -715,10 +753,11 @@ func TestNegativeLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := srv.cfg
+	sn := srv.snap.Load()
+	c := sn.cfg
 	if c.HandshakeTimeout != DefaultHandshakeTimeout || c.MaxConnections != DefaultMaxConnections ||
 		c.MaxConnectionsPerIP != DefaultMaxPerSource || c.MaxPreauthConnections != DefaultMaxPreauth ||
-		c.MaxSessionsPerConn != DefaultMaxSessions || c.MaxAuthTries != DefaultMaxAuthTries || srv.sshCfg.MaxAuthTries != DefaultMaxAuthTries {
+		c.MaxSessionsPerConn != DefaultMaxSessions || c.MaxAuthTries != DefaultMaxAuthTries || sn.ssh.MaxAuthTries != DefaultMaxAuthTries {
 		t.Errorf("negative limits did not become the defaults: %+v", c)
 	}
 	if c.IdleTimeout != 0 || c.KeepaliveInterval != 0 {
@@ -728,7 +767,7 @@ func TestNegativeLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if zero.cfg.IdleTimeout != DefaultIdleTimeout || zero.cfg.KeepaliveInterval != DefaultKeepaliveInterval {
-		t.Errorf("zero timeouts: idle %v, keepalive %v, want the defaults", zero.cfg.IdleTimeout, zero.cfg.KeepaliveInterval)
+	if zc := zero.snap.Load().cfg; zc.IdleTimeout != DefaultIdleTimeout || zc.KeepaliveInterval != DefaultKeepaliveInterval {
+		t.Errorf("zero timeouts: idle %v, keepalive %v, want the defaults", zc.IdleTimeout, zc.KeepaliveInterval)
 	}
 }

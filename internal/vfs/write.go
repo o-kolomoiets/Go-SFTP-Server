@@ -158,9 +158,11 @@ func (t *Table) release(h *WriteHandle) {
 	t.writing = slices.DeleteFunc(t.writing, func(w *WriteHandle) bool { return w == h })
 }
 
-// openedHandle claims the file of a new handle; on failure the file is
-// closed.
-func (s *Session) openedHandle(h *WriteHandle) (*WriteHandle, error) {
+// openedHandle claims the file of a new handle of v; on failure the file is
+// closed. The handle is complete before claim publishes it to other
+// sessions (isCreated reads its session and view).
+func (s *Session) openedHandle(v *view, h *WriteHandle) (*WriteHandle, error) {
+	h.s, h.v = s, v
 	if err := s.t.claim(h); err != nil {
 		_ = h.f.Close()
 		return nil, err
@@ -169,8 +171,8 @@ func (s *Session) openedHandle(h *WriteHandle) (*WriteHandle, error) {
 }
 
 // reservedHandle returns a handle for a file this upload just created.
-func (s *Session) reservedHandle(rel string, f *os.File, conflict string) (*WriteHandle, error) {
-	h, err := s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true})
+func (s *Session) reservedHandle(v *view, rel string, f *os.File, conflict string) (*WriteHandle, error) {
+	h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true})
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +242,6 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.s, h.v = s, v
 	h.maxSize = v.opts().MaxFileSize
 	name := h.rel
 	if h.target != "" {
@@ -274,7 +275,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 			// Lost a race, or rel is a dangling symlink: do not follow it.
 			return nil, osError(err)
 		}
-		return s.reservedHandle(rel, f, ConflictNone)
+		return s.reservedHandle(v, rel, f, ConflictNone)
 	case err != nil:
 		return nil, osError(err)
 	case fi.IsDir():
@@ -322,7 +323,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 			_ = f.Close()
 			return nil, err
 		}
-		h, err := s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
+		h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
 		if err != nil {
 			return nil, err
 		}
@@ -350,7 +351,7 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		if err != nil {
 			return nil, err
 		}
-		return s.reservedHandle(final, f, ConflictRenamed)
+		return s.reservedHandle(v, final, f, ConflictRenamed)
 	}
 	return nil, fmt.Errorf("unknown conflict policy %q", opts.OnConflict)
 }
@@ -394,9 +395,9 @@ func (s *Session) openResume(v *view, rel string, appendOnly bool) (*WriteHandle
 		return nil, ErrNotRegular
 	}
 	if plain {
-		return s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
+		return s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
 	}
-	h, err := s.openedHandle(&WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true})
+	h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true})
 	if err != nil {
 		return nil, err
 	}

@@ -65,6 +65,8 @@ type env struct {
 	hostKey  ssh.PublicKey
 	userKey  ssh.Signer
 	auditLog *syncBuffer
+	srv      *Server
+	cfg      Config // as started, for reloads
 }
 
 func signer(t *testing.T) ssh.Signer {
@@ -146,6 +148,7 @@ func startWith(t *testing.T, o startOpts) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.srv, e.cfg = srv, cfg
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {

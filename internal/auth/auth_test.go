@@ -210,6 +210,74 @@ func TestUsers(t *testing.T) {
 	}
 }
 
+// Recheck repeats the decision of a login against a reloaded configuration
+// without verifying the password again.
+func TestRecheck(t *testing.T) {
+	t.Parallel()
+
+	aliceKey, otherKey := newKey(t), newKey(t)
+	hash := func(pw string) PasswordHash {
+		t.Helper()
+		s, err := HashPassword([]byte(pw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := ParsePasswordHash(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	pw, changed := hash("secret"), hash("changed")
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	conn := fakeConn{user: "alice", addr: &net.TCPAddr{IP: net.ParseIP("10.1.2.3"), Port: 5000}}
+	alice := User{Name: "alice", Keys: []Key{{Key: aliceKey}}, Password: pw}
+	before := NewUsers([]User{alice})
+	keyPerms, err := before.PublicKey(conn, aliceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pwPerms, _, err := before.CheckPassword(conn, []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restricted, _ := ParseAuthorizedKeys([]byte(authorizedLine(t, `from="10.0.0.0/8"`, aliceKey)), "test")
+
+	with := func(change func(u *User)) []User {
+		u := alice
+		change(&u)
+		return []User{u}
+	}
+	for _, tt := range []struct {
+		name    string
+		a       *Authenticator
+		key, pw bool
+	}{
+		{"unchanged", NewUsers([]User{alice}), true, true},
+		{"user removed", NewUsers(nil), false, false},
+		{"disabled", NewUsers(with(func(u *User) { u.Disabled = true })), false, false},
+		{"expired", NewUsers(with(func(u *User) { u.Expires = now.Add(-time.Minute) })), false, false},
+		{"address no longer allowed", NewUsers(with(func(u *User) { u.AllowFrom = mustPrefixes(t, "192.0.2.0/24") })), false, false},
+		{"key removed", NewUsers(with(func(u *User) { u.Keys = []Key{{Key: otherKey}} })), false, true},
+		{"key options changed", NewUsers(with(func(u *User) { u.Keys = restricted })), false, true},
+		{"password changed", NewUsers(with(func(u *User) { u.Password = changed })), true, false},
+		{"password removed", NewUsers(with(func(u *User) { u.Password = nil })), true, false},
+		{"zero-config with the key", New("", []Key{{Key: aliceKey}}), true, false},
+		{"zero-config without the key", New("", []Key{{Key: otherKey}}), false, false},
+	} {
+		tt.a.now = func() time.Time { return now }
+		if got := tt.a.Recheck(conn, keyPerms); got != tt.key {
+			t.Errorf("%s: public key login rechecked %v", tt.name, got)
+		}
+		if got := tt.a.Recheck(conn, pwPerms); got != tt.pw {
+			t.Errorf("%s: password login rechecked %v", tt.name, got)
+		}
+	}
+	if before.Recheck(conn, nil) || before.Recheck(conn, newPermissions("alice", "keyboard-interactive")) {
+		t.Error("Recheck accepted permissions without a login")
+	}
+}
+
 func TestParsePrefix(t *testing.T) {
 	t.Parallel()
 

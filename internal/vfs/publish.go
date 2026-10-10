@@ -82,7 +82,7 @@ func (s *Session) tempHandle(v *view, target string) (*WriteHandle, error) {
 	if err != nil {
 		return nil, osError(err)
 	}
-	h, err := s.reservedHandle(tmp, f, ConflictNone)
+	h, err := s.reservedHandle(v, tmp, f, ConflictNone)
 	if err != nil {
 		_ = v.root.Remove(tmp)
 		return nil, err

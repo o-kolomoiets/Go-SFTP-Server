@@ -152,3 +152,43 @@ func TestBanTableBounded(t *testing.T) {
 		t.Error("a full table stopped banning")
 	}
 }
+
+// A reload changes the options of the running table: bans stay, a newly
+// exempt source is let in, a smaller table evicts the oldest entries.
+func TestBanTableSetOptions(t *testing.T) {
+	t.Parallel()
+
+	b, now := newTestBans(BanOptions{AfterFailures: 2, Duration: time.Hour})
+	ip := netip.MustParseAddr("203.0.113.5")
+	other := netip.MustParseAddr("198.51.100.9")
+	b.Fail(ip)
+	if !b.Fail(ip) {
+		t.Fatal("not banned")
+	}
+	b.Fail(other)
+
+	b.SetOptions(BanOptions{AfterFailures: 1, Duration: time.Minute})
+	if !b.Banned(ip) {
+		t.Error("a reload lifted a ban")
+	}
+	if b.Duration() != time.Minute {
+		t.Errorf("Duration() = %v", b.Duration())
+	}
+	*now = now.Add(2 * time.Minute)
+	if !b.Banned(ip) {
+		t.Error("a ban lost the end it got")
+	}
+	if !b.Fail(other) {
+		t.Error("the new threshold does not apply")
+	}
+
+	b.SetOptions(BanOptions{Exempt: mustPrefixes(t, "203.0.113.0/24")})
+	if b.Banned(ip) {
+		t.Error("a newly exempt source is still banned")
+	}
+
+	b.SetOptions(BanOptions{AfterFailures: 5, MaxEntries: 1})
+	if f, n := b.Len(); f > 1 || n > 1 {
+		t.Errorf("Len() = %d, %d after shrinking to 1", f, n)
+	}
+}

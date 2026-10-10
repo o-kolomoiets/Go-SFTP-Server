@@ -21,23 +21,25 @@ const (
 )
 
 // limiter counts connections: in total, per source (auth.SourceKey) and
-// before authentication.
+// before authentication. A reload changes its limits; connections above a
+// lowered limit stay, and new ones are refused until the count is below it.
 type limiter struct {
-	maxConns, maxPerSource int
-	preauth                chan struct{}
-
-	mu      sync.Mutex
-	total   int
-	sources map[netip.Prefix]int
+	mu                                 sync.Mutex
+	maxConns, maxPerSource, maxPreauth int
+	total, preauth                     int
+	sources                            map[netip.Prefix]int
 }
 
 func newLimiter(maxConns, maxPerSource, maxPreauth int) *limiter {
-	return &limiter{
-		maxConns:     maxConns,
-		maxPerSource: maxPerSource,
-		preauth:      make(chan struct{}, maxPreauth),
-		sources:      make(map[netip.Prefix]int),
-	}
+	l := &limiter{sources: make(map[netip.Prefix]int)}
+	l.setLimits(maxConns, maxPerSource, maxPreauth)
+	return l
+}
+
+func (l *limiter) setLimits(maxConns, maxPerSource, maxPreauth int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.maxConns, l.maxPerSource, l.maxPreauth = maxConns, maxPerSource, maxPreauth
 }
 
 // admission is a connection's share of the limits.
@@ -58,12 +60,11 @@ func (l *limiter) admit(src netip.Prefix) (*admission, string) {
 	if src.IsValid() && l.sources[src] >= l.maxPerSource {
 		return nil, rejectPerIP
 	}
-	select {
-	case l.preauth <- struct{}{}:
-	default:
+	if l.preauth >= l.maxPreauth {
 		return nil, rejectPreauth
 	}
 	l.total++
+	l.preauth++
 	if src.IsValid() {
 		l.sources[src]++
 	}
@@ -75,7 +76,9 @@ func (l *limiter) admit(src netip.Prefix) (*admission, string) {
 // authenticated frees the pre-authentication slot.
 func (a *admission) authenticated() {
 	if a.preauth.CompareAndSwap(true, false) {
-		<-a.l.preauth
+		a.l.mu.Lock()
+		a.l.preauth--
+		a.l.mu.Unlock()
 	}
 }
 

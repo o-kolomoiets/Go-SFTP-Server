@@ -21,8 +21,12 @@ type userState struct {
 	redirects map[userKey]redirect
 }
 
-// userKey names a path in a mount; rel is the mount-relative host path.
-type userKey struct{ mount, rel string }
+// userKey names a path in a mount directory (shared by the table
+// generations that use it); rel is the mount-relative host path.
+type userKey struct {
+	dir *dir
+	rel string
+}
 
 type ownEntry struct {
 	id    fileID
@@ -131,7 +135,7 @@ func (s *Session) own(v *view, rel string, fi os.FileInfo) {
 	if st == nil {
 		return
 	}
-	k := userKey{v.m.name, rel}
+	k := userKey{v.m.dir, rel}
 	if _, ok := st.owned[k]; !ok {
 		makeRoom(st.owned, maxOwned, now, ownUntil)
 	}
@@ -154,7 +158,7 @@ func (s *Session) isCreated(v *view, rel string) bool {
 	)
 	if st := t.lookup(s.user); st != nil {
 		var ok bool
-		e, ok = st.owned[userKey{v.m.name, rel}]
+		e, ok = st.owned[userKey{v.m.dir, rel}]
 		live = ok && !t.now().After(e.until)
 	}
 	t.umu.Unlock()
@@ -166,7 +170,7 @@ func (s *Session) isCreated(v *view, rel string) bool {
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 	for _, h := range t.writing {
-		if h.reserved && h.s.user == s.user && h.v.m == v.m && os.SameFile(h.ino, cur) {
+		if h.reserved && h.s.user == s.user && h.v.m.dir == v.m.dir && os.SameFile(h.ino, cur) {
 			return true
 		}
 	}
@@ -182,9 +186,9 @@ func (s *Session) moveCreated(v *view, from, to string, own bool) {
 	t.umu.Lock()
 	var e ownEntry
 	if st := t.lookup(s.user); st != nil {
-		e = st.owned[userKey{v.m.name, from}]
-		delete(st.owned, userKey{v.m.name, from})
-		delete(st.owned, userKey{v.m.name, to})
+		e = st.owned[userKey{v.m.dir, from}]
+		delete(st.owned, userKey{v.m.dir, from})
+		delete(st.owned, userKey{v.m.dir, to})
 		t.tidy(s.user)
 	}
 	t.umu.Unlock()
@@ -216,7 +220,7 @@ func (s *Session) forget(v *view, rel string) {
 	t.umu.Lock()
 	defer t.umu.Unlock()
 	if st := t.lookup(s.user); st != nil {
-		delete(st.owned, userKey{v.m.name, rel})
+		delete(st.owned, userKey{v.m.dir, rel})
 		t.tidy(s.user)
 	}
 }
@@ -242,7 +246,7 @@ func (s *Session) redirectFor(v *view, rel string) (string, bool) {
 	if st == nil {
 		return "", false
 	}
-	k := userKey{v.m.name, rel}
+	k := userKey{v.m.dir, rel}
 	r, ok := st.redirects[k]
 	if !ok {
 		return "", false
@@ -264,7 +268,7 @@ func (s *Session) setRedirect(v *view, requested, final string) {
 	if st == nil {
 		return
 	}
-	k := userKey{v.m.name, requested}
+	k := userKey{v.m.dir, requested}
 	if _, ok := st.redirects[k]; !ok {
 		makeRoom(st.redirects, maxRedirects, now, redirUntil)
 	}
@@ -276,7 +280,7 @@ func (s *Session) clearRedirect(v *view, rel string) {
 	t.umu.Lock()
 	defer t.umu.Unlock()
 	if st := t.lookup(s.user); st != nil {
-		delete(st.redirects, userKey{v.m.name, rel})
+		delete(st.redirects, userKey{v.m.dir, rel})
 		t.tidy(s.user)
 	}
 }

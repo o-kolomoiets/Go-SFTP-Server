@@ -4,8 +4,10 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -53,6 +55,8 @@ type PasswordHash interface {
 	dummy() PasswordHash
 	// lanes is the number of threads a verification uses.
 	lanes() int
+	// id identifies the hash: it changes when the password is changed.
+	id() string
 }
 
 // PasswordClass names the kind and cost of a hash. Hashes of one class
@@ -70,6 +74,8 @@ func (h *argon2Hash) class() string {
 }
 
 func (h *argon2Hash) lanes() int { return int(h.threads) }
+
+func (h *argon2Hash) id() string { return hashID([]byte(h.class()), h.salt, h.key) }
 
 func (h *argon2Hash) dummy() PasswordHash {
 	d := &argon2Hash{memory: h.memory, time: h.time, threads: h.threads, salt: make([]byte, len(h.salt)), key: make([]byte, len(h.key))}
@@ -90,6 +96,18 @@ func (h bcryptHash) verify(password []byte) bool {
 }
 
 func (h bcryptHash) lanes() int { return 1 }
+
+func (h bcryptHash) id() string { return hashID(h) }
+
+// hashID returns a digest of a hash's parts: equal hashes have equal IDs,
+// and the ID reveals nothing that helps to guess the password.
+func hashID(parts ...[]byte) string {
+	d := sha256.New()
+	for _, p := range parts {
+		_, _ = fmt.Fprintf(d, "%d:%s;", len(p), p)
+	}
+	return hex.EncodeToString(d.Sum(nil))
+}
 
 func (h bcryptHash) class() string {
 	cost, _ := bcrypt.Cost(h)

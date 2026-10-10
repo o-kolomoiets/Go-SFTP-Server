@@ -42,7 +42,8 @@ const (
 	maxClientVersionLen      = 128
 )
 
-// Config configures a Server.
+// Config configures a Server. New fixes HostKeys, CryptoPolicy, Audit and
+// Log; Reload changes the rest.
 type Config struct {
 	HostKeys []ssh.Signer
 	Auth     *auth.Authenticator
@@ -72,33 +73,111 @@ type Config struct {
 	MaxSessionsPerConn    int
 	MaxOpenHandles        int // per SFTP session, default sftpd.DefaultMaxHandles
 	MaxAuthTries          int
+
+	// DisconnectRevoked makes Reload close the connections whose login the
+	// new configuration would refuse (reload.disconnect_removed_users).
+	DisconnectRevoked bool
 }
 
 // Server serves SFTP over SSH.
 type Server struct {
-	cfg     Config
-	sshCfg  *ssh.ServerConfig
-	limits  *limiter
-	rejects rejectLog
+	hostKeys []ssh.Signer
+	algos    algorithms
+	audit    *audit.Logger
+	log      *slog.Logger
+	limits   *limiter
+	rejects  rejectLog
+
+	// snap is the configuration for new logins (see snapshot).
+	snap atomic.Pointer[snapshot]
+	rmu  sync.Mutex     // serializes Reload
+	bans *auth.BanTable // kept across reloads while bans stay on; guarded by rmu
 
 	wg    sync.WaitGroup
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
+	live  map[*liveConn]struct{} // logged-in connections
 }
 
-// New validates cfg and returns a Server.
+// snapshot is the reloadable configuration. A connection takes its
+// transport settings (handshake timeout, MaxAuthTries, offered methods)
+// from the snapshot current at accept; every authentication attempt checks
+// the current one; and once logged in, the connection holds the then
+// current snapshot, and a reference to its mount table, for its life.
+type snapshot struct {
+	cfg                 Config // with defaults
+	ssh                 *ssh.ServerConfig
+	publicKey, password bool // enabled methods
+	bans                *auth.BanTable
+}
+
+// New validates cfg and returns a Server. The caller keeps cfg.Mounts open
+// while it is the current table (see Reload).
 func New(cfg Config) (*Server, error) {
-	switch {
-	case len(cfg.HostKeys) == 0:
+	if len(cfg.HostKeys) == 0 {
 		return nil, errors.New("no host keys")
-	case cfg.Auth == nil, cfg.Mounts == nil:
+	}
+	algos, err := policy(cfg.CryptoPolicy)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		hostKeys: cfg.HostKeys,
+		algos:    algos,
+		audit:    cfg.Audit,
+		log:      cfg.Log,
+		conns:    make(map[net.Conn]struct{}),
+		live:     make(map[*liveConn]struct{}),
+	}
+	if s.audit == nil {
+		s.audit = audit.Discard()
+	}
+	if s.log == nil {
+		s.log = slog.New(slog.DiscardHandler)
+	}
+	sn, err := s.newSnapshot(cfg)
+	if err != nil {
+		return nil, err
+	}
+	c := &sn.cfg
+	s.limits = newLimiter(c.MaxConnections, c.MaxConnectionsPerIP, c.MaxPreauthConnections)
+	s.bans = sn.bans
+	s.snap.Store(sn)
+	return s, nil
+}
+
+// Reload switches new logins to cfg; HostKeys, CryptoPolicy, Audit and Log
+// are ignored. Logged-in connections keep the configuration they logged in
+// under; with cfg.DisconnectRevoked, those whose login cfg would refuse are
+// closed, and Reload returns how many. Bans, connection counts and the
+// password hashing limit carry over. The caller keeps cfg.Mounts open while
+// it is the current table and may drop its reference to the previous table
+// once Reload returns.
+func (s *Server) Reload(cfg Config) (disconnected int, err error) {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	sn, err := s.newSnapshot(cfg)
+	if err != nil {
+		return 0, err
+	}
+	sn.cfg.Auth.Inherit(s.snap.Load().cfg.Auth)
+	if sn.bans != nil && s.bans != nil {
+		s.bans.SetOptions(sn.bans.Options())
+		sn.bans = s.bans
+	}
+	s.bans = sn.bans
+	c := &sn.cfg
+	s.limits.setLimits(c.MaxConnections, c.MaxConnectionsPerIP, c.MaxPreauthConnections)
+	s.snap.Store(sn)
+	if c.DisconnectRevoked {
+		disconnected = s.disconnectRevoked(sn)
+	}
+	return disconnected, nil
+}
+
+func (s *Server) newSnapshot(cfg Config) (*snapshot, error) {
+	if cfg.Auth == nil || cfg.Mounts == nil {
 		return nil, errors.New("authenticator and mounts are required")
-	}
-	if cfg.Audit == nil {
-		cfg.Audit = audit.Discard()
-	}
-	if cfg.Log == nil {
-		cfg.Log = slog.New(slog.DiscardHandler)
 	}
 	setDefault(&cfg.HandshakeTimeout, DefaultHandshakeTimeout)
 	setDefaultOrOff(&cfg.IdleTimeout, DefaultIdleTimeout)
@@ -108,43 +187,92 @@ func New(cfg Config) (*Server, error) {
 	setDefault(&cfg.MaxPreauthConnections, DefaultMaxPreauth)
 	setDefault(&cfg.MaxSessionsPerConn, DefaultMaxSessions)
 	setDefault(&cfg.MaxAuthTries, DefaultMaxAuthTries)
-	algos, err := policy(cfg.CryptoPolicy)
-	if err != nil {
-		return nil, err
-	}
 	if cfg.Grants == nil {
 		mounts := cfg.Mounts
 		cfg.Grants = func(string) []vfs.Grant { return mounts.FullAccess() }
 	}
-
-	sc := &ssh.ServerConfig{
-		Config:                  ssh.Config{KeyExchanges: algos.kex, Ciphers: algos.ciphers, MACs: algos.macs},
-		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
-		MaxAuthTries:            cfg.MaxAuthTries,
-		ServerVersion:           serverVersion,
-	}
 	if len(cfg.Methods) == 0 {
 		cfg.Methods = []string{auth.MethodPublicKey}
 	}
+	sn := &snapshot{bans: cfg.Bans}
 	for _, m := range cfg.Methods {
 		switch m {
 		case auth.MethodPublicKey:
-			sc.PublicKeyCallback = cfg.Auth.PublicKey
+			sn.publicKey = true
 		case auth.MethodPassword:
-			sc.PasswordCallback = cfg.Auth.Password
+			sn.password = true
 		default:
 			return nil, fmt.Errorf("unknown authentication method %q", m)
 		}
 	}
-	for _, k := range cfg.HostKeys {
-		sc.AddHostKey(k)
+	sn.ssh = &ssh.ServerConfig{
+		Config:                  ssh.Config{KeyExchanges: s.algos.kex, Ciphers: s.algos.ciphers, MACs: s.algos.macs},
+		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
+		MaxAuthTries:            cfg.MaxAuthTries,
+		ServerVersion:           serverVersion,
 	}
-	return &Server{
-		cfg:    cfg,
-		sshCfg: sc,
-		limits: newLimiter(cfg.MaxConnections, cfg.MaxConnectionsPerIP, cfg.MaxPreauthConnections),
-		conns:  make(map[net.Conn]struct{}),
-	}, nil
+	for _, k := range s.hostKeys {
+		sn.ssh.AddHostKey(k)
+	}
+	sn.cfg = cfg
+	return sn, nil
+}
+
+// pin returns the current snapshot with a reference to its mount table,
+// which the caller closes; nil when the table is closed (shutdown).
+func (s *Server) pin() *snapshot {
+	for {
+		sn := s.snap.Load()
+		if sn.cfg.Mounts.Acquire() {
+			return sn
+		}
+		if s.snap.Load() == sn {
+			return nil
+		}
+	}
+}
+
+// liveConn is a logged-in connection.
+type liveConn struct {
+	sconn  *ssh.ServerConn
+	log    *slog.Logger
+	reason atomic.Pointer[string] // why the server closed it
+}
+
+// close closes the connection; the first reason given is audited.
+func (lc *liveConn) close(reason string) {
+	if lc.reason.CompareAndSwap(nil, &reason) {
+		lc.log.Info("closing connection", "reason", reason)
+	}
+	_ = lc.sconn.Close()
+}
+
+// register adds or removes a logged-in connection. A connection registers
+// before it reads the current snapshot, and Reload stores a snapshot before
+// it checks the registered connections: so each connection is either
+// checked by Reload or logs in under the new snapshot.
+func (s *Server) register(lc *liveConn, add bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if add {
+		s.live[lc] = struct{}{}
+	} else {
+		delete(s.live, lc)
+	}
+}
+
+// disconnectRevoked closes the connections whose login sn would refuse.
+func (s *Server) disconnectRevoked(sn *snapshot) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for lc := range s.live {
+		if !sn.cfg.Auth.Recheck(lc.sconn, lc.sconn.Permissions) {
+			lc.close("revoked")
+			n++
+		}
+	}
+	return n
 }
 
 // setDefault replaces a zero or negative value with def.
@@ -182,7 +310,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				return err
 			}
 			backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
-			s.cfg.Log.WarnContext(ctx, "accept failed, retrying", "err", err, "backoff", backoff)
+			s.log.WarnContext(ctx, "accept failed, retrying", "err", err, "backoff", backoff)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -209,10 +337,10 @@ func (s *Server) admit(c net.Conn) *admission {
 		reason string
 		adm    *admission
 	)
-	switch {
-	case !s.cfg.Audit.Healthy():
+	switch bans := s.snap.Load().bans; {
+	case !s.audit.Healthy():
 		reason = rejectAudit
-	case isIP && s.cfg.Bans != nil && s.cfg.Bans.Banned(ip):
+	case isIP && bans != nil && bans.Banned(ip):
 		reason = rejectBanned
 	default:
 		adm, reason = s.limits.admit(src)
@@ -222,10 +350,10 @@ func (s *Server) admit(c net.Conn) *admission {
 	}
 	_ = c.Close()
 	if reason == rejectAudit {
-		s.cfg.Log.Warn("refusing connection: audit log unavailable", "remote_addr", c.RemoteAddr().String())
+		s.log.Warn("refusing connection: audit log unavailable", "remote_addr", c.RemoteAddr().String())
 		return nil
 	}
-	s.cfg.Log.Debug("connection refused", "remote_addr", c.RemoteAddr().String(), "reason", reason)
+	s.log.Debug("connection refused", "remote_addr", c.RemoteAddr().String(), "reason", reason)
 	if ok, suppressed := s.rejects.allow(time.Now()); ok {
 		attrs := []slog.Attr{
 			slog.String("remote_addr", c.RemoteAddr().String()),
@@ -235,7 +363,7 @@ func (s *Server) admit(c net.Conn) *admission {
 		if suppressed > 0 {
 			attrs = append(attrs, slog.Int("suppressed", suppressed))
 		}
-		s.cfg.Audit.Event("conn.reject", attrs...)
+		s.audit.Event("conn.reject", attrs...)
 	}
 	return nil
 }
@@ -283,7 +411,7 @@ func (s *Server) ServeConn(c net.Conn) {
 func (s *Server) serveConn(c net.Conn, adm *admission) {
 	defer adm.release()
 	connID := newID()
-	log := s.cfg.Log.With("conn_id", connID, "remote_addr", c.RemoteAddr().String())
+	log := s.log.With("conn_id", connID, "remote_addr", c.RemoteAddr().String())
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic while serving connection", "panic", r, "stack", string(debug.Stack()))
@@ -293,24 +421,28 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	s.track(c, true)
 	defer s.track(c, false)
 
-	al := s.cfg.Audit.With("conn_id", connID, "remote_addr", c.RemoteAddr().String(), "local_addr", c.LocalAddr().String())
+	al := s.audit.With("conn_id", connID, "remote_addr", c.RemoteAddr().String(), "local_addr", c.LocalAddr().String())
 
+	sn := s.snap.Load()
 	ca := s.newConnAuth(c, al)
-	cfg := ca.config()
+	cfg := ca.config(sn)
 
 	start := time.Now()
-	if err := c.SetDeadline(start.Add(s.cfg.HandshakeTimeout)); err != nil {
+	if err := c.SetDeadline(start.Add(sn.cfg.HandshakeTimeout)); err != nil {
 		return
 	}
 	sconn, chans, reqs, err := ssh.NewServerConn(c, cfg)
 	adm.authenticated()
+	closed := func(result string) {
+		al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", result))
+	}
 	if err != nil {
 		log.Debug("handshake failed", "err", err)
 		if ca.accepted.Load() {
 			u, _ := ca.attemptedUser.Load().(string)
 			al.Event("auth.failure", slog.String("user", u), slog.Int("attempts", int(ca.failures.Load())))
 			ca.closedWithoutLogin()
-			al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", "error"))
+			closed("error")
 		}
 		return
 	}
@@ -324,8 +456,27 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		log.Error("authenticated connection without a user")
 		return
 	}
-	al = al.With("user", name)
 	log = log.With("user", name)
+
+	// The connection lives under the snapshot current now, if its login
+	// passes that: a reload since the callbacks ran may have revoked it
+	// (x/crypto also reuses the result of a public key query).
+	lc := &liveConn{sconn: sconn, log: log}
+	s.register(lc, true)
+	defer s.register(lc, false)
+	if sn = s.pin(); sn == nil {
+		log.Warn("refusing login: the mount table is closed")
+		return
+	}
+	defer sn.cfg.Mounts.Close()
+	if !sn.cfg.Auth.Recheck(sconn, sconn.Permissions) {
+		log.Info("login refused: revoked by a configuration reload")
+		ca.fail()
+		al.Event("auth.failure", slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1))
+		closed("revoked")
+		return
+	}
+	al = al.With("user", name)
 	success := []slog.Attr{slog.String("auth_method", sconn.Permissions.Extensions[auth.ExtMethod])}
 	if fp := sconn.Permissions.Extensions[auth.ExtFingerprint]; fp != "" {
 		success = append(success, slog.String("key_fp", fp))
@@ -335,20 +486,15 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	go ssh.DiscardRequests(reqs)
 	act := &activity{}
 	act.touch(time.Now())
-	var closeReason atomic.Value
 	done := make(chan struct{})
 	defer close(done)
-	go watch(sconn, act, s.cfg.IdleTimeout, s.cfg.KeepaliveInterval, done, func(reason string) {
-		closeReason.Store(reason)
-		log.Info("closing connection", "reason", reason)
-		_ = sconn.Close()
-	})
-	s.serveChannels(chans, name, act, al, log)
-	result, _ := closeReason.Load().(string)
-	if result == "" {
-		result = "ok"
+	go watch(sconn, act, sn.cfg.IdleTimeout, sn.cfg.KeepaliveInterval, done, lc.close)
+	s.serveChannels(sn, chans, name, act, al, log)
+	result := "ok"
+	if r := lc.reason.Load(); r != nil {
+		result = *r
 	}
-	al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", result))
+	closed(result)
 }
 
 // connAuth is the authentication state of one connection. Its callbacks
@@ -373,18 +519,23 @@ func (s *Server) newConnAuth(c net.Conn, al *audit.Logger) *connAuth {
 	return ca
 }
 
-// config returns the server configuration for the connection.
-func (ca *connAuth) config() *ssh.ServerConfig {
-	cfg := *ca.s.sshCfg
-	if pk := cfg.PublicKeyCallback; pk != nil {
+// config returns the server configuration for the connection: sn's
+// transport settings, with callbacks that check the current snapshot.
+func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
+	cfg := *sn.ssh
+	if sn.publicKey {
 		cfg.PublicKeyCallback = func(md ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if !ca.user.same(md.User()) {
 				return nil, errUserChanged
 			}
-			return pk(md, key)
+			cur := ca.s.snap.Load()
+			if !cur.publicKey {
+				return nil, errMethodOff
+			}
+			return cur.cfg.Auth.PublicKey(md, key)
 		}
 	}
-	if cfg.PasswordCallback != nil {
+	if sn.password {
 		cfg.PasswordCallback = func(md ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 			if !ca.user.same(md.User()) {
 				ca.fail()
@@ -395,7 +546,12 @@ func (ca *connAuth) config() *ssh.ServerConfig {
 			if ca.banned() {
 				return nil, errBanned
 			}
-			perms, wait, err := ca.s.cfg.Auth.CheckPassword(md, password)
+			cur := ca.s.snap.Load()
+			if !cur.password {
+				ca.fail()
+				return nil, errMethodOff
+			}
+			perms, wait, err := cur.cfg.Auth.CheckPassword(md, password)
 			if err != nil {
 				// Count before the wait, so that the source's other
 				// connections see a ban as early as possible.
@@ -423,7 +579,7 @@ func (ca *connAuth) config() *ssh.ServerConfig {
 		// Wrong passwords were counted by the callback, each at once. Other
 		// failures, including passwords sent while the method is off,
 		// count once per connection.
-		if method != auth.MethodPassword || ca.s.sshCfg.PasswordCallback == nil {
+		if method != auth.MethodPassword || !sn.password {
 			ca.keyFailures.Add(1)
 		}
 	}
@@ -431,7 +587,8 @@ func (ca *connAuth) config() *ssh.ServerConfig {
 }
 
 func (ca *connAuth) banned() bool {
-	return ca.isIP && ca.s.cfg.Bans != nil && ca.s.cfg.Bans.Banned(ca.ip)
+	bans := ca.s.snap.Load().bans
+	return ca.isIP && bans != nil && bans.Banned(ca.ip)
 }
 
 // closedWithoutLogin counts rejected keys once: an SSH agent offers all of
@@ -444,16 +601,16 @@ func (ca *connAuth) closedWithoutLogin() {
 
 // fail counts one failure against the connection's source.
 func (ca *connAuth) fail() {
-	bans := ca.s.cfg.Bans
+	bans := ca.s.snap.Load().bans
 	if bans == nil || !ca.isIP || !bans.Fail(ca.ip) {
 		return
 	}
 	src := auth.SourceKey(ca.ip).String()
-	ca.s.cfg.Log.Warn("banning source after repeated login failures", "source", src, "duration", bans.Duration())
+	ca.s.log.Warn("banning source after repeated login failures", "source", src, "duration", bans.Duration())
 	ca.al.Event("auth.ban", slog.String("source", src), slog.Int64("duration_ms", bans.Duration().Milliseconds()))
 }
 
-func (s *Server) serveChannels(chans <-chan ssh.NewChannel, user string, act *activity, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user string, act *activity, al *audit.Logger, log *slog.Logger) {
 	var (
 		sessions sync.WaitGroup
 		active   atomic.Int32
@@ -464,7 +621,7 @@ func (s *Server) serveChannels(chans <-chan ssh.NewChannel, user string, act *ac
 			_ = nc.Reject(ssh.Prohibited, "only SFTP sessions are allowed")
 			continue
 		}
-		if int(active.Load()) >= s.cfg.MaxSessionsPerConn {
+		if int(active.Load()) >= sn.cfg.MaxSessionsPerConn {
 			_ = nc.Reject(ssh.ResourceShortage, "too many sessions")
 			continue
 		}
@@ -475,14 +632,14 @@ func (s *Server) serveChannels(chans <-chan ssh.NewChannel, user string, act *ac
 		active.Add(1)
 		sessions.Go(func() {
 			defer active.Add(-1)
-			s.serveSession(activeChannel{ch, act}, creqs, user, al, log)
+			s.serveSession(sn, activeChannel{ch, act}, creqs, user, al, log)
 		})
 	}
 }
 
 // serveSession answers channel requests: only one "subsystem sftp" is
 // accepted; shell, exec, pty-req, env and the rest are refused.
-func (s *Server) serveSession(ch ssh.Channel, reqs <-chan *ssh.Request, user string, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Request, user string, al *audit.Logger, log *slog.Logger) {
 	var done chan struct{}
 	for req := range reqs {
 		if req.Type == "subsystem" && done == nil && isSFTP(req.Payload) {
@@ -490,7 +647,7 @@ func (s *Server) serveSession(ch ssh.Channel, reqs <-chan *ssh.Request, user str
 			done = make(chan struct{})
 			go func() {
 				defer close(done)
-				s.serveSFTP(ch, user, al, log)
+				s.serveSFTP(sn, ch, user, al, log)
 			}()
 			continue
 		}
@@ -510,14 +667,14 @@ func isSFTP(payload []byte) bool {
 	return ssh.Unmarshal(payload, &p) == nil && p.Name == "sftp"
 }
 
-func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, al *audit.Logger, log *slog.Logger) {
 	sessionID := newID()
 	al = al.With("session_id", sessionID)
 	log = log.With("session_id", sessionID)
 	start := time.Now()
 	al.Event("session.start")
 
-	vs, unavailable := s.cfg.Mounts.Session(user, s.cfg.Grants(user))
+	vs, unavailable := sn.cfg.Mounts.Session(user, sn.cfg.Grants(user))
 	for _, err := range unavailable {
 		reason := "mount_unavailable"
 		switch {
@@ -534,7 +691,7 @@ func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *s
 		al.Event("fs.denied", slog.String("mount", mount), slog.String("reason", reason), slog.String("result", "denied"))
 	}
 
-	h := sftpd.New(vs, al, log, s.cfg.MaxOpenHandles)
+	h := sftpd.New(vs, al, log, sn.cfg.MaxOpenHandles)
 	rs := sftp.NewRequestServer(sftpd.NewGate(ch), h.Handlers(), sftp.WithStartDirectory("/"))
 	err := rs.Serve()
 
@@ -555,6 +712,7 @@ func (s *Server) serveSFTP(ch ssh.Channel, user string, al *audit.Logger, log *s
 var (
 	errUserChanged = errors.New("the user name may not change within a connection")
 	errBanned      = errors.New("source banned")
+	errMethodOff   = errors.New("authentication method disabled by a reload")
 )
 
 // pinnedUser is the user name of a connection's first authentication

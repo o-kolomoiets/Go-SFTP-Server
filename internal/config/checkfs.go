@@ -9,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -18,6 +21,29 @@ import (
 // directories, host keys, authorized_keys files and the permissions of every
 // file gosftpd trusts (ROADMAP §6.5). Call it after Validate.
 func (c *Config) CheckFS() (warnings []string, err error) {
+	warnings, _, err = c.checkFS(false, nil)
+	return warnings, err
+}
+
+// LiveMount is a mount that connections of an earlier configuration still
+// use (see CheckFSReload).
+type LiveMount struct {
+	Name, Path string
+	ReadOnly   bool
+}
+
+// CheckFSReload is CheckFS for a configuration reload. Host keys are not
+// checked, since they change only at restart, and authorized_keys files are
+// left to BuildAuthenticator with Reload. A mount that fails its checks is
+// a warning and is returned in unavailable, so that one mount (a disk that
+// is not mounted, say) does not block the rest of the reload; its users
+// find it unavailable. Trusted files are also checked against live: the
+// mounts that open connections still use, since they may still write them.
+func (c *Config) CheckFSReload(live []LiveMount) (warnings, unavailable []string, err error) {
+	return c.checkFS(true, live)
+}
+
+func (c *Config) checkFS(reload bool, live []LiveMount) (warnings, unavailable []string, err error) {
 	p := &problems{}
 	for _, f := range c.Files {
 		fi, err := os.Stat(f)
@@ -32,42 +58,183 @@ func (c *Config) CheckFS() (warnings []string, err error) {
 			p.warnf(f, "readable by all users; consider chmod o-r")
 		}
 	}
-	c.checkMounts(p)
-	c.checkHostKeys(p)
-	c.checkUsers(p)
+	unavailable = c.checkMounts(p, reload)
+	if !reload {
+		c.checkHostKeys(p)
+		c.checkUsers(p)
+	}
 	c.checkAudit(p)
-	return p.result()
+	c.checkTrusted(p, live)
+	warnings, err = p.result()
+	return warnings, unavailable, err
 }
 
-func (c *Config) checkMounts(p *problems) {
+// checkMounts checks every mount directory. With reload, a mount's errors
+// are warnings and the mount is returned as unavailable.
+func (c *Config) checkMounts(p *problems, reload bool) (unavailable []string) {
 	for _, name := range sortedKeys(c.Mounts) {
-		m := c.Mounts[name]
-		k := key("mounts", name, "path")
-		dir := m.Path
-		if filepath.Base(dir) == vfs.UserPlaceholder {
-			dir = filepath.Dir(dir)
-		}
-		fi, err := os.Stat(dir)
+		mp := &problems{}
+		c.checkMount(mp, name)
+		p.warns = append(p.warns, mp.warns...)
 		switch {
-		case errors.Is(err, fs.ErrNotExist) && m.Create:
-			if m.RequireMountpoint {
-				p.errorf(k, "%s does not exist, so it cannot be a mount point (require_mountpoint = true)", dir)
+		case len(mp.errs) == 0:
+		case !reload:
+			p.errs = append(p.errs, mp.errs...)
+		default:
+			for _, err := range mp.errs {
+				p.warns = append(p.warns, err.Error()+"; the mount is unavailable until this is fixed")
 			}
-			continue
-		case errors.Is(err, fs.ErrNotExist):
-			p.errorf(k, "%s does not exist (set create = true to create it)", dir)
-			continue
-		case err != nil:
-			p.errorf(k, "%v", err)
-			continue
-		case !fi.IsDir():
-			p.errorf(k, "%s is not a directory", dir)
-			continue
-		}
-		if m.RequireMountpoint {
-			checkMountpoint(p, key("mounts", name, "require_mountpoint"), dir, fi)
+			unavailable = append(unavailable, name)
 		}
 	}
+	return unavailable
+}
+
+func (c *Config) checkMount(p *problems, name string) {
+	m := c.Mounts[name]
+	k := key("mounts", name, "path")
+	dir := m.Path
+	if filepath.Base(dir) == vfs.UserPlaceholder {
+		dir = filepath.Dir(dir)
+	}
+	fi, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && m.Create:
+		if m.RequireMountpoint {
+			p.errorf(k, "%s does not exist, so it cannot be a mount point (require_mountpoint = true)", dir)
+		}
+		return
+	case errors.Is(err, fs.ErrNotExist):
+		p.errorf(k, "%s does not exist (set create = true to create it)", dir)
+		return
+	case err != nil:
+		p.errorf(k, "%v", err)
+		return
+	case !fi.IsDir():
+		p.errorf(k, "%s is not a directory", dir)
+		return
+	}
+	if m.RequireMountpoint {
+		checkMountpoint(p, key("mounts", name, "require_mountpoint"), dir, fi)
+	}
+}
+
+// checkTrusted refuses files gosftpd trusts inside a mount that clients can
+// write to: a client could change the configuration, add a key or a user,
+// or rewrite the audit log, and a reload would apply it. Host keys and
+// configuration files, which can hold password hashes, must not be in any
+// mount, since clients could read them. live are mounts of earlier
+// configurations that open connections still use.
+func (c *Config) checkTrusted(p *problems, live []LiveMount) {
+	type trusted struct {
+		path, what string
+		secret     bool // refused in read-only mounts too
+		private    bool // warned about in read-only mounts
+	}
+	var files []trusted
+	for _, f := range c.Files {
+		files = append(files, trusted{f, "the configuration file", true, false})
+	}
+	for _, f := range c.Server.HostKeys {
+		files = append(files, trusted{f, "the host key", true, false})
+	}
+	if c.AnyUser != nil {
+		files = append(files, trusted{c.AnyUser.AuthorizedKeysFile, "the authorized_keys file", false, false})
+	}
+	for _, name := range sortedKeys(c.Users) {
+		if f := c.Users[name].AuthorizedKeysFile; f != "" {
+			files = append(files, trusted{f, "the authorized_keys file of " + name, false, false})
+		}
+	}
+	if out := c.Audit.Output; out != "" && out != "stdout" {
+		files = append(files, trusted{out, "the audit log", false, true})
+	}
+	type mount struct {
+		key, path string
+		readOnly  bool
+	}
+	var mounts []mount
+	for _, name := range sortedKeys(c.Mounts) {
+		k := key("mounts", name, "path")
+		if c.AnyUser != nil {
+			k = "--dir " + name
+		}
+		mounts = append(mounts, mount{k, c.Mounts[name].Path, c.Mounts[name].ReadOnly})
+	}
+	for _, l := range live {
+		same := slices.ContainsFunc(mounts, func(m mount) bool { return m.path == l.Path && m.readOnly == l.ReadOnly })
+		if !same {
+			mounts = append(mounts, mount{"mount " + strconv.Quote(l.Name) + " of open connections", l.Path, l.ReadOnly})
+		}
+	}
+	mi := readMountInfo()
+	for _, m := range mounts {
+		for _, f := range files {
+			if !insideMount(f.path, m.path, mi) {
+				continue
+			}
+			switch {
+			case !m.readOnly:
+				p.errorf(m.key, "covers %s (%s): clients could change it; serve another directory", f.what, f.path)
+			case f.secret:
+				p.errorf(m.key, "covers %s (%s): clients could read it; serve another directory", f.what, f.path)
+			case f.private:
+				p.warnf(m.key, "covers %s (%s): clients can read it", f.what, f.path)
+			}
+		}
+	}
+}
+
+// insideMount reports whether file lies in the directory of a mount: by
+// path, after resolving symlinks, or by where both lie on their filesystem,
+// since a bind mount shows one directory at two paths (Linux).
+func insideMount(file, mountPath string, mi mountInfo) bool {
+	if vfs.PathsOverlap(file, mountPath) {
+		return true
+	}
+	dir := mountPath
+	if filepath.Base(dir) == vfs.UserPlaceholder {
+		dir = filepath.Dir(dir)
+	}
+	rf, err := filepath.EvalSymlinks(file)
+	if err != nil {
+		rf, err = filepath.EvalSymlinks(filepath.Dir(file)) // a file still to be created
+		rf = filepath.Join(rf, filepath.Base(file))
+	}
+	rd, derr := filepath.EvalSymlinks(dir)
+	if err != nil || derr != nil {
+		return false
+	}
+	if vfs.PathsOverlap(rf, rd) {
+		return true
+	}
+	fdev, frel, fok := mi.locate(rf)
+	ddev, drel, dok := mi.locate(rd)
+	return fok && dok && fdev == ddev && vfs.PathsOverlap(frel, drel)
+}
+
+// mountInfo lists the mounts of the process: device, the directory of the
+// filesystem that is mounted, and where.
+type mountInfo []struct{ dev, root, point string }
+
+// locate returns the filesystem path lies on and its path within it.
+func (mi mountInfo) locate(path string) (dev, rel string, ok bool) {
+	best := -1
+	for _, m := range mi {
+		var rest string
+		switch {
+		case m.point == "/":
+			rest = path
+		case path == m.point || strings.HasPrefix(path, m.point+"/"):
+			rest = path[len(m.point):]
+		default:
+			continue
+		}
+		if len(m.point) > best {
+			best, dev, rel = len(m.point), m.dev, filepath.Join(m.root, rest)
+		}
+	}
+	return dev, rel, best >= 0
 }
 
 // checkMountpoint fails if dir is on the same filesystem as its parent:

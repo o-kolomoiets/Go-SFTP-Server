@@ -93,3 +93,7 @@ format = "text"                         # text | json
 output = "/var/log/gosftpd/audit.jsonl" # or "stdout"
 events = ["conn", "auth", "session", "transfer", "modify", "denied"]  # also: list, stat; server is always on
 on_error = "fail-closed"                # fail-closed: refuse uploads and logins while the log cannot be written; fail-open
+
+# kill -HUP (systemctl reload) applies this file again without a restart.
+[reload]
+disconnect_removed_users = false        # true: close connections whose login the new configuration refuses

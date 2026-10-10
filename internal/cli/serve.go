@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,7 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hostkey"
+	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/version"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -88,30 +91,32 @@ $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 }
 
 // buildConfig assembles the configuration: a file, or zero-config with
-// --dir; then the environment; then flags that were set explicitly.
-func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) string) (*config.Config, error) {
+// --dir; then the environment; then flags that were set explicitly. For a
+// reload it also returns where the environment or a flag overrides a value
+// of the file, since editing that value then has no effect.
+func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) string, reload bool) (*config.Config, []string, error) {
 	var (
 		c   *config.Config
 		err error
 	)
 	if err := checkFlagValues(flags, o); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(o.dirs) > 0 {
 		if o.config != "" {
-			return nil, usageError{errors.New("--dir and --config cannot be used together")}
+			return nil, nil, usageError{errors.New("--dir and --config cannot be used together")}
 		}
-		if c, err = zeroConfig(o); err != nil {
-			return nil, err
+		if c, err = zeroConfig(o, reload); err != nil {
+			return nil, nil, err
 		}
 	} else {
 		for _, name := range []string{"authorized-keys", "user", "state-dir"} {
 			if flags.Changed(name) {
-				return nil, usageError{fmt.Errorf("--%s only applies with --dir; with a configuration file set it there", name)}
+				return nil, nil, usageError{fmt.Errorf("--%s only applies with --dir; with a configuration file set it there", name)}
 			}
 		}
 		if c, err = loadConfig(o.config, getenv); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if flags.Changed("read-only") && o.readOnly {
 			for _, m := range c.Mounts {
@@ -127,12 +132,15 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 			c.Server.HostKeys = absPaths(o.hostKeys)
 		}
 	}
-	applyEnv(c, getenv)
+	// What the file says, before the environment and flags override it.
+	file := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
+	set := applyEnv(c, getenv)
 	if flags.Changed("listen") {
 		c.Server.Listen = []string{o.listen}
 	}
 	if flags.Changed("log-level") {
 		c.Log.Level = o.logLevel
+		set["log.level"] = "--log-level"
 	}
 	if flags.Changed("log-format") {
 		c.Log.Format = o.logFormat
@@ -142,8 +150,35 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 		if o.auditOutput != "stdout" {
 			c.Audit.Output = absPath(o.auditOutput)
 		}
+		set["audit.output"] = "--audit-output"
 	}
-	return c, nil
+	var masked []string
+	if reload {
+		final := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
+		for _, k := range slices.Sorted(maps.Keys(set)) {
+			if c.File != "" && c.Defined(k) && file[k] != final[k] {
+				masked = append(masked, fmt.Sprintf("%s = %q in %s has no effect: %s overrides it", k, file[k], c.File, set[k]))
+			}
+		}
+	}
+	return c, masked, nil
+}
+
+// applyEnv applies the environment variables that override the file. It
+// returns the keys of reloadable settings it set, with the variable.
+func applyEnv(c *config.Config, getenv func(string) string) (set map[string]string) {
+	set = map[string]string{}
+	if v := getenv(config.EnvListen); v != "" {
+		c.Server.Listen = strings.Split(v, ",")
+	}
+	if v := getenv(config.EnvLogLevel); v != "" {
+		c.Log.Level = v
+		set["log.level"] = "$" + config.EnvLogLevel
+	}
+	if v := getenv(config.EnvLogFormat); v != "" {
+		c.Log.Format = v
+	}
+	return set
 }
 
 // checkFlagValues reports bad flag values under the flag's name rather than
@@ -154,7 +189,7 @@ func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
 			return usageError{fmt.Errorf("--on-conflict: %w", err)}
 		}
 	}
-	if _, err := newLogger(io.Discard, o.logLevel, o.logFormat); err != nil {
+	if _, _, err := newLogger(io.Discard, o.logLevel, o.logFormat); err != nil {
 		return usageError{fmt.Errorf("--%w", err)}
 	}
 	return nil
@@ -177,24 +212,13 @@ func loadConfig(explicit string, getenv func(string) string) (*config.Config, er
 	return c, nil
 }
 
-// applyEnv applies the environment variables that override the file.
-func applyEnv(c *config.Config, getenv func(string) string) {
-	if v := getenv(config.EnvListen); v != "" {
-		c.Server.Listen = strings.Split(v, ",")
-	}
-	if v := getenv(config.EnvLogLevel); v != "" {
-		c.Log.Level = v
-	}
-	if v := getenv(config.EnvLogFormat); v != "" {
-		c.Log.Format = v
-	}
-}
-
-// zeroConfig builds the configuration of serve --dir.
-func zeroConfig(o serveOptions) (*config.Config, error) {
+// zeroConfig builds the configuration of serve --dir. On reload, a missing
+// default authorized_keys file is left to BuildAuthenticator, which then
+// refuses every login.
+func zeroConfig(o serveOptions, reload bool) (*config.Config, error) {
 	c := config.Default()
 	c.Defaults.OnConflict = o.onConflict
-	specs, err := parseDirs(o.dirs)
+	specs, err := parseDirs(o.dirs, reload)
 	if err != nil {
 		return nil, usageError{err}
 	}
@@ -213,7 +237,7 @@ func zeroConfig(o serveOptions) (*config.Config, error) {
 			return nil, configError{errors.New("no --authorized-keys given and no home directory")}
 		}
 		keys = filepath.Join(home, ".ssh", "authorized_keys")
-		if _, err := os.Stat(keys); err != nil {
+		if _, err := os.Stat(keys); err != nil && !reload {
 			return nil, configError{fmt.Errorf("no --authorized-keys given and %s does not exist; add your public key there or pass --authorized-keys FILE", keys)}
 		}
 	}
@@ -303,7 +327,22 @@ func checkConfig(c *config.Config, checkFS bool) ([]string, error) {
 }
 
 func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv func(string) string, stderr, stdout io.Writer) error {
-	c, err := buildConfig(flags, o, getenv)
+	// SIGHUP reloads. Its default action would kill the process, so it is
+	// caught from the start; a signal during startup waits for the loop.
+	hup, injected := ctx.Value(hupKey{}).(<-chan os.Signal)
+	if !injected {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGHUP)
+		// Ignored, not reset, once serving ends: a reload sent during the
+		// drain must not kill the process.
+		defer signal.Ignore(syscall.SIGHUP)
+		hup = ch
+	}
+
+	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
+		return err
+	}
+	c, _, err := buildConfig(flags, o, getenv, false)
 	if err != nil {
 		return err
 	}
@@ -311,10 +350,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return err
 	}
-	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
-		return err
-	}
-	log, err := newLogger(stderr, c.Log.Level, c.Log.Format)
+	log, level, err := newLogger(stderr, c.Log.Level, c.Log.Format)
 	if err != nil {
 		return configError{err}
 	}
@@ -322,7 +358,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		log.WarnContext(ctx, "configuration", "detail", w)
 	}
 
-	authn, keyWarns, err := c.Authenticator()
+	authn, keyFiles, keyWarns, err := c.BuildAuthenticator(config.AuthOptions{})
 	if err != nil {
 		return configError{err}
 	}
@@ -341,45 +377,38 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return configError{err}
 	}
-	defer mounts.Close()
 
-	auditOut, closeAudit, err := openAudit(c.Audit.Output, stdout)
+	out, err := openAuditOutput(c.Audit.Output, stdout)
 	if err != nil {
+		_ = mounts.Close()
 		return configError{err}
 	}
-	defer closeAudit()
-	al, err := audit.NewWithOptions(auditOut, log, c.AuditOptions())
+	defer out.Close()
+	al, err := audit.NewWithOptions(out, log, c.AuditOptions())
 	if err != nil {
+		_ = mounts.Close()
 		return configError{err}
 	}
 
-	srv, err := server.New(server.Config{
-		HostKeys:              keys,
-		Auth:                  authn,
-		Mounts:                mounts,
-		Grants:                c.Grants,
-		Audit:                 al,
-		Log:                   log,
-		Methods:               c.Auth.Methods,
-		Bans:                  c.Bans(),
-		CryptoPolicy:          c.Server.CryptoPolicy,
-		HandshakeTimeout:      time.Duration(c.Server.HandshakeTimeout),
-		IdleTimeout:           offIfZero(c.Server.IdleTimeout),
-		KeepaliveInterval:     offIfZero(c.Server.KeepaliveInterval),
-		MaxConnections:        c.Limits.MaxConnections,
-		MaxConnectionsPerIP:   c.Limits.MaxConnectionsPerIP,
-		MaxPreauthConnections: c.Limits.MaxPreauthConnections,
-		MaxSessionsPerConn:    c.Limits.MaxSessionsPerConn,
-		MaxOpenHandles:        c.Limits.MaxOpenHandles,
-		MaxAuthTries:          c.Limits.MaxAuthTries,
-	})
+	cfg := serverConfig(c, authn, mounts)
+	cfg.HostKeys, cfg.Audit, cfg.Log, cfg.CryptoPolicy = keys, al, log, c.Server.CryptoPolicy
+	srv, err := server.New(cfg)
 	if err != nil {
+		_ = mounts.Close()
 		return err
 	}
+	r := &running{
+		flags: flags, opts: o, getenv: getenv, log: log, level: level, out: out, al: al, srv: srv,
+		c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
+	}
+	if c.File != "" {
+		// A reload reads this file again, not the first one found then.
+		r.opts.config = absPath(c.File)
+	}
+	defer r.release()
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	signal.Ignore(syscall.SIGHUP) // reload comes in v0.4; until then HUP must not kill the server
 
 	var listeners []net.Listener
 	// TCP keepalive finds dead peers before the SSH handshake too; after it,
@@ -402,14 +431,18 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	al.Event("server.start", slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ",")))
 
-	var janitor sync.WaitGroup
-	defer janitor.Wait() // after cancel, before mounts.Close
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	janitor.Go(func() { cleanTemp(serveCtx, mounts, log) })
+	var background sync.WaitGroup
+	defer background.Wait() // after cancel
+	background.Go(func() { cleanTemp(serveCtx, r.currentMounts, log) })
+	background.Go(func() { r.reloadLoop(serveCtx, hup) })
 	served := make(chan error, len(listeners))
 	for _, ln := range listeners {
 		go func() { served <- srv.Serve(serveCtx, ln) }()
+	}
+	if err := sdnotify.Ready(); err != nil {
+		log.DebugContext(ctx, "sd_notify", "err", err)
 	}
 	var serveErr error
 	pending := len(listeners)
@@ -418,9 +451,13 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		pending--
 	case <-ctx.Done():
 	}
+	if err := sdnotify.Stopping(); err != nil {
+		log.DebugContext(ctx, "sd_notify", "err", err)
+	}
 	cancel()
-	stop() // a second signal terminates immediately
-	timeout := time.Duration(c.Server.ShutdownTimeout)
+	stop()            // a second signal terminates immediately
+	background.Wait() // no reload runs during the shutdown
+	timeout := r.shutdownTimeout()
 	log.InfoContext(ctx, "shutting down", "timeout", timeout)
 	for range pending {
 		<-served
@@ -430,8 +467,30 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err := srv.Shutdown(sctx); err != nil {
 		log.WarnContext(ctx, "closed connections that did not finish in time")
 	}
+	r.release()
 	al.Event("server.stop")
 	return serveErr
+}
+
+// serverConfig returns the reloadable part of the server configuration.
+func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table) server.Config {
+	return server.Config{
+		Auth:                  authn,
+		Mounts:                mounts,
+		Grants:                c.Grants,
+		Methods:               c.Auth.Methods,
+		Bans:                  c.Bans(),
+		HandshakeTimeout:      time.Duration(c.Server.HandshakeTimeout),
+		IdleTimeout:           offIfZero(c.Server.IdleTimeout),
+		KeepaliveInterval:     offIfZero(c.Server.KeepaliveInterval),
+		MaxConnections:        c.Limits.MaxConnections,
+		MaxConnectionsPerIP:   c.Limits.MaxConnectionsPerIP,
+		MaxPreauthConnections: c.Limits.MaxPreauthConnections,
+		MaxSessionsPerConn:    c.Limits.MaxSessionsPerConn,
+		MaxOpenHandles:        c.Limits.MaxOpenHandles,
+		MaxAuthTries:          c.Limits.MaxAuthTries,
+		DisconnectRevoked:     c.Reload.DisconnectRemovedUsers,
+	}
 }
 
 // checkRoot refuses to serve as root unless allowed: a confinement bug
@@ -451,25 +510,39 @@ func offIfZero(d config.Duration) time.Duration {
 	return time.Duration(d)
 }
 
-func newLogger(w io.Writer, level, format string) (*slog.Logger, error) {
-	var lv slog.Level
-	if err := lv.UnmarshalText([]byte(level)); err != nil {
-		return nil, fmt.Errorf("log-level: %w", err)
+// newLogger returns the operational logger and its level, which a reload
+// can change.
+func newLogger(w io.Writer, level, format string) (*slog.Logger, *slog.LevelVar, error) {
+	lv, err := parseLevel(level)
+	if err != nil {
+		return nil, nil, err
 	}
-	opts := &slog.HandlerOptions{Level: lv}
+	v := new(slog.LevelVar)
+	v.Set(lv)
+	opts := &slog.HandlerOptions{Level: v}
 	switch format {
 	case "text":
-		return slog.New(slog.NewTextHandler(w, opts)), nil
+		return slog.New(slog.NewTextHandler(w, opts)), v, nil
 	case "json":
-		return slog.New(slog.NewJSONHandler(w, opts)), nil
+		return slog.New(slog.NewJSONHandler(w, opts)), v, nil
 	default:
-		return nil, fmt.Errorf("log-format: unknown format %q (want text or json)", format)
+		return nil, nil, fmt.Errorf("log-format: unknown format %q (want text or json)", format)
 	}
 }
 
+func parseLevel(level string) (slog.Level, error) {
+	var lv slog.Level
+	if err := lv.UnmarshalText([]byte(level)); err != nil {
+		return 0, fmt.Errorf("log-level: %w", err)
+	}
+	return lv, nil
+}
+
 // parseDirs turns --dir values into mounts. "NAME=PATH" names a mount;
-// otherwise the name is the last path component.
-func parseDirs(dirs []string) ([]vfs.MountSpec, error) {
+// otherwise the name is the last path component. On reload a directory is
+// not checked here: CheckFSReload makes a missing one unavailable instead
+// of failing the reload.
+func parseDirs(dirs []string, reload bool) ([]vfs.MountSpec, error) {
 	specs := make([]vfs.MountSpec, 0, len(dirs))
 	for _, d := range dirs {
 		name, p, ok := strings.Cut(d, "=")
@@ -480,12 +553,14 @@ func parseDirs(dirs []string) ([]vfs.MountSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("--dir %q: %w", d, err)
 		}
-		fi, err := os.Stat(abs)
-		if err != nil {
-			return nil, fmt.Errorf("--dir %q: %w", d, err)
-		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("--dir %q: not a directory", d)
+		if !reload {
+			fi, err := os.Stat(abs)
+			if err != nil {
+				return nil, fmt.Errorf("--dir %q: %w", d, err)
+			}
+			if !fi.IsDir() {
+				return nil, fmt.Errorf("--dir %q: not a directory", d)
+			}
 		}
 		if name == "" {
 			name = filepath.Base(abs)
@@ -522,19 +597,6 @@ func loadHostKeys(paths []string, autoGenerate bool) (keys []ssh.Signer, info []
 		}
 	}
 	return keys, info, nil
-}
-
-func openAudit(dest string, stdout io.Writer) (io.Writer, func(), error) {
-	if dest == "" || dest == "stdout" {
-		return stdout, func() {}, nil
-	}
-	// O_APPEND, unlike uploads: logrotate's copytruncate must not leave a
-	// hole of zeros.
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, nil, fmt.Errorf("audit output: %w", err)
-	}
-	return f, func() { _ = f.Close() }, nil
 }
 
 type bannerInfo struct {
@@ -604,13 +666,17 @@ func connectHost(addr net.Addr) (string, int) {
 }
 
 // cleanTemp removes temporary files of interrupted uploads at start and
-// then every TempMaxAge/4 until ctx is done.
-func cleanTemp(ctx context.Context, mounts *vfs.Table, log *slog.Logger) {
+// then every TempMaxAge/4 until ctx is done, in the mount table current at
+// each pass.
+func cleanTemp(ctx context.Context, current func() *vfs.Table, log *slog.Logger) {
 	tick := time.NewTicker(vfs.TempMaxAge / 4)
 	defer tick.Stop()
 	for {
-		if n := mounts.CleanTemp(); n > 0 {
-			log.InfoContext(ctx, "removed temporary files of interrupted uploads", "count", n, "older_than", vfs.TempMaxAge)
+		if mounts := current(); mounts != nil {
+			if n := mounts.CleanTemp(); n > 0 {
+				log.InfoContext(ctx, "removed temporary files of interrupted uploads", "count", n, "older_than", vfs.TempMaxAge)
+			}
+			_ = mounts.Close()
 		}
 		select {
 		case <-ctx.Done():

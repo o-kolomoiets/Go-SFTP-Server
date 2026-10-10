@@ -170,8 +170,16 @@ func TestSyntaxErrorHasPosition(t *testing.T) {
 	// panicked.
 	for _, data := range []string{`"\`, `a = "C:\`, "config_version = 1\n[mounts.m]\npath = \"C:\\"} {
 		path := writeConfig(t, dir, data)
-		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), path) {
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), path) {
 			t.Errorf("Load(%q) = %v, want an error naming the file", data, err)
+			continue
+		}
+		if strings.ContainsFunc(err.Error(), func(r rune) bool { return r < ' ' && r != '\n' && r != '\t' }) {
+			t.Errorf("Load(%q): error %q has control characters", data, err)
+		}
+		if !strings.HasPrefix(data, "config_version") && !strings.Contains(err.Error(), "at the end of the file") {
+			t.Errorf("Load(%q): error %q does not say where", data, err)
 		}
 	}
 }
@@ -1116,5 +1124,242 @@ access = { m = "read" }
 	}
 	if err != nil && strings.Contains(err.Error(), "mounts.n.versions") {
 		t.Errorf("an inherited error is reported again: %v", err)
+	}
+}
+
+// On reload, a mount that fails its checks is unavailable instead of
+// blocking the reload, and host keys and key files are not checked.
+func TestCheckFSReload(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, d := range []string{"ok", "disk"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := Load(writeConfig(t, dir, `
+config_version = 1
+[server]
+host_keys = ["{dir}/missing_key"]
+[mounts.ok]
+path = "{dir}/ok"
+[mounts.gone]
+path = "{dir}/gone"
+[mounts.disk]
+path = "{dir}/disk"
+create = true
+require_mountpoint = true
+[users.alice]
+authorized_keys_file = "{dir}/nokeys"
+access = { ok = "full" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustValidate(t, c)
+	warns, unavailable, err := c.CheckFSReload(nil)
+	if err != nil {
+		t.Fatalf("CheckFSReload: %v", err)
+	}
+	want := []string{"disk", "gone"}
+	if runtime.GOOS == "windows" { // require_mountpoint cannot be checked there
+		want = []string{"gone"}
+	}
+	if !slices.Equal(unavailable, want) {
+		t.Errorf("unavailable = %q", unavailable)
+	}
+	all := strings.Join(warns, "\n")
+	for _, want := range []string{"mounts.gone.path", "mounts.disk.require_mountpoint", "unavailable until this is fixed"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("warnings do not mention %q:\n%s", want, all)
+		}
+	}
+	if strings.Contains(all, "host_keys") || strings.Contains(all, "authorized_keys_file") {
+		t.Errorf("reload checks restart-only host keys or key files:\n%s", all)
+	}
+}
+
+// Trusted files must not be inside a mount clients can write to; secrets
+// must not be inside any mount.
+func TestTrustedFilesOutsideMounts(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, d := range []string{"rw/keys", "ro", "safe"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rw", "keys", "bob.pub"), []byte(pubKey(t)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "rw"), filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	c, err := Load(writeConfig(t, dir, `
+config_version = 1
+[server]
+host_keys = ["{dir}/ro/host_key"]
+host_key_auto_generate = true
+[mounts.rw]
+path = "{dir}/rw"
+[mounts.ro]
+path = "{dir}/ro"
+read_only = true
+[mounts.home]
+path = "{dir}/safe/{user}"
+[users.bob]
+authorized_keys_file = "{dir}/link/keys/bob.pub"
+access = { rw = "full" }
+[audit]
+output = "{dir}/safe/audit.jsonl"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustValidate(t, c)
+	_, err = c.CheckFS()
+	if err == nil {
+		t.Fatal("CheckFS accepted trusted files inside mounts")
+	}
+	for _, want := range []string{
+		"mounts.rw.path: covers the authorized_keys file of bob", // through the symlink
+		"mounts.ro.path: covers the host key",
+		"mounts.home.path: covers the audit log", // the parent of {user}
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("errors do not mention %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "configuration file") {
+		t.Errorf("the configuration file is not in a mount:\n%v", err)
+	}
+
+	c.Mounts["home"].ReadOnly = true
+	c.Mounts["rw"].ReadOnly = true
+	c.Server.HostKeys = []string{filepath.Join(dir, "host_key")}
+	warns, err := c.CheckFS()
+	if err != nil {
+		t.Fatalf("read-only mounts with public files: %v", err)
+	}
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "covers the audit log") }) {
+		t.Errorf("no warning about a readable audit log: %q", warns)
+	}
+
+	zero := Default()
+	zero.AddMount("home", dir)
+	zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: filepath.Join(dir, "rw", "keys", "bob.pub")}
+	zero.Server.HostKeys = []string{filepath.Join(t.TempDir(), "host_key")}
+	zero.Server.HostKeyAutoGenerate = true
+	if _, err := zero.CheckFS(); err == nil || !strings.Contains(err.Error(), "--dir home: covers the authorized_keys file") {
+		t.Errorf("zero-config serving its own authorized_keys: %v", err)
+	}
+}
+
+// A reload also checks trusted files against the mounts that open
+// connections of an earlier configuration still use.
+func TestCheckFSReloadLiveMounts(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, d := range []string{"data/keys", "safe"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := Load(writeConfig(t, dir, `
+config_version = 1
+[server]
+host_keys = ["{dir}/safe/host_key"]
+host_key_auto_generate = true
+[mounts.data]
+path = "{dir}/data"
+read_only = true
+[users.bob]
+authorized_keys_file = "{dir}/data/keys/bob.pub"
+access = { data = "read" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustValidate(t, c)
+	if _, _, err := c.CheckFSReload(nil); err != nil {
+		t.Fatalf("a key file in a read-only mount: %v", err)
+	}
+	live := []LiveMount{{Name: "data", Path: filepath.Join(dir, "data")}}
+	_, _, err = c.CheckFSReload(live)
+	if err == nil || !strings.Contains(err.Error(), `mount "data" of open connections: covers the authorized_keys file of bob`) {
+		t.Errorf("a key file in a mount open connections can still write: %v", err)
+	}
+	live[0].ReadOnly = true
+	if _, _, err := c.CheckFSReload(live); err != nil {
+		t.Errorf("the same read-only mount: %v", err)
+	}
+}
+
+// On reload, problems of key files revoke their keys instead of failing;
+// a file that is not a regular file keeps the keys read before.
+func TestBuildAuthenticatorReload(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	k1, k2 := pubKey(t), pubKey(t)
+	bob := filepath.Join(dir, "bob.pub")
+	if err := os.WriteFile(bob, []byte(k1+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(writeConfig(t, dir, `
+config_version = 1
+[server]
+host_keys = ["/k"]
+[mounts.m]
+path = "{dir}/m"
+[users.alice]
+authorized_keys = ["`+k2+`"]
+access = { m = "read" }
+[users.bob]
+authorized_keys_file = "bob.pub"
+access = { m = "read" }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustValidate(t, c)
+	a, files, _, err := c.BuildAuthenticator(AuthOptions{})
+	if err != nil || a.Len() != 2 || len(files) != 0 {
+		t.Fatalf("BuildAuthenticator = %d keys, %v, %v; want no pipes remembered", a.Len(), files, err)
+	}
+
+	if err := os.Remove(bob); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := c.BuildAuthenticator(AuthOptions{}); err == nil {
+		t.Error("a missing key file is accepted at start")
+	}
+	a, _, warns, err := c.BuildAuthenticator(AuthOptions{Reload: true, Previous: files})
+	if err != nil || a.Len() != 1 {
+		t.Fatalf("reload without bob's file = %d keys, %v", a.Len(), err)
+	}
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "its keys are not used") }) {
+		t.Errorf("warnings = %q", warns)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.WriteFile(bob, []byte(k1+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(bob, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if a, _, _, err := c.BuildAuthenticator(AuthOptions{Reload: true}); err != nil || a.Len() != 1 {
+			t.Errorf("reload with a writable key file = %d keys, %v", a.Len(), err)
+		}
+	}
+
+	zero := Default()
+	zero.AnyUser = &ZeroConfigUser{AuthorizedKeysFile: filepath.Join(dir, "missing")}
+	a, _, warns, err = zero.BuildAuthenticator(AuthOptions{Reload: true})
+	if err != nil || a.Len() != 0 || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "nobody can log in") }) {
+		t.Errorf("zero-config reload without keys = %d keys, %q, %v", a.Len(), warns, err)
 	}
 }

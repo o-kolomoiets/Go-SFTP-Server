@@ -242,7 +242,7 @@ func TestNoConfigFound(t *testing.T) {
 	isolate(t)
 	noSystemConfig(t)
 	t.Chdir(t.TempDir())
-	for _, args := range [][]string{{"serve"}, {"config", "validate"}, {"config", "show"}, {"user", "list"}} {
+	for _, args := range [][]string{{"serve", "--allow-root"}, {"config", "validate"}, {"config", "show"}, {"user", "list"}} {
 		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, "gosftpd init") {
 			t.Errorf("%q: exit %d: %s", args, code, stderr)
 		}
@@ -322,9 +322,9 @@ func TestServeFlagErrorsNameTheFlag(t *testing.T) {
 
 	dir := t.TempDir()
 	for flag, args := range map[string][]string{
-		"--on-conflict": {"serve", "--dir", dir, "--on-conflict", "merge"},
-		"--log-level":   {"serve", "--dir", dir, "--log-level", "loud"},
-		"--log-format":  {"serve", "--dir", dir, "--log-format", "xml"},
+		"--on-conflict": {"serve", "--dir", dir, "--on-conflict", "merge", "--allow-root"},
+		"--log-level":   {"serve", "--dir", dir, "--log-level", "loud", "--allow-root"},
+		"--log-format":  {"serve", "--dir", dir, "--log-format", "xml", "--allow-root"},
 	} {
 		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, flag) {
 			t.Errorf("%s: exit %d: %s", flag, code, stderr)
@@ -334,7 +334,7 @@ func TestServeFlagErrorsNameTheFlag(t *testing.T) {
 	if err := os.Mkdir(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, stderr := execute(t, "serve", "--dir", home); code != exitUsage || !strings.Contains(stderr, "need a configuration file") {
+	if code, _, stderr := execute(t, "serve", "--dir", home, "--allow-root"); code != exitUsage || !strings.Contains(stderr, "need a configuration file") {
 		t.Errorf("--dir {user}: exit %d: %s", code, stderr)
 	}
 }

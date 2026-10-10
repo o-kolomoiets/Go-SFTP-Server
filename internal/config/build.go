@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/netip"
+	"os"
 	"slices"
 	"strconv"
 	"time"
@@ -80,21 +81,51 @@ func (c *Config) AuditOptions() audit.Options {
 // Key lines that cannot be used are skipped and returned as warnings. Call
 // after Validate.
 func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
+	a, _, warns, err := c.BuildAuthenticator(AuthOptions{})
+	return a, warns, err
+}
+
+// KeyFiles holds the keys read from authorized_keys files that are pipes,
+// by path: a pipe can be read only once.
+type KeyFiles map[string][]auth.Key
+
+// AuthOptions configure BuildAuthenticator.
+type AuthOptions struct {
+	// Reload builds the authenticator for a configuration reload: an
+	// authorized_keys file that is missing, not a regular file, not trusted
+	// (as CheckFS checks at start) or without usable keys then gives no
+	// keys, with a warning, instead of an error. So deleting a file, or
+	// pointing it at /dev/null, revokes its keys, and one user's file does
+	// not block the reload. A pipe, such as that of --authorized-keys
+	// <(...), keeps the keys it gave before (Previous).
+	Reload   bool
+	Previous KeyFiles
+}
+
+// BuildAuthenticator is Authenticator with options; it also returns the
+// keys of the files that are pipes, for the next reload.
+func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFiles, []string, error) {
+	files := KeyFiles{}
 	if c.AnyUser != nil {
-		keys, warns, err := readAuthorizedKeys(c.AnyUser.AuthorizedKeysFile)
+		path := c.AnyUser.AuthorizedKeysFile
+		keys, warns, err := o.readKeys(path, "--authorized-keys")
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(keys) == 0 {
-			return nil, warns, noKeysError(c.AnyUser.AuthorizedKeysFile)
+			if !o.Reload {
+				return nil, nil, warns, noKeysError(path)
+			}
+			warns = append(warns, "--authorized-keys: "+path+" has no usable keys; nobody can log in")
 		}
-		return auth.New(c.AnyUser.Name, keys), warns, nil
+		files.remember(path, keys)
+		return auth.New(c.AnyUser.Name, keys), files, warns, nil
 	}
 
 	var (
 		users []auth.User
 		warns []string
-		files = map[string][]auth.Key{}
+		read  = map[string][]auth.Key{} // each file once
 	)
 	for _, name := range sortedKeys(c.Users) {
 		u := c.Users[name]
@@ -105,7 +136,7 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 		if c.canUsePassword(u) {
 			h, err := auth.ParsePasswordHash(u.PasswordHash)
 			if err != nil {
-				return nil, nil, fmt.Errorf("%s: %w", key("users", name, "password_hash"), err)
+				return nil, nil, nil, fmt.Errorf("%s: %w", key("users", name, "password_hash"), err)
 			}
 			au.Password = h
 		}
@@ -119,15 +150,16 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 			warns = append(warns, ws...)
 		}
 		if f := u.AuthorizedKeysFile; f != "" && keysOn {
-			ks, ok := files[f]
+			ks, ok := read[f]
 			if !ok {
 				var ws []string
 				var err error
-				ks, ws, err = readAuthorizedKeys(f)
+				ks, ws, err = o.readKeys(f, key("users", name, "authorized_keys_file"))
 				if err != nil {
-					return nil, nil, fmt.Errorf("%s: %w", key("users", name, "authorized_keys_file"), err)
+					return nil, nil, nil, fmt.Errorf("%s: %w", key("users", name, "authorized_keys_file"), err)
 				}
-				files[f] = ks
+				read[f] = ks
+				files.remember(f, ks)
 				warns = append(warns, ws...)
 			}
 			au.Keys = append(au.Keys, ks...)
@@ -135,7 +167,7 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 		for _, a := range u.AllowFrom {
 			p, err := auth.ParsePrefix(a)
 			if err != nil {
-				return nil, nil, fmt.Errorf("%s: %w", key("users", name, "allow_from"), err)
+				return nil, nil, nil, fmt.Errorf("%s: %w", key("users", name, "allow_from"), err)
 			}
 			au.AllowFrom = append(au.AllowFrom, p)
 		}
@@ -144,7 +176,42 @@ func (c *Config) Authenticator() (*auth.Authenticator, []string, error) {
 		}
 		users = append(users, au)
 	}
-	return auth.NewUsers(users), warns, nil
+	return auth.NewUsers(users), files, warns, nil
+}
+
+// remember records the keys of path if it is a pipe.
+func (f KeyFiles) remember(path string, keys []auth.Key) {
+	if fi, err := os.Stat(path); err == nil && fi.Mode()&fs.ModeNamedPipe != 0 {
+		f[path] = keys
+	}
+}
+
+// readKeys reads the authorized_keys file path; k names it in messages.
+func (o AuthOptions) readKeys(path, k string) ([]auth.Key, []string, error) {
+	if !o.Reload {
+		return readAuthorizedKeys(path)
+	}
+	unused := func(err error) []string { return []string{fmt.Sprintf("%s: %v; its keys are not used", k, err)} }
+	fi, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return nil, unused(err), nil
+	case fi.Mode()&fs.ModeNamedPipe != 0:
+		if keys, ok := o.Previous[path]; ok {
+			return keys, []string{k + ": " + path + " is a pipe; keeping the keys read from it before"}, nil
+		}
+		return nil, unused(fmt.Errorf("%s is a pipe that was not read before", path)), nil
+	case !fi.Mode().IsRegular():
+		return nil, unused(fmt.Errorf("%s is not a regular file", path)), nil
+	}
+	if err := checkOwner(path, fi); err != nil {
+		return nil, unused(err), nil
+	}
+	keys, warns, err := readAuthorizedKeys(path)
+	if err != nil {
+		return nil, append(warns, unused(err)...), nil
+	}
+	return keys, warns, nil
 }
 
 // usesKeys reports whether u has keys that may be used.

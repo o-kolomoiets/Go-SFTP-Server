@@ -418,6 +418,29 @@ func TestConcurrentUploadsSameName(t *testing.T) {
 	}
 }
 
+// Another session's isCreated reads every open upload, so a handle must be
+// complete before claim publishes it.
+func TestClaimPublishesCompleteHandle(t *testing.T) {
+	t.Parallel()
+
+	alice, _ := fixture(t, ConflictRename)
+	bob := session(t, alice.t, "bob", alice.t.FullAccess())
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range 200 {
+			if _, err := upload(t, alice, "new"+strconv.Itoa(i)+".txt", put, "x"); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	})
+	now := time.Now()
+	for range 200 {
+		_ = bob.Setstat("a.txt", Attrs{Atime: now, Mtime: now, HasTimes: true})
+	}
+	wg.Wait()
+}
+
 func TestRename(t *testing.T) {
 	t.Parallel()
 

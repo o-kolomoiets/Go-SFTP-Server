@@ -82,4 +82,6 @@ JSON audit log on stdout.
 Run gosftpd as an unprivileged user that owns the served directories, never as
 root. A systemd unit, packages and a Docker image are planned for v0.4–v0.5;
 until then any supervisor works: gosftpd stops cleanly on SIGTERM (running
-transfers get `shutdown_timeout`, 30 s by default) and ignores SIGHUP.
+transfers get `shutdown_timeout`, 30 s by default) and applies its
+configuration again on SIGHUP without dropping connections (see
+[Reload](configuration.md#reload)).

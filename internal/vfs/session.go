@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -63,7 +64,8 @@ type Session struct {
 	writers map[string][]*WriteHandle // open uploads by final virtual path
 }
 
-// Session starts a session for user with the given grants. Mounts that
+// Session starts a session for user with the given grants; the caller must
+// hold a reference to t (Acquire) until the session is closed. Mounts that
 // cannot be opened for this user (a home directory that is missing or not a
 // real directory) are left out; the returned errors say why, for the audit
 // log. Grants for unknown mounts are reported the same way.
@@ -78,6 +80,14 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 	granted := map[string]bool{}
 	for _, g := range grants {
 		m := t.byName[g.Mount]
+		if err, ok := t.missing[g.Mount]; ok {
+			// Granted, so that the user's other mounts keep their paths.
+			if !granted[g.Mount] {
+				granted[g.Mount] = true
+				errs = append(errs, &MountError{Mount: g.Mount, Err: err})
+			}
+			continue
+		}
 		if m == nil {
 			errs = append(errs, &MountError{Mount: g.Mount, Err: fs.ErrNotExist})
 			continue
@@ -114,9 +124,12 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 // FullAccess grants every mount of t with all permissions (zero-config mode;
 // read-only mounts still allow only list and read).
 func (t *Table) FullAccess() []Grant {
-	gs := make([]Grant, 0, len(t.mounts))
+	gs := make([]Grant, 0, len(t.mounts)+len(t.missing))
 	for _, m := range t.mounts {
 		gs = append(gs, Grant{Mount: m.name, Perm: PermAll})
+	}
+	for _, name := range slices.Sorted(maps.Keys(t.missing)) {
+		gs = append(gs, Grant{Mount: name, Perm: PermAll})
 	}
 	return gs
 }
@@ -133,11 +146,14 @@ func (e *MountError) Unwrap() error { return e.Err }
 // Close releases the session's home directories. Open handles must be
 // closed first.
 func (s *Session) Close() error {
-	errs := make([]error, 0, len(s.owned))
-	for _, r := range s.owned {
+	s.mu.Lock()
+	owned := s.owned
+	s.owned = nil
+	s.mu.Unlock()
+	errs := make([]error, 0, len(owned))
+	for _, r := range owned {
 		errs = append(errs, r.Close())
 	}
-	s.owned = nil
 	return errors.Join(errs...)
 }
 
@@ -478,7 +494,9 @@ func (s *Session) Setstat(vp string, a Attrs) error {
 		return ErrDenied
 	case SetstatTimes:
 	}
-	own := s.isCreated(v, rel)
+	// An uploader may set the times of its own uploads, while it may
+	// still upload: a reload may have taken the write permission away.
+	own := v.perm.Has(PermWrite) && s.isCreated(v, rel)
 	if !v.perm.Has(PermSetstat) && !own {
 		return ErrDenied
 	}

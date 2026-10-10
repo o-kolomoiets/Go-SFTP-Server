@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 
@@ -44,6 +45,7 @@ type Config struct {
 	Users         map[string]*User  `toml:"users"`
 	Log           Log               `toml:"log"`
 	Audit         Audit             `toml:"audit"`
+	Reload        Reload            `toml:"reload"`
 
 	// File is the file the configuration was loaded from, "" when it was
 	// built from command-line flags. Files lists File and every included
@@ -53,7 +55,12 @@ type Config struct {
 	// AnyUser is set in zero-config mode (serve --dir): every SSH user name
 	// is accepted with these keys and gets full access to every mount.
 	AnyUser *ZeroConfigUser `toml:"-"`
+
+	defined map[string]bool // keys set in File
 }
+
+// Defined reports whether the main file sets key, such as "log.level".
+func (c *Config) Defined(key string) bool { return c.defined[key] }
 
 // Server is the [server] table.
 type Server struct {
@@ -65,6 +72,16 @@ type Server struct {
 	IdleTimeout         Duration `toml:"idle_timeout"`
 	KeepaliveInterval   Duration `toml:"keepalive_interval"`
 	ShutdownTimeout     Duration `toml:"shutdown_timeout"`
+}
+
+// Reload is the [reload] table: what a reload on SIGHUP does besides
+// switching new logins to the new configuration.
+type Reload struct {
+	// DisconnectRemovedUsers closes the connections whose login the new
+	// configuration would refuse: the user was removed, disabled or has
+	// expired, or the key or password used was removed or changed, or
+	// allow_from no longer matches.
+	DisconnectRemovedUsers bool `toml:"disconnect_removed_users"`
 }
 
 // Limits is the [limits] table.
@@ -256,6 +273,7 @@ type fileConfig struct {
 	Users         map[string]*User          `toml:"users"`
 	Log           Log                       `toml:"log"`
 	Audit         Audit                     `toml:"audit"`
+	Reload        Reload                    `toml:"reload"`
 }
 
 // includeFile is what an included file may contain.
@@ -301,8 +319,13 @@ func Load(path string) (*Config, error) {
 		Users:         raw.Users,
 		Log:           raw.Log,
 		Audit:         raw.Audit,
+		Reload:        raw.Reload,
 		File:          abs,
 		Files:         []string{abs},
+		defined:       map[string]bool{},
+	}
+	for _, k := range md.Keys() {
+		c.defined[k.String()] = true
 	}
 	if c.Users == nil {
 		c.Users = map[string]*User{}
@@ -356,16 +379,36 @@ func decodeError(file string, err error) error {
 	return fmt.Errorf("%s: %w", file, err)
 }
 
-// withPosition returns pe.ErrorWithPosition, or pe.Error where that
+// withPosition returns pe.ErrorWithPosition, or a plain message where that
 // panics: BurntSushi/toml v1.6.0 reports line 0 for an escape that the end
-// of the file cuts off on the first line (found by FuzzParseConfig).
+// of the file cuts off on the first line (found by FuzzParseConfig). Its
+// messages can hold the NUL it reads at the end of the file, so control
+// characters are escaped.
 func withPosition(pe toml.ParseError) (msg string) {
 	defer func() {
 		if recover() != nil {
-			msg = pe.Error()
+			where := "at the end of the file"
+			if pe.Position.Line > 0 {
+				where = "at line " + strconv.Itoa(pe.Position.Line)
+			}
+			msg = "toml: error: " + printable(pe.Message) + " " + where
 		}
 	}()
-	return pe.ErrorWithPosition()
+	return printable(pe.ErrorWithPosition())
+}
+
+// printable shows control characters in s, except line breaks, as \xNN
+// escapes.
+func printable(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) && r != '\n' {
+			fmt.Fprintf(&b, "\\x%02x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func unknownKeys(file string, md toml.MetaData) error {

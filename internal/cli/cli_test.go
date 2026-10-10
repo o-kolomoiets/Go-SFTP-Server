@@ -112,7 +112,7 @@ func TestParseDirs(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	specs, err := parseDirs([]string{dir, "docs=" + dir})
+	specs, err := parseDirs([]string{dir, "docs=" + dir}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
