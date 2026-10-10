@@ -28,7 +28,8 @@ sudo install -d -o gosftpd -g gosftpd -m 0750 /srv/sftp /var/log/gosftpd
 sudo install -d -o root -g gosftpd -m 0750 /etc/gosftpd
 ```
 
-The configuration, host keys, `authorized_keys` files, the trusted CA keys
+The configuration, host keys (and their next and previous keys and
+certificates), `authorized_keys` files, the trusted CA keys
 and the revocation list must not be writable by group or others (gosftpd refuses them, like sshd's
 `StrictModes`). A systemd unit ships with v0.4; until then, this one adds
 sandboxing on top of `os.Root`:

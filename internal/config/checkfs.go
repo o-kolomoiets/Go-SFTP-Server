@@ -32,9 +32,9 @@ type LiveMount struct {
 	ReadOnly   bool
 }
 
-// CheckFSReload is CheckFS for a configuration reload. Host keys are not
-// checked, since they change only at restart, and authorized_keys files are
-// left to BuildAuthenticator with Reload. A mount that fails its checks is
+// CheckFSReload is CheckFS for a configuration reload. Host keys and
+// authorized_keys files are not checked here: on reload a broken one must
+// not block the rest (ADR 0005, ADR 0008), so their readers check them. A mount that fails its checks is
 // a warning and is returned in unavailable, so that one mount (a disk that
 // is not mounted, say) does not block the rest of the reload; its users
 // find it unavailable. Trusted files are also checked against live: the
@@ -137,6 +137,18 @@ func (c *Config) checkTrusted(p *problems, live []LiveMount) {
 	}
 	for _, f := range c.Server.HostKeys {
 		files = append(files, trusted{f, "the host key", true, false})
+		for _, g := range []string{f + ".next", f + ".old"} {
+			if _, err := os.Lstat(g); err == nil {
+				files = append(files, trusted{g, "a host key", true, false})
+			}
+		}
+		if c.Server.HostCertificates {
+			for _, g := range []string{f + "-cert.pub", f + ".next-cert.pub"} {
+				if _, err := os.Lstat(g); err == nil {
+					files = append(files, trusted{g, "a host certificate", false, false})
+				}
+			}
+		}
 	}
 	if c.AnyUser != nil {
 		files = append(files, trusted{c.AnyUser.AuthorizedKeysFile, "the authorized_keys file", false, false})
@@ -262,22 +274,32 @@ func checkMountpoint(p *problems, k, dir string, fi fs.FileInfo) {
 
 func (c *Config) checkHostKeys(p *problems) {
 	for _, path := range c.Server.HostKeys {
-		fi, err := os.Stat(path)
-		switch {
-		case errors.Is(err, fs.ErrNotExist) && c.Server.HostKeyAutoGenerate:
-			if _, err := os.Stat(filepath.Dir(path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				p.errorf("server.host_keys", "%v", err)
+		c.checkHostKey(p, path, false)
+		// Next and previous keys of a rotation (ADR 0008).
+		for _, f := range []string{path + ".next", path + ".old"} {
+			if _, err := os.Lstat(f); err == nil {
+				c.checkHostKey(p, f, true)
 			}
-		case errors.Is(err, fs.ErrNotExist):
-			p.errorf("server.host_keys", "%s does not exist (create it with gosftpd hostkey generate --out %s, or set host_key_auto_generate = true)", path, path)
-		case err != nil:
+		}
+	}
+}
+
+func (c *Config) checkHostKey(p *problems, path string, rotation bool) {
+	fi, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && c.Server.HostKeyAutoGenerate && !rotation:
+		if _, err := os.Stat(filepath.Dir(path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			p.errorf("server.host_keys", "%v", err)
-		case runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0:
-			p.errorf("server.host_keys", "%s: permissions %04o are too open; fix with: chmod 600 %s", path, fi.Mode().Perm(), path)
-		default:
-			if err := checkOwner(path, fi); err != nil {
-				p.errs = append(p.errs, err)
-			}
+		}
+	case errors.Is(err, fs.ErrNotExist) && !rotation:
+		p.errorf("server.host_keys", "%s does not exist (create it with gosftpd hostkey generate --out %s, or set host_key_auto_generate = true)", path, path)
+	case err != nil:
+		p.errorf("server.host_keys", "%v", err)
+	case runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0:
+		p.errorf("server.host_keys", "%s: permissions %04o are too open; fix with: chmod 600 %s", path, fi.Mode().Perm(), path)
+	default:
+		if err := checkOwner(path, fi); err != nil {
+			p.errs = append(p.errs, err)
 		}
 	}
 }

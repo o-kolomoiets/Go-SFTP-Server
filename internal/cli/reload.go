@@ -37,6 +37,10 @@ type running struct {
 	mounts *vfs.Table   // a reference to the current table
 	tables []*vfs.Table // every table built, until no connection uses it
 	keys   config.KeyFiles
+	// hostKeys are the host keys in use; reloaded gets a value after each
+	// reload, for watchHostCerts.
+	hostKeys hostKeys
+	reloaded chan struct{}
 }
 
 // Reasons a reload fails, for the server.reload event.
@@ -124,7 +128,7 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	if err != nil {
 		return nil, 0, reloadConfig, problemsError{c.File, err}
 	}
-	// Before the file checks, so that they check the host keys in use.
+	// Before the file checks, so that they check the files in use.
 	restart = keepRestartOnly(r.c, c)
 	for _, k := range restart {
 		r.log.WarnContext(ctx, "this setting changes only at restart; the running value stays", "key", k)
@@ -138,6 +142,14 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	warn(warns)
 	if err != nil {
 		return nil, 0, reloadConfig, err
+	}
+	// Revocation does not wait for host key files (ADR 0008): with a host
+	// key that cannot be used, the running host keys stay.
+	hostKeys, warns, err := loadHostKeys(c.Server.HostKeys, hostKeyOptions{certs: c.Server.HostCertificates, lenient: true})
+	warn(warns)
+	if err != nil {
+		r.log.WarnContext(ctx, "host keys cannot be used; the running host keys stay", "err", err)
+		hostKeys = r.hostKeys
 	}
 	level, err := parseLevel(c.Log.Level)
 	if err != nil {
@@ -163,7 +175,7 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 			return nil, 0, reloadAuditOutput, err
 		}
 	}
-	if disconnected, err = r.srv.Reload(serverConfig(c, authn, mounts)); err != nil {
+	if disconnected, err = r.srv.Reload(serverConfig(c, authn, mounts, hostKeys)); err != nil {
 		_ = mounts.Close()
 		if auditFile != nil {
 			_ = auditFile.Close()
@@ -177,8 +189,13 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	}
 	r.level.Set(level)
 	_ = r.mounts.Close()
-	r.c, r.mounts, r.keys = c, mounts, keys
+	hostKeys.logChanges(ctx, r.log, r.hostKeys)
+	r.c, r.mounts, r.keys, r.hostKeys = c, mounts, keys, hostKeys
 	r.tables = append(r.tables, mounts)
+	select {
+	case r.reloaded <- struct{}{}:
+	default:
+	}
 	return restart, disconnected, "", nil
 }
 
@@ -207,8 +224,6 @@ func keepRestartOnly(cur, next *config.Config) []string {
 	}
 	keep("server.listen", !slices.Equal(cur.Server.Listen, next.Server.Listen),
 		func() { next.Server.Listen = cur.Server.Listen })
-	keep("server.host_keys", !slices.Equal(cur.Server.HostKeys, next.Server.HostKeys),
-		func() { next.Server.HostKeys = cur.Server.HostKeys })
 	keep("server.host_key_auto_generate", cur.Server.HostKeyAutoGenerate != next.Server.HostKeyAutoGenerate,
 		func() { next.Server.HostKeyAutoGenerate = cur.Server.HostKeyAutoGenerate })
 	keep("server.crypto_policy", cur.Server.CryptoPolicy != next.Server.CryptoPolicy,
@@ -220,6 +235,13 @@ func keepRestartOnly(cur, next *config.Config) []string {
 	keep("audit.on_error", cur.Audit.OnError != next.Audit.OnError,
 		func() { next.Audit.OnError = cur.Audit.OnError })
 	return changed
+}
+
+// currentHostCerts returns the certificates of the host keys in use.
+func (r *running) currentHostCerts() []hostCert {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hostKeys.certs()
 }
 
 // currentMounts returns the current mount table with a reference the

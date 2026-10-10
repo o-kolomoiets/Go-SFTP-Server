@@ -22,7 +22,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"golang.org/x/crypto/ssh"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
@@ -96,8 +95,9 @@ $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 // of the file, since editing that value then has no effect.
 func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) string, reload bool) (*config.Config, []string, error) {
 	var (
-		c   *config.Config
-		err error
+		c            *config.Config
+		err          error
+		fileHostKeys []string // server.host_keys of the file, if --host-key overrides it
 	)
 	if err := checkFlagValues(flags, o); err != nil {
 		return nil, nil, err
@@ -129,6 +129,9 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 			}
 		}
 		if flags.Changed("host-key") {
+			if c.Defined("server.host_keys") {
+				fileHostKeys = c.Server.HostKeys
+			}
 			c.Server.HostKeys = absPaths(o.hostKeys)
 		}
 	}
@@ -159,6 +162,9 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 			if c.File != "" && c.Defined(k) && file[k] != final[k] {
 				masked = append(masked, fmt.Sprintf("%s = %q in %s has no effect: %s overrides it", k, file[k], c.File, set[k]))
 			}
+		}
+		if fileHostKeys != nil && !slices.Equal(fileHostKeys, c.Server.HostKeys) {
+			masked = append(masked, fmt.Sprintf("server.host_keys in %s has no effect: --host-key overrides it", c.File))
 		}
 	}
 	return c, masked, nil
@@ -365,7 +371,10 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return configError{err}
 	}
-	keys, keyInfo, err := loadHostKeys(c.Server.HostKeys, c.Server.HostKeyAutoGenerate)
+	keys, hkWarns, err := loadHostKeys(c.Server.HostKeys, hostKeyOptions{generate: c.Server.HostKeyAutoGenerate, certs: c.Server.HostCertificates})
+	for _, w := range hkWarns {
+		log.WarnContext(ctx, "configuration", "detail", w)
+	}
 	if err != nil {
 		return configError{err}
 	}
@@ -390,8 +399,8 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		return configError{err}
 	}
 
-	cfg := serverConfig(c, authn, mounts)
-	cfg.HostKeys, cfg.Audit, cfg.Log, cfg.CryptoPolicy = keys, al, log, c.Server.CryptoPolicy
+	cfg := serverConfig(c, authn, mounts, keys)
+	cfg.Audit, cfg.Log, cfg.CryptoPolicy = al, log, c.Server.CryptoPolicy
 	srv, err := server.New(cfg)
 	if err != nil {
 		_ = mounts.Close()
@@ -400,6 +409,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	r := &running{
 		flags: flags, opts: o, getenv: getenv, log: log, level: level, out: out, al: al, srv: srv,
 		c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
+		hostKeys: keys, reloaded: make(chan struct{}, 1),
 	}
 	if c.File != "" {
 		// A reload reads this file again, not the first one found then.
@@ -424,7 +434,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		}
 		listeners = append(listeners, ln)
 	}
-	printBanner(stderr, bannerInfo{c: c, listeners: listeners, keys: keys, keyInfo: keyInfo, auth: authn, mounts: mounts})
+	printBanner(stderr, bannerInfo{c: c, listeners: listeners, keys: keys, auth: authn, mounts: mounts})
 	addrs := make([]string, len(listeners))
 	for i, ln := range listeners {
 		addrs[i] = ln.Addr().String()
@@ -436,6 +446,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	var background sync.WaitGroup
 	defer background.Wait() // after cancel
 	background.Go(func() { cleanTemp(serveCtx, r.currentMounts, log) })
+	background.Go(func() { watchHostCerts(serveCtx, r.currentHostCerts, r.reloaded, log, time.Minute) })
 	background.Go(func() { r.reloadLoop(serveCtx, hup) })
 	served := make(chan error, len(listeners))
 	for _, ln := range listeners {
@@ -473,8 +484,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 }
 
 // serverConfig returns the reloadable part of the server configuration.
-func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table) server.Config {
-	return server.Config{
+func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table, keys hostKeys) server.Config {
+	cfg := server.Config{
+		AnnounceHostKeys:      c.Server.AnnounceHostKeys,
 		Auth:                  authn,
 		Mounts:                mounts,
 		Grants:                c.Grants,
@@ -491,6 +503,8 @@ func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table
 		MaxAuthTries:          c.Limits.MaxAuthTries,
 		DisconnectRevoked:     c.Reload.DisconnectRemovedUsers,
 	}
+	keys.apply(&cfg)
+	return cfg
 }
 
 // checkRoot refuses to serve as root unless allowed: a confinement bug
@@ -573,37 +587,10 @@ func parseDirs(dirs []string, reload bool) ([]vfs.MountSpec, error) {
 	return specs, nil
 }
 
-// loadHostKeys loads the host keys, generating missing ones as ed25519 when
-// autoGenerate is set. info describes where the keys came from.
-func loadHostKeys(paths []string, autoGenerate bool) (keys []ssh.Signer, info []string, err error) {
-	for _, p := range paths {
-		var (
-			k         ssh.Signer
-			generated bool
-		)
-		if autoGenerate {
-			k, generated, err = hostkey.LoadOrGenerate(p)
-		} else {
-			k, err = hostkey.Load(p)
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		keys = append(keys, k)
-		if generated {
-			info = append(info, p+" (generated, 0600)")
-		} else {
-			info = append(info, p)
-		}
-	}
-	return keys, info, nil
-}
-
 type bannerInfo struct {
 	c         *config.Config
 	listeners []net.Listener
-	keys      []ssh.Signer
-	keyInfo   []string
+	keys      hostKeys
 	auth      *auth.Authenticator
 	mounts    *vfs.Table
 }
@@ -614,10 +601,29 @@ func printBanner(w io.Writer, b bannerInfo) {
 	if b.c.File != "" {
 		fmt.Fprintf(w, "config:  %s\n", b.c.File)
 	}
-	for i, k := range b.keys {
-		fmt.Fprintf(w, "host key: %s\n", b.keyInfo[i])
-		fmt.Fprintf(w, "  %s %s\n", strings.ToUpper(strings.TrimPrefix(k.PublicKey().Type(), "ssh-")), hostkey.Fingerprint(k.PublicKey()))
-		fmt.Fprintf(w, "  known_hosts: %s\n", hostkey.KnownHostsLine(host, port, k.PublicKey()))
+	for _, k := range b.keys {
+		info := k.cur.path
+		if k.cur.generated {
+			info += " (generated, 0600)"
+		}
+		fmt.Fprintf(w, "host key: %s\n", info)
+		fmt.Fprintf(w, "  %s\n", keyLabel(k.cur.pub))
+		fmt.Fprintf(w, "  known_hosts: %s\n", hostkey.KnownHostsLine(host, port, k.cur.pub))
+		if k.cur.cert != nil {
+			fmt.Fprintf(w, "  certificate: %s\n", describeCert(k.cur.cert))
+		}
+		if k.next != nil {
+			fmt.Fprintf(w, "  next key: %s (announced; used for key exchange after rotate --finish)\n", k.next.path)
+			fmt.Fprintf(w, "    %s\n", keyLabel(k.next.pub))
+			fmt.Fprintf(w, "    known_hosts: %s\n", hostkey.KnownHostsLine(host, port, k.next.pub))
+			if k.next.cert != nil {
+				fmt.Fprintf(w, "    certificate: %s\n", describeCert(k.next.cert))
+			}
+		}
+		if k.old != nil {
+			fmt.Fprintf(w, "  previous key: %s (announced until rotate --retire)\n", k.old.path)
+			fmt.Fprintf(w, "    %s\n", keyLabel(k.old.pub))
+		}
 	}
 	user := "<user>"
 	if z := b.c.AnyUser; z != nil {

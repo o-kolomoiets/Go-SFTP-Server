@@ -4,6 +4,7 @@
 package hostkey
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -70,7 +71,13 @@ func Generate(path string) (ssh.Signer, error) { return GenerateType(path, TypeE
 // GenerateType creates a new host key of type typ at path with mode 0600,
 // plus a "<path>.pub" public key, and returns the signer. It never
 // overwrites an existing key file.
-func GenerateType(path, typ string) (ssh.Signer, error) {
+func GenerateType(path, typ string) (ssh.Signer, error) { return GenerateWith(path, typ, nil) }
+
+// GenerateWith is GenerateType; prepare, if not nil, is called with each
+// new file before it is moved into place, to set its owner. The key is
+// written to a temporary file and linked into place, so that no one reads
+// half a key.
+func GenerateWith(path, typ string, prepare func(string) error) (ssh.Signer, error) {
 	var (
 		priv crypto.Signer
 		err  error
@@ -95,33 +102,91 @@ func GenerateType(path, typ string) (ssh.Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	// O_EXCL: never clobber an existing key and never follow a planted symlink.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := writePEM(&buf, block); err != nil {
 		return nil, err
 	}
-	if err := writePEM(f, block); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
+	if err := writeNew(path, buf.Bytes(), 0o600, prepare); err != nil {
 		return nil, err
 	}
 	signer, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
 		return nil, err
 	}
-	pub := ssh.MarshalAuthorizedKey(signer.PublicKey())
-	if err := os.WriteFile(path+".pub", pub, 0o644); err != nil { //nolint:gosec // G306: public keys are meant to be world-readable
+	if err := WritePublic(path, signer.PublicKey(), prepare); err != nil {
 		return nil, err
 	}
 	return restrictRSA(signer)
 }
 
+// WritePublic writes "<path>.pub" for key, replacing the file.
+func WritePublic(path string, key ssh.PublicKey, prepare func(string) error) error {
+	tmp, err := writeTemp(path+".pub", ssh.MarshalAuthorizedKey(key), 0o644, prepare)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path+".pub"); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return SyncDir(filepath.Dir(path))
+}
+
+// writeNew creates path with data, failing if it exists. It never follows
+// a planted symlink: the data goes to a new temporary file, which is then
+// linked to path.
+func writeNew(path string, data []byte, mode os.FileMode, prepare func(string) error) error {
+	tmp, err := writeTemp(path, data, mode, prepare)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		// A filesystem without hard links: check, then rename.
+		if _, serr := os.Lstat(path); serr == nil {
+			return &fs.PathError{Op: "create", Path: path, Err: fs.ErrExist}
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return err
+		}
+	}
+	return SyncDir(filepath.Dir(path))
+}
+
+// writeTemp writes data to a new temporary file next to path and returns
+// its name.
+func writeTemp(path string, data []byte, mode os.FileMode, prepare func(string) error) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	err = f.Chmod(mode)
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && prepare != nil {
+		err = prepare(tmp)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
+}
+
 // LoadOrGenerate loads the key at path, generating it first if it does not
-// exist. generated reports whether a new key was created.
+// exist (nor its next or previous key). generated reports whether a new key
+// was created.
 func LoadOrGenerate(path string) (signer ssh.Signer, generated bool, err error) {
 	signer, err = Load(path)
 	if err == nil {
@@ -129,6 +194,13 @@ func LoadOrGenerate(path string) (signer ssh.Signer, generated bool, err error) 
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, false, err
+	}
+	// A missing key next to a next or previous key is a mistake, not a
+	// first start: a new random key would change the server's identity.
+	for _, f := range []string{Next(path), Old(path)} {
+		if exists(f) {
+			return nil, false, fmt.Errorf("%s does not exist, but %s does; a host key is generated only when neither exists", path, f)
+		}
 	}
 	signer, err = Generate(path)
 	return signer, err == nil, err

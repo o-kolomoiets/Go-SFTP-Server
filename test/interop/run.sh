@@ -532,6 +532,126 @@ fi
 cp "$C/revoked.txt" "$C/revoked"
 hup || fail "reload with the text revocation list"
 
+# --- host key rotation and host certificates (ADR 0008) -----------------------
+H="$WORK/hk"
+mkdir -p "$H/data" "$H/state"
+HPORT=$((20000 + RANDOM % 20000))
+[ "$HPORT" != "$PORT" ] || HPORT=$((HPORT + 1))
+ssh-keygen -q -t ed25519 -N '' -f "$H/state/ed25519"
+ssh-keygen -q -t rsa -b 3072 -N '' -f "$H/state/rsa"
+cat >"$H/gosftpd.toml" <<TOML
+config_version = 1
+[server]
+listen = ["127.0.0.1:$HPORT"]
+host_keys = ["$H/state/ed25519", "$H/state/rsa"]
+[mounts.data]
+path = "$H/data"
+[users.admin]
+authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
+access = { data = "full" }
+[audit]
+output = "$H/audit.jsonl"
+TOML
+chmod 600 "$H/gosftpd.toml"
+"$WORK/gosftpd" serve --config "$H/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$H/server.log" &
+HK_PID=$!
+PIDS+=("$HK_PID")
+for _ in $(seq 100); do
+	if (exec 3<>"/dev/tcp/127.0.0.1/$HPORT") 2>/dev/null; then break; fi
+	sleep 0.1
+done
+hk_hup() { # hk_hup: SIGHUP the host key server and wait for its server.reload event
+	local n
+	n=$(grep -c '"event":"server.reload"' "$H/audit.jsonl" || true)
+	kill -HUP "$HK_PID"
+	for _ in $(seq 100); do
+		[ "$(grep -c '"event":"server.reload"' "$H/audit.jsonl" || true)" -gt "$n" ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+fp() { ssh-keygen -lf "$1" | awk '{print $2}'; }
+# knows FILE KEY.pub: the known_hosts file FILE has KEY for the server.
+knows() { ssh-keygen -l -F "[127.0.0.1]:$HPORT" -f "$1" 2>/dev/null | grep -q "$(fp "$2")"; }
+# hk_sftp KNOWN_HOSTS [OPTIONS...]: an sftp session that keeps known_hosts up to date.
+hk_sftp() {
+	local kh=$1
+	shift
+	sftp -P "$HPORT" -o "UserKnownHostsFile=$kh" -o StrictHostKeyChecking=yes -o UpdateHostKeys=yes \
+		-o IdentitiesOnly=yes -o BatchMode=yes -i "$WORK/id_admin" "$@" -b "$C/pwd.batch" admin@127.0.0.1
+}
+known_line() { echo "[127.0.0.1]:$HPORT $(cut -d' ' -f1,2 "$1")"; }
+known_line "$H/state/ed25519.pub" >"$H/kh_ed"
+known_line "$H/state/rsa.pub" >"$H/kh_rsa"
+
+# ed25519: the next key is learned before it is used, the old one forgotten after --retire.
+"$WORK/gosftpd" hostkey rotate --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/rotate.out" &&
+	pass "hostkey rotate: next key created" || fail "hostkey rotate: $(cat "$H/rotate.out")"
+hk_hup || fail "reload after hostkey rotate"
+hk_sftp "$H/kh_ed" >"$H/sftp1.out" 2>&1 || fail "host keys: sftp during the rotation: $(cat "$H/sftp1.out")"
+knows "$H/kh_ed" "$H/state/ed25519.next.pub" && pass "host keys: OpenSSH learned the next key (UpdateHostKeys)" ||
+	fail "host keys: the next key is not in known_hosts: $(cat "$H/kh_ed")"
+grep -q '"event":"conn.hostkeys_proved"' "$H/audit.jsonl" && pass "host keys: the proof is audited" || fail "host keys: no conn.hostkeys_proved"
+cp "$H/state/ed25519.pub" "$H/old_ed25519.pub"
+"$WORK/gosftpd" hostkey rotate --finish --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/finish.out" ||
+	fail "hostkey rotate --finish: $(cat "$H/finish.out")"
+hk_hup || fail "reload after --finish"
+hk_sftp "$H/kh_ed" -o HostKeyAlgorithms=ssh-ed25519 >"$H/sftp2.out" 2>&1 &&
+	pass "host keys: after --finish the new key is accepted without a prompt" || fail "host keys: after --finish: $(cat "$H/sftp2.out")"
+knows "$H/kh_ed" "$H/old_ed25519.pub" && pass "host keys: the previous key stays until --retire" || fail "host keys: the previous key was dropped early"
+"$WORK/gosftpd" hostkey rotate --retire --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >/dev/null || fail "hostkey rotate --retire"
+hk_hup || fail "reload after --retire"
+hk_sftp "$H/kh_ed" >/dev/null 2>&1 || fail "host keys: sftp after --retire"
+if knows "$H/kh_ed" "$H/old_ed25519.pub"; then fail "host keys: the retired key is still in known_hosts"; else pass "host keys: OpenSSH forgot the retired key"; fi
+
+# RSA, with rsa-sha2-256 negotiated: proofs must use the same hash. A single
+# command also checks that a short session waits for the proof.
+"$WORK/gosftpd" hostkey rotate --config "$H/gosftpd.toml" --host-key "$H/state/rsa" >/dev/null || fail "hostkey rotate (rsa)"
+hk_hup || fail "reload after hostkey rotate (rsa)"
+hk_sftp "$H/kh_rsa" -o HostKeyAlgorithms=rsa-sha2-256 >"$H/sftp3.out" 2>&1 || fail "host keys: sftp with rsa-sha2-256: $(cat "$H/sftp3.out")"
+knows "$H/kh_rsa" "$H/state/rsa.next.pub" && pass "host keys: an RSA next key is learned with rsa-sha2-256" ||
+	fail "host keys: the RSA next key is not in known_hosts: $(cat "$H/kh_rsa")"
+"$WORK/gosftpd" hostkey rotate --abort --config "$H/gosftpd.toml" --host-key "$H/state/rsa" >/dev/null || fail "hostkey rotate --abort"
+
+# Host certificates: a client that trusts only the CA connects.
+ssh-keygen -q -t ed25519 -N '' -C host_ca -f "$WORK/host_ca"
+ssh-keygen -q -s "$WORK/host_ca" -h -I gosftpd -n 127.0.0.1 -V -5m:+1h "$H/state/ed25519.pub"
+sed -i 's|^host_keys = .*|&\nhost_certificates = true|' "$H/gosftpd.toml"
+hk_hup || fail "reload with host_certificates"
+echo "@cert-authority [127.0.0.1]:$HPORT $(cut -d' ' -f1,2 "$WORK/host_ca.pub")" >"$H/kh_ca"
+hk_sftp "$H/kh_ca" -o UpdateHostKeys=no >"$H/sftp4.out" 2>&1 && pass "host certificate: a client that trusts the CA connects" ||
+	fail "host certificate: $(cat "$H/sftp4.out")"
+known_line "$H/state/ed25519.pub" >"$H/kh_plain"
+hk_sftp "$H/kh_plain" -o UpdateHostKeys=no >/dev/null 2>&1 && pass "host certificate: OpenSSH that knows the plain key still connects" ||
+	fail "host certificate: OpenSSH with the plain key"
+if "$PYTHON" -c 'import paramiko' 2>/dev/null; then
+	"$PYTHON" - "$HPORT" "$H/kh_plain" "$WORK/id_admin" <<'PY' && pass "host certificate: paramiko with the plain key connects" || fail "host certificate: paramiko with the plain key"
+import sys, paramiko
+port, kh, key = sys.argv[1], sys.argv[2], sys.argv[3]
+c = paramiko.SSHClient()
+c.load_host_keys(kh)
+c.set_missing_host_key_policy(paramiko.RejectPolicy())
+c.connect("127.0.0.1", port=int(port), username="admin", key_filename=key, allow_agent=False, look_for_keys=False, timeout=10)
+c.open_sftp().listdir(".")
+c.close()
+PY
+else
+	missing paramiko
+fi
+if command -v "$RCLONE" >/dev/null 2>&1; then
+	hk_remote=":sftp,host=127.0.0.1,port=$HPORT,user=admin,key_file=$WORK/id_admin,known_hosts_file=$H/kh_plain,shell_type=none"
+	if "$RCLONE" --config /dev/null --retries 1 --low-level-retries 1 lsd "$hk_remote:" >/dev/null 2>"$H/rclone.err"; then
+		fail "host certificate: rclone pinned to the plain key connected; the documented breakage is gone, update the docs"
+	else
+		grep -q 'no authorities for hostname' "$H/rclone.err" && pass "host certificate: rclone pinned to the plain key fails as documented" ||
+			fail "host certificate: rclone failed otherwise: $(tail -2 "$H/rclone.err")"
+	fi
+	"$RCLONE" --config /dev/null --retries 1 --low-level-retries 1 lsd "$hk_remote,host_key_algorithms=ssh-ed25519:" >/dev/null 2>"$H/rclone2.err" &&
+		pass "host certificate: rclone with host_key_algorithms connects" || fail "host certificate: rclone with host_key_algorithms: $(tail -2 "$H/rclone2.err")"
+else
+	missing rclone
+fi
+
 # An invalid configuration is refused; the running one stays.
 printf '[server\n' >>"$C/gosftpd.toml"
 errors=$(reload_errors)
@@ -548,6 +668,7 @@ sftp -P "$PORT" $(as newbie) -b "$C/newbie.batch" newbie@127.0.0.1 >/dev/null 2>
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"
 	echo "--- server log (config)"; cat "$C/server.log"
+	echo "--- server log (host keys)"; cat "$WORK/hk/server.log"
 	exit 1
 fi
 echo "all interop checks passed ($(ssh -V 2>&1))"
