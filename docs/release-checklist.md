@@ -49,7 +49,16 @@ note in the CHANGELOG.
    `gosftpd version` must print `vX.Y.Z` and the commit of the tag.
 8. `go list -m github.com/o-kolomoiets/go-sftp-server@vX.Y.Z` finds the
    version through the Go module proxy.
-9. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
+9. In `README.md`, replace every mention of the previous release and of the
+   next one (`grep -n 'v0\.[0-9]' README.md`): the install commands and the
+   quick-start comment, the "Released and on its way" and Roadmap tables,
+   what the page says is only on `main`, the links to the docs at the
+   release tag (`blob/vX.Y.Z/docs/...`), and "to hear when vX ships". With
+   the binary from the release archive, capture the banner, the
+   partner-inbox `sftp` transcript and its audit event again, and record
+   `docs/assets/demo.gif` again with `docs/assets/record-demo.py` and `agg`,
+   as its docstring says.
+10. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
 
 ## Patch releases
 
