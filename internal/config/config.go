@@ -47,6 +47,7 @@ type Config struct {
 	Log           Log               `toml:"log"`
 	Audit         Audit             `toml:"audit"`
 	Reload        Reload            `toml:"reload"`
+	Metrics       Metrics           `toml:"metrics"`
 
 	// File is the file the configuration was loaded from, "" when it was
 	// built from command-line flags. Files lists File and every included
@@ -217,6 +218,15 @@ type Audit struct {
 	OnError string   `toml:"on_error"`
 }
 
+// Metrics is the [metrics] table: the admin listener (ADR 0009).
+type Metrics struct {
+	// Listen is the address of the HTTP listener with /metrics, /healthz
+	// and /readyz; empty means none. It changes only at restart.
+	Listen string `toml:"listen"`
+	// Pprof serves /debug/pprof there, in binaries built with -tags pprof.
+	Pprof bool `toml:"pprof"`
+}
+
 // Audit error modes (decision D20).
 const (
 	AuditFailClosed = "fail-closed"
@@ -299,6 +309,7 @@ type fileConfig struct {
 	Log           Log                       `toml:"log"`
 	Audit         Audit                     `toml:"audit"`
 	Reload        Reload                    `toml:"reload"`
+	Metrics       Metrics                   `toml:"metrics"`
 }
 
 // includeFile is what an included file may contain.
@@ -345,6 +356,7 @@ func Load(path string) (*Config, error) {
 		Log:           raw.Log,
 		Audit:         raw.Audit,
 		Reload:        raw.Reload,
+		Metrics:       raw.Metrics,
 		File:          abs,
 		Files:         []string{abs},
 		defined:       map[string]bool{},

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package sftpd adapts github.com/pkg/sftp's request server to the VFS:
-// it enforces the handle limit, maps errors to fixed client messages and
-// writes audit events.
+// it enforces the handle limit, maps errors to fixed client messages,
+// writes audit events and counts operations.
 package sftpd
 
 import (
@@ -19,6 +19,7 @@ import (
 	"github.com/pkg/sftp"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
+	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -58,17 +59,19 @@ type Handler struct {
 	s          *vfs.Session
 	audit      *audit.Logger
 	log        *slog.Logger
+	metrics    *obs.Metrics
 	maxHandles int32
 	open       atomic.Int32
 }
 
-// New returns a handler for the session. maxHandles <= 0 means DefaultMaxHandles.
-func New(s *vfs.Session, al *audit.Logger, log *slog.Logger, maxHandles int) *Handler {
+// New returns a handler for the session; m may be nil. maxHandles <= 0
+// means DefaultMaxHandles.
+func New(s *vfs.Session, al *audit.Logger, log *slog.Logger, m *obs.Metrics, maxHandles int) *Handler {
 	setExtensions()
 	if maxHandles <= 0 {
 		maxHandles = DefaultMaxHandles
 	}
-	return &Handler{s: s, audit: al, log: log, maxHandles: int32(min(maxHandles, 1<<20))}
+	return &Handler{s: s, audit: al, log: log, metrics: m, maxHandles: int32(min(maxHandles, 1<<20))}
 }
 
 // Handlers returns the pkg/sftp handler set.
@@ -86,14 +89,26 @@ func (h *Handler) acquire() bool {
 
 func (h *Handler) release() { h.open.Add(-1) }
 
-// fail maps err for the client, logs the original, and audits denials.
+// fail ends a failed operation: it maps err for the client, logs the
+// original, audits a denial and counts the operation.
 func (h *Handler) fail(op, path string, err error) error {
+	result, st := h.refuse(op, path, err)
+	h.metrics.Operation(op, result)
+	if errors.Is(err, vfs.ErrConflict) {
+		h.metrics.Conflict(op, "rejected")
+	}
+	return st
+}
+
+// refuse maps err for the client, logs the original and audits a denial;
+// the operation goes on (a refused write of an upload).
+func (h *Handler) refuse(op, path string, err error) (string, error) {
 	result, st := toStatus(err)
 	h.log.Debug("sftp request failed", "op", op, "path", path, "err", err)
 	if result == "denied" {
 		h.audit.Event("fs.denied", slog.String("op", op), slog.String("path", path), slog.String("reason", st.Error()), slog.String("result", "denied"))
 	}
-	return st
+	return result, st
 }
 
 // Fileread implements sftp.FileReader.
@@ -163,6 +178,7 @@ func (h *Handler) Filecmd(r *sftp.Request) error {
 		return h.fail(op, r.Filepath, err)
 	}
 	h.audit.Event(op, append(attrs, slog.String("result", "ok"))...)
+	h.metrics.Operation(op, "ok")
 	return nil
 }
 
@@ -183,6 +199,8 @@ func (h *Handler) PosixRename(r *sftp.Request) error {
 		attrs = append(attrs, slog.String("version_path", m.Version))
 	}
 	h.audit.Event("fs.rename", append(attrs, slog.String("result", "ok"))...)
+	h.metrics.Operation("fs.rename", "ok")
+	h.metrics.Conflict("fs.rename", m.Conflict)
 	return nil
 }
 
@@ -221,6 +239,7 @@ func (h *Handler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 			return nil, h.fail("fs.list", r.Filepath, err)
 		}
 		h.audit.Event("fs.list", slog.String("path", r.Filepath), slog.String("result", "ok"))
+		h.metrics.Operation("fs.list", "ok")
 		return &lister{Lister: l, h: h}, nil
 	case "Stat":
 		return h.stat(r.Filepath, h.s.Stat)
@@ -258,6 +277,7 @@ func (h *Handler) StatVFS(r *sftp.Request) (*sftp.StatVFS, error) {
 	if err != nil {
 		return nil, h.fail("fs.statvfs", r.Filepath, err)
 	}
+	h.metrics.Operation("fs.statvfs", "ok")
 	const stRdonly, stNosuid = 0x1, 0x2 // statvfs f_flag bits
 	flag := uint64(stNosuid)
 	if st.ReadOnly {
@@ -284,6 +304,7 @@ func (h *Handler) stat(p string, fn func(string) (os.FileInfo, error)) (sftp.Lis
 		return nil, h.fail("fs.stat", p, err)
 	}
 	h.audit.Event("fs.stat", slog.String("path", p), slog.String("result", "ok"))
+	h.metrics.Operation("fs.stat", "ok")
 	return statLister{ownedInfo{fi}}, nil
 }
 

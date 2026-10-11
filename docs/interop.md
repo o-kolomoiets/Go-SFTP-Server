@@ -9,6 +9,7 @@ change. Tested:
 | paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users, password login, user name change within a connection refused; the plain host key while a host certificate is served |
 | rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount; with a host certificate served, `known_hosts_file` with the plain key fails and `host_key_algorithms` fixes it |
 | lftp | 4.9.2 | put, get, listing |
+| promtool | 3.5.0 | `promtool check metrics` on the `/metrics` output of a server that served the clients above |
 
 WinSCP, FileZilla and Cyberduck are not tested automatically yet; WinSCP has
 a manual checklist below.

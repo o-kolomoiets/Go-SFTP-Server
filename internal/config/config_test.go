@@ -1469,3 +1469,69 @@ read_only = true
 		t.Error("CheckFSReload() checks the mode of the previous key; the loader does that on reload")
 	}
 }
+
+// [metrics] (ADR 0009): the address must be HOST:PORT; anything that is
+// not loopback is a warning; pprof needs the build tag.
+func TestValidateMetrics(t *testing.T) {
+	t.Parallel()
+
+	base := "config_version = 1\n[mounts.m]\npath = \"{dir}/m\"\n[users.u]\nauthorized_keys = [\"" + pubKey(t) + "\"]\naccess = { m = \"read\" }\n[server]\nlisten = [\":2022\"]\nhost_keys = [\"k\"]\n[metrics]\n"
+	for _, tt := range []struct {
+		metrics string
+		err     string
+		warn    string
+	}{
+		{`listen = ""`, "", ""},
+		{`listen = "127.0.0.1:9090"`, "", ""},
+		{`listen = "[::1]:9090"`, "", ""},
+		{`listen = "localhost:9090"`, "", ""},
+		{`listen = "127.0.0.1:0"`, "", ""},
+		{`listen = ":9090"`, "", "metrics.listen: \":9090\" is not a loopback address"},
+		{`listen = "0.0.0.0:9090"`, "", "not a loopback address"},
+		{`listen = "192.0.2.1:9090"`, "", "no authentication or TLS"},
+		{`listen = "metrics.internal:9090"`, "", ""}, // checked when bound
+		{`listen = "unix:/run/gosftpd.sock"`, "Unix sockets are not supported", ""},
+		{`listen = "9090"`, "want HOST:PORT", ""},
+		{`listen = "127.0.0.1:99999"`, "invalid port", ""},
+		{`listen = ":2022"`, "also in server.listen", ""},
+		{`pprof = true`, map[bool]string{true: "", false: "built without pprof"}[pprofBuilt], "metrics.pprof: has no effect without metrics.listen"},
+	} {
+		c, _ := load(t, base+tt.metrics+"\n")
+		warns, err := c.Validate()
+		switch {
+		case tt.err == "" && err != nil:
+			t.Errorf("%s: %v", tt.metrics, err)
+		case tt.err != "" && (err == nil || !strings.Contains(err.Error(), tt.err)):
+			t.Errorf("%s: error %v, want %q", tt.metrics, err, tt.err)
+		}
+		w := strings.Join(warns, "\n")
+		if tt.warn == "" && strings.Contains(w, "metrics") || tt.warn != "" && !strings.Contains(w, tt.warn) {
+			t.Errorf("%s: warnings %q, want %q", tt.metrics, w, tt.warn)
+		}
+	}
+	if !pprofBuilt {
+		return
+	}
+	c, _ := load(t, base+"listen = \"127.0.0.1:9090\"\npprof = true\n")
+	if w := strings.Join(mustValidate(t, c), "\n"); !strings.Contains(w, "metrics.pprof: /debug/pprof shows process internals") {
+		t.Errorf("pprof on: warnings %q", w)
+	}
+}
+
+func TestReadListen(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "config_version = 99\ninclude = [\"missing/*.toml\"]\n[server]\nlisten = [\"127.0.0.1:1\", \":2\"]\nbogus = 1\n[nonsense]\nx = \"y\"\n")
+	if got, err := ReadListen(path); err != nil || len(got) != 2 || got[0] != "127.0.0.1:1" {
+		t.Errorf("ReadListen = %v, %v", got, err)
+	}
+	path = writeConfig(t, dir, "config_version = 1\n")
+	if got, err := ReadListen(path); err != nil || got != nil {
+		t.Errorf("without server.listen: %v, %v", got, err)
+	}
+	path = writeConfig(t, dir, "[server]\nlisten = \"127.0.0.1:1\"\n")
+	if _, err := ReadListen(path); err == nil {
+		t.Error("a string listen was accepted")
+	}
+}

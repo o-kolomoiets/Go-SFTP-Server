@@ -48,6 +48,7 @@ func startServe(t *testing.T, args ...string) *testServer {
 		}
 		select {
 		case code := <-ts.done:
+			ts.cancel, ts.done = nil, nil // stop must not wait for it again
 			t.Fatalf("serve exited with %d:\n%s", code, ts.stderr.String())
 		default:
 		}

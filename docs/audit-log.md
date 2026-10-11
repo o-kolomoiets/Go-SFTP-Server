@@ -36,12 +36,12 @@ never host paths. Strings from clients are JSON-escaped.
 
 | Event | Category | Fields |
 |---|---|---|
-| `server.start` | server | `version`, `listen` |
+| `server.start` | server | `version`, `listen`; `metrics_listen` with an admin listener ([metrics.md](metrics.md)) |
 | `server.reload` | server | `result` (`ok` or `error`), `duration_ms`; on error `reason`: `config` (the configuration cannot be read or is invalid), `mounts` or `audit_output` (the new `audit.output` cannot be opened); on success `restart_required` (comma-separated keys that changed but apply only at restart) and `disconnected` (connections closed by `reload.disconnect_removed_users`). The error itself goes to the operational log, since it can name host paths |
 | `server.stop` | server | |
 | `server.audit_recovered` | server | written when the log works again after a failure |
 | `conn.reject` | conn | `reason`: `banned`, `max_connections`, `max_connections_per_ip` or `max_preauth_connections`; `suppressed` (see below) |
-| `conn.accept` | conn | `client_version` (after the client sent its version line) |
+| `conn.accept` | conn | `client_version`; written after the key exchange, when the client starts to authenticate |
 | `conn.close` | conn | `duration_ms`, `result` (`ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked`: a reload refused the login, or closed the connection with `reload.disconnect_removed_users`) |
 | `conn.hostkeys_proved` | conn | `key_fps` (comma-separated SHA256 fingerprints): the client asked the server to prove that it holds these host keys, which it did not know, and it now adds them to `known_hosts` (OpenSSH `UpdateHostKeys`; see [Host keys](configuration.md#host-keys)). During a rotation, it shows which users' clients learned the next key |
 | `auth.success` | auth | `auth_method` (`publickey` or `password`), `key_fp` (SHA256 fingerprint, public keys only; for a certificate, of the certified key, as `ssh-keygen -lf` prints it for the user's key), `failed_attempts`; for a certificate also `cert_key_id` (its key ID, `ssh-keygen -I`, at most 256 bytes), `cert_serial` (a decimal string: serials are 64-bit, more than many JSON parsers keep exactly, above 2^53) and `cert_ca_fp` (the SHA256 fingerprint of its CA) |
@@ -64,19 +64,24 @@ does an upload through a temporary file that the conflict policy refuses when
 it is closed (see [Atomic uploads](configuration.md#atomic-uploads)); its
 temporary file is removed.
 
-Connections that close before sending an SSH version line (health checks,
-port scanners) are not audited. Refused connections (`conn.reject`) are
-logged at most 10 per second; the next `conn.reject` written reports how
-many were left out in `suppressed`.
+Connections that end before they start to authenticate (health checks,
+port scanners, `ssh-keyscan`, clients without a common algorithm) are not
+audited; the metric `gosftpd_connections_total` counts them as `no_version`
+or `handshake_failed` ([metrics.md](metrics.md)). Refused connections
+(`conn.reject`) are logged at most 10 per second; the next `conn.reject`
+written reports how many were left out in `suppressed`.
 
 ## When the log cannot be written
 
 With `on_error = "fail-closed"` (default), a write error (disk full, closed
 pipe) makes gosftpd refuse new connections and every changing operation until
-a probe write succeeds; it tries every 5 seconds and then writes
-`server.audit_recovered`. Transfers already running finish, and their events
+a probe write succeeds; it tries every 5 seconds, also while no client
+connects, and then writes `server.audit_recovered`. Meanwhile `/readyz` on
+the admin listener answers 503 `audit_unavailable`, and the metric
+`gosftpd_audit_log_failing` is 1. Transfers already running finish, and their events
 go to stderr. With `on_error = "fail-open"` gosftpd keeps serving and writes
-every event that could not be stored to stderr.
+every event that could not be stored to stderr; it retries every 5 seconds
+too, so that `gosftpd_audit_log_failing` returns to 0 on a quiet server.
 
 ## Rotation
 

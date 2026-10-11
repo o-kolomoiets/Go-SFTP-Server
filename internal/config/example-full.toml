@@ -106,3 +106,9 @@ on_error = "fail-closed"                # fail-closed: refuse uploads and logins
 # kill -HUP (systemctl reload) applies this file again without a restart.
 [reload]
 disconnect_removed_users = false        # true: close connections whose login the new configuration refuses
+
+# Admin listener: /metrics (Prometheus), /healthz, /readyz. No authentication
+# or TLS: keep it on loopback or a private network.
+[metrics]
+listen = ""                             # e.g. "127.0.0.1:9090"; empty: off; restart only
+pprof = false                           # /debug/pprof, only in binaries built with -tags pprof

@@ -149,6 +149,8 @@ COURIER_PASSWORD='correct horse battery staple'
 COURIER_HASH=$(printf '%s\n' "$COURIER_PASSWORD" | "$WORK/gosftpd" user hash-password --stdin)
 printf '#!/bin/sh\necho "%s"\n' "$COURIER_PASSWORD" >"$WORK/askpass"; chmod 700 "$WORK/askpass"
 PORT=$((20000 + RANDOM % 20000))
+while [ "$PORT" = "$OVERWRITE_PORT" ] || [ $((PORT + 1)) = "$OVERWRITE_PORT" ]; do PORT=$((PORT + 2)); done
+MPORT=$((PORT + 1)) # the admin listener
 cat >"$C/gosftpd.toml" <<TOML
 config_version = 1
 include = ["users.d/*.toml"]
@@ -201,6 +203,9 @@ methods = ["publickey", "password"]
 
 [audit]
 output = "$C/audit.jsonl"
+
+[metrics]
+listen = "127.0.0.1:$MPORT"
 TOML
 chmod 600 "$C/gosftpd.toml"
 "$WORK/gosftpd" config validate --check-fs --config "$C/gosftpd.toml" >/dev/null && pass "config validate --check-fs" || fail "config validate"
@@ -537,7 +542,7 @@ hup || fail "reload with the text revocation list"
 H="$WORK/hk"
 mkdir -p "$H/data" "$H/state"
 HPORT=$((20000 + RANDOM % 20000))
-while [ "$HPORT" = "$PORT" ] || [ "$HPORT" = "$OVERWRITE_PORT" ]; do HPORT=$((HPORT + 1)); done
+while [ "$HPORT" = "$PORT" ] || [ "$HPORT" = "$MPORT" ] || [ "$HPORT" = "$OVERWRITE_PORT" ]; do HPORT=$((HPORT + 1)); done
 ssh-keygen -q -t ed25519 -N '' -f "$H/state/ed25519"
 ssh-keygen -q -t rsa -b 3072 -N '' -f "$H/state/rsa"
 cat >"$H/gosftpd.toml" <<TOML
@@ -658,6 +663,41 @@ else
 	missing rclone
 fi
 
+# --- admin listener, metrics and healthcheck (ADR 0009) ----------------------
+PROMTOOL=${PROMTOOL:-promtool}
+M="http://127.0.0.1:$MPORT"
+metric() { # metric SERIES: its value in $C/metrics.txt, or nothing
+	awk -v s="$1" '$1 == s { print $2 }' "$C/metrics.txt"
+}
+curl -fsS "$M/metrics" >"$C/metrics.txt" && pass "metrics: /metrics answers" || fail "metrics: /metrics"
+if command -v "$PROMTOOL" >/dev/null 2>&1; then
+	"$PROMTOOL" check metrics <"$C/metrics.txt" >"$C/promtool.out" 2>&1 && pass "metrics: promtool check metrics" ||
+		fail "metrics: promtool check metrics: $(head -5 "$C/promtool.out")"
+else
+	missing promtool
+fi
+[ "$(metric 'gosftpd_logins_total{result="success"}')" -gt 0 ] && [ "$(metric 'gosftpd_sftp_operations_total{op="upload",result="ok"}')" -gt 0 ] &&
+	[ "$(metric 'gosftpd_config_reloads_total{result="ok"}')" -gt 0 ] && [ "$(metric 'gosftpd_transfer_bytes_total{direction="download"}')" -gt 0 ] &&
+	pass "metrics: logins, uploads, reloads and bytes are counted" || fail "metrics: counters: $(grep -v '^#' "$C/metrics.txt" | grep -v ' 0$' | head -30)"
+grep -Eq '^gosftpd_(.*)\{[^}]*(alice|admin|partner|127\.0\.0\.1|/)' "$C/metrics.txt" && fail "metrics: a label holds a user, an address or a path" || pass "metrics: no user, address or path in labels"
+[ "$(curl -fsS "$M/healthz")" = ok ] && [ "$(curl -fsS "$M/readyz")" = ready ] && pass "metrics: /healthz and /readyz" || fail "metrics: /healthz or /readyz"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: rebind.example' "$M/metrics")" = 421 ] && pass "metrics: a foreign Host header gets 421" || fail "metrics: Host check"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$M/metrics")" = 405 ] && pass "metrics: POST gets 405" || fail "metrics: POST"
+
+accepts=$(grep -c '"event":"conn.accept"' "$C/audit.jsonl")
+no_version=$(metric 'gosftpd_connections_total{result="no_version"}')
+"$WORK/gosftpd" healthcheck --config "$C/gosftpd.toml" >"$C/hc.out" 2>&1 && grep -q "^ok: 127.0.0.1:$PORT sent an SSH banner" "$C/hc.out" &&
+	pass "healthcheck: the SSH banner of server.listen" || fail "healthcheck: $(cat "$C/hc.out")"
+GOSFTPD_LISTEN="127.0.0.1:$PORT" "$WORK/gosftpd" healthcheck --ready >/dev/null 2>&1 && pass "healthcheck: \$GOSFTPD_LISTEN with --ready" || fail "healthcheck: GOSFTPD_LISTEN"
+"$WORK/gosftpd" healthcheck --url "$M/readyz" >/dev/null 2>&1 && pass "healthcheck --url /readyz" || fail "healthcheck --url"
+set +e; "$WORK/gosftpd" healthcheck --address 127.0.0.1:1 --timeout 2s >/dev/null 2>"$C/hc.err"; code=$?; set -e
+[ "$code" = 1 ] && [ "$(wc -l <"$C/hc.err")" = 1 ] && pass "healthcheck: no server is exit 1 with one line" || fail "healthcheck: no server: exit $code: $(cat "$C/hc.err")"
+set +e; "$WORK/gosftpd" healthcheck --bogus >/dev/null 2>&1; code=$?; set -e
+[ "$code" = 1 ] && pass "healthcheck: a usage error is exit 1, not 2" || fail "healthcheck: usage error exit $code"
+curl -fsS "$M/metrics" >"$C/metrics.txt" || true
+[ "$(grep -c '"event":"conn.accept"' "$C/audit.jsonl")" = "$accepts" ] && [ "$(metric 'gosftpd_connections_total{result="no_version"}')" -ge $((no_version + 2)) ] &&
+	pass "healthcheck: probes leave no audit event and count as no_version" || fail "healthcheck: probes audited or not counted"
+
 # An invalid configuration is refused; the running one stays.
 printf '[server\n' >>"$C/gosftpd.toml"
 errors=$(reload_errors)
@@ -670,6 +710,9 @@ rm -f "$C/newbie.got"
 # shellcheck disable=SC2046
 sftp -P "$PORT" $(as newbie) -b "$C/newbie.batch" newbie@127.0.0.1 >/dev/null 2>&1 && cmp -s "$C/public/readme.txt" "$C/newbie.got" &&
 	pass "reload: the running configuration stays after a failed reload" || fail "reload: failed reload changed the configuration"
+curl -fsS "$M/metrics" >"$C/metrics.txt" || true
+[ "$(metric gosftpd_config_last_reload_successful)" = 0 ] && [ "$(metric 'gosftpd_config_reloads_total{result="error"}')" -gt 0 ] &&
+	pass "metrics: a failed reload shows" || fail "metrics: failed reload not shown"
 
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"

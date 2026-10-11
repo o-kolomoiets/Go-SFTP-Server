@@ -170,14 +170,47 @@ func (l *Logger) Healthy() bool {
 	if !l.sink.probeDue() {
 		return false
 	}
-	l.sink.failed.Store(false)
-	l.l.Log(context.Background(), slog.LevelInfo, "audit", "schema", Schema, "event", "server.audit_recovered")
-	ok := !l.sink.failed.Load()
-	if ok {
-		l.fallback.Info("audit log recovered")
-	}
-	return ok
+	return l.probe()
 }
+
+// Recover retries a failing audit log now, in either mode, and reports
+// whether it works. It is for a loop that runs while no client connects:
+// a fail-open log is otherwise cleared only by the next event, and the
+// probes of Healthy are spaced from the last one.
+func (l *Logger) Recover() bool {
+	if !l.sink.failed.Load() {
+		return true
+	}
+	l.sink.mu.Lock()
+	l.sink.lastProbe = time.Now()
+	l.sink.mu.Unlock()
+	return l.probe()
+}
+
+// probe writes server.audit_recovered and, once it is written, clears the
+// failure; until then the log stays failing, also for readers in between.
+func (l *Logger) probe() bool {
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "audit", 0)
+	r.AddAttrs(slog.Int("schema", Schema), slog.String("event", "server.audit_recovered"))
+	if err := l.l.Handler().Handle(context.Background(), r); err != nil {
+		return false
+	}
+	l.sink.failed.Store(false)
+	l.fallback.Info("audit log recovered")
+	return true
+}
+
+// Available reports, without writing, whether the audit log lets the
+// server take connections: it is fail-open or its writes work.
+func (l *Logger) Available() bool { return l.sink.failOpen || !l.sink.failed.Load() }
+
+// Failing reports, without writing, whether the last write to the audit
+// output failed, in either mode.
+func (l *Logger) Failing() bool { return l.sink.failed.Load() }
+
+// WriteErrors returns how many writes to the audit output failed,
+// recovery probes included.
+func (l *Logger) WriteErrors() uint64 { return l.sink.errors.Load() }
 
 // Probe retries an unhealthy audit log at once instead of at the next
 // probe time, for example after its file was reopened. It reports whether
@@ -194,6 +227,7 @@ type sink struct {
 	w        io.Writer
 	failOpen bool // a later successful write clears the failure
 	failed   atomic.Bool
+	errors   atomic.Uint64
 
 	mu        sync.Mutex
 	lastProbe time.Time
@@ -207,6 +241,7 @@ func (s *sink) Write(p []byte) (int, error) {
 	switch {
 	case err != nil:
 		s.failed.Store(true)
+		s.errors.Add(1)
 	case s.failOpen:
 		s.failed.Store(false)
 	}

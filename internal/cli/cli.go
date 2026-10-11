@@ -36,6 +36,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		return exitOK
 	}
+	if he, ok := errors.AsType[healthError](err); ok {
+		fmt.Fprintln(stderr, he.msg) // exactly one line
+		return exitFailure
+	}
 	fmt.Fprintln(stderr, "Error:", err)
 	switch {
 	case errors.As(err, new(usageError)):
@@ -61,7 +65,7 @@ func newRootCmd() *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return usageError{err}
 	})
-	root.AddCommand(newVersionCmd(), newServeCmd(), newInitCmd(), newConfigCmd(), newUserCmd(), newHostkeyCmd())
+	root.AddCommand(newVersionCmd(), newServeCmd(), newInitCmd(), newConfigCmd(), newUserCmd(), newHostkeyCmd(), newHealthcheckCmd())
 	return root
 }
 

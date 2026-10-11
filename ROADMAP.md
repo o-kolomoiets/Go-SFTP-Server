@@ -78,7 +78,7 @@ The tasks are ordered; each takes from 30 minutes to 3 hours, 12–20 hours in t
 | Users | system accounts | DB (SQLite by default) and web admin | `users.conf` / `SFTP_USERS` | effectively one (several only via `--auth-proxy`) | virtual, in a TOML file |
 | Upload conflict | overwrite | overwrite; can be forbidden via the `overwrite` permission (the upload is then rejected); atomicity via `upload_mode`; no rename on conflict | overwrite | overwrite | `rename` / `reject` / `overwrite` / `version` |
 | Audit | syslog | extensive | OpenSSH syslog | rclone log | JSON Lines with a stable schema |
-| Size | part of the OS | 58 MB binary, default config of 447 lines and 368 keys | alpine image 9.2 MB (compressed) | full rclone | binary ≤ 10 MB, image ≤ 15 MB |
+| Size | part of the OS | 58 MB binary, default config of 447 lines and 368 keys | alpine image 9.2 MB (compressed) | full rclone | binary ≤ 12 MiB, image ≤ 15 MB |
 | Activity (as of 2026-10) | OpenSSH 10.6p1 (2026-10) | v2.7.6 (2026-09-18) | stagnant, 195 open issues | active | — |
 | Why it does not fit our niche | complex setup, no drop-box semantics | heavy, large web surface (CVEs), AGPL, open-core | stagnation, chroot limitations | not designed for multi-user file intake | young project (this is our risk) |
 
@@ -221,7 +221,7 @@ go-sftp-server/
 │   ├── sftpd/                   # pkg/sftp adapter: Handlers, error mapping, handle accounting, TransferError
 │   ├── vfs/                     # mount table, resolve(), operations via os.Root, conflict policy, permissions
 │   ├── audit/                   # event schema on top of log/slog
-│   ├── obs/                     # admin listener: /metrics, /healthz, /readyz (M4)
+│   ├── obs/                     # admin listener: /metrics, /healthz, /readyz, Prometheus text format (M4)
 │   ├── hooks/                   # exec and webhook (M4)
 │   ├── sandbox/                 # Landlock, sd_notify (M4)
 │   ├── testutil/                # AsyncConn, log sink with mutex (tests only)
@@ -235,7 +235,7 @@ go-sftp-server/
 ├── Dockerfile  .goreleaser.yaml  .golangci.yml  Makefile  ROADMAP.md  CHANGELOG.md
 ```
 
-Package dependency graph: `cli → config, server, hostkey, version`; `server → auth, sftpd, vfs, audit, config`; `auth → config`; `sftpd → vfs, audit`; `vfs → config`; from M4 also `server, sftpd → obs, hooks` and `server → sandbox`, `hooks → config`. There are no cycles; `main()` exists only in `cmd/gosftpd`.
+Package dependency graph: `cli → config, server, hostkey, version`; `server → auth, sftpd, vfs, audit, config`; `auth → config`; `sftpd → vfs, audit`; `vfs → config`; from M4 also `cli, server, sftpd → obs` (`obs` imports no gosftpd package), `server, sftpd → hooks`, `server → sandbox` and `hooks → config`. There are no cycles; `main()` exists only in `cmd/gosftpd`.
 
 ### 4.3 Key signatures
 
@@ -283,7 +283,7 @@ The `sftpd.fileHandler` type, a wrapper around `*vfs.Session`, implements `sftp.
 | A6 | Logs | `log/slog`; zap / zerolog | **`log/slog`**: an operational log to stderr (text/json) and a separate audit stream in JSON | stdlib. `slog.NewMultiHandler` appeared in Go 1.26. The audit log and the operational log have different consumers |
 | A7 | User model | Virtual users under one service account; OS system users | **Virtual** | No need for root, setuid or chown; a smaller attack surface |
 | A8 | Default authentication | publickey; password; keyboard-interactive | **publickey**; password opt-in from M3 (argon2id); certificates from M4 | A public SSH port is brute-forced all the time |
-| A9 | Metrics | Prometheus `client_golang` v1.24.1 (+2.6 MB); `VictoriaMetrics/metrics` v1.44.1 (+0.44 MB); OpenTelemetry (+12.4 MB) | **Opt-in Prometheus endpoint** (the owner picks the library, D12); **no OTel before 1.0** | The process makes no downstream calls, so traces give almost nothing |
+| A9 | Metrics | Prometheus `client_golang` v1.24.1 (+2.6 MB); `VictoriaMetrics/metrics` v1.44.1 (+0.44 MB); own code; OpenTelemetry (+12.4 MB) | **Opt-in Prometheus endpoint, text format written by gosftpd itself** (D12, ADR 0009); **no OTel before 1.0** | The process makes no downstream calls, so traces give almost nothing. The metric set is small and fixed; the format is checked by a test parser and `promtool` |
 | A10 | Go version policy | Latest version only; two latest | **Two latest; floor `go 1.26.5`** | x/crypto ≥ v0.56.0 requires go 1.26.0, and the os.Root fix GO-2026-4970 is only in 1.26.5 |
 | A11 | Upload conflict implementation | Stat, then Create (TOCTOU); reservation via `O_EXCL`; temp file + `Link` | **`O_CREATE\|O_EXCL` reservation + `r.Filepath` remap** (M1); temp + `Root.Link` for `atomic_uploads` (M3) | Races are ruled out by the scheme itself. The experiment (50 parallel uploads, 50 different files, original intact, `-race`) was run for the temp + `Root.Link` scheme; the same test for `O_EXCL` reservation is added in M1 |
 | A12 | Storage | Local FS only; S3 etc. | **Local FS only until 1.0** | See non-goals |
@@ -300,13 +300,13 @@ The `sftpd.fileHandler` type, a wrapper around `*vfs.Session`, implements `sftp.
 | `github.com/BurntSushi/toml` | v1.6.0 | config | M2 |
 | `golang.org/x/time` | v0.16.0 | `rate.Limiter` (limits, later bandwidth) | M3 |
 | `golang.org/x/term` | v0.46.0 (go 1.26.0) | password input without echo | M3 |
-| `github.com/prometheus/client_golang` | v1.24.1 (go ≥ 1.25.0) **or** `github.com/VictoriaMetrics/metrics` v1.44.1 | metrics (opt-in) | M4 |
+| — (own code, `internal/obs`) | Prometheus text format 0.0.4 | metrics (opt-in, ADR 0009; D12: no library) | M4 |
 | — (own code) | about 30 lines on top of `$NOTIFY_SOCKET` | `sd_notify`; `github.com/coreos/go-systemd/v22` is not used, to stay within the dependency limit | M4 |
 | `github.com/landlock-lsm/go-landlock` | v0.10.1 (MIT) | optional Linux sandbox | M4 |
 | `github.com/pires/go-proxyproto` | v0.15.0 | PROXY protocol v2 behind a load balancer (persona U2, opt-in) | M4 |
 | `go.uber.org/goleak` | v1.3.0 (tests) | goroutine leak detection | M1 |
 
-This adds up to exactly 10 direct runtime dependencies (`goleak` is test-only). Every new dependency requires removing another one or revisiting principle 8.
+This adds up to 9 direct runtime dependencies (`goleak` is test-only). Every new dependency requires removing another one or revisiting principle 8.
 
 **Not used:** `afero` (`BasePathFs` does not isolate), `gliderlabs/ssh`, `charm.land/ssh`, `github.com/drakkan/crypto` (the fork is outdated, SFTPGo moved off it in v2.7.0, the repository returns 404), `pkg/sftp/v2` (alpha), viper, OpenTelemetry, `go-systemd`, `gopkg.in/yaml.v3` (archived 2025-04-01).
 
@@ -602,7 +602,7 @@ flowchart LR
   - a separate `http.Server{ReadHeaderTimeout: ...}`;
   - `/metrics`, `/healthz`, `/readyz` (503 until ready and during drain), optionally `/debug/pprof`;
   - metrics from §11.2; labels contain no users or paths.
-- [ ] `gosftpd healthcheck` for `HEALTHCHECK` in the distroless image: without `--url` it opens a TCP connection to `server.listen`, waits for the `SSH-2.0-` line and closes the connection without sending its own (such a probe is not recorded in the audit log, §6.4), so it works even without the admin listener (which is disabled by default); with `--url` it polls `/readyz` on the admin listener.
+- [ ] `gosftpd healthcheck` for `HEALTHCHECK` in the distroless image: without `--url` it opens a TCP connection to `server.listen`, waits for the `SSH-2.0-` line and closes the connection without sending its own (such a probe is not recorded in the audit log, §6.4), so it works even without the admin listener (which is disabled by default); with `--url` it checks a URL of the admin listener (`/healthz` or `/readyz`). Exit codes 0 and 1 only: Docker reserves 2 (ADR 0009).
 - [ ] **Hooks** `[[hooks]]`:
   - filters `on = ["fs.upload"]`, `mounts = ["inbox"]`, `glob = "*.pdf"`;
   - `exec`: argv without a shell, env `GOSFTPD_EVENT/PATH/FINAL_PATH/HOST_PATH/USER`, timeout;
@@ -820,7 +820,7 @@ The filter is set in `audit.events` by category: `conn`, `server` (always on), `
 **Rules.**
 - All client-controlled strings are JSON-escaped; this protects against `\n` and ANSI injection into the log.
 - Passwords, keyboard-interactive responses, key material and raw packets are never logged.
-- Connections closed by the client before the version exchange is complete (health probes, scanners) are not written to the audit log (except `conn.reject`): only the counter `gosftpd_connections_total{result="no_handshake"}` and a debug log entry. `conn.accept` is written after the client's version string is received (a wrapper around `net.Conn` notes the first bytes from the client). Other handshake errors from scanners go to the operational log at the `debug` level and are counted in that counter.
+- Connections that end before authentication starts (health probes, scanners, `ssh-keyscan`) are not written to the audit log (except `conn.reject`): only the counter `gosftpd_connections_total`, with `result="no_version"` when the client sent no byte (a wrapper around `net.Conn` notes the first bytes from the client) and `result="handshake_failed"` otherwise, and a debug log entry. `conn.accept` is written after the key exchange, when the client starts to authenticate (ADR 0009).
 - Before 1.0 there is no built-in rotation: use journald, Docker logging or logrotate. Before M4, SIGHUP is ignored, so logrotate needs `copytruncate`; from M4 the audit file is reopened on SIGHUP. The audit file (unlike uploaded files, T8) is opened with `O_APPEND`, otherwise `copytruncate` would leave a "hole" of zeros.
 - **If the audit log cannot be written** (disk full, I/O error, closed pipe; the error is caught by the `audit.sink` wrapper, M1), the behavior is set by `audit.on_error` (decision D20). `fail-closed` (recommended, the default): new connections and data-modifying operations are refused until writing recovers; a transfer already in progress completes, and its event goes to the operational log (stderr); `/readyz` returns 503. Every 5 s, `audit.sink` tries to write a `server.audit_recovered` event; on success the error is cleared and `/readyz` returns 200 again. `fail-open`: work continues, and errors go to stderr and to the `gosftpd_audit_write_errors_total` metric. Audit output to stdout (Docker, journald) almost never runs into this case.
 - The schema evolves according to the rules of §9.6: within `schema = 1` fields are only added.
@@ -956,7 +956,8 @@ gosftpd user list | disable NAME | remove NAME
 gosftpd user hash-password [--stdin]                    # the password is never passed as an argument
 gosftpd hostkey show [--known-hosts HOST:PORT] | generate [--type ed25519|ecdsa|rsa] [--out PATH]
                 | rotate [--type ed25519|ecdsa|rsa]
-gosftpd healthcheck [--url URL]                         # without --url: TCP to server.listen, waits for "SSH-2.0-"; with --url: /readyz
+gosftpd healthcheck [--config PATH] [--address HOST:PORT | --url URL] [--ready] [--timeout 5s]
+                                                        # without --url: TCP to server.listen, waits for "SSH-2.0-"; with --url: GET, 2xx; exit 0 or 1
 gosftpd version [--json]
 gosftpd completion bash|zsh|fish|powershell
 ```
@@ -1320,7 +1321,7 @@ formatters:
 issues: { max-issues-per-linter: 0, max-same-issues: 0 }
 ```
 
-From M4, once metrics exist, `promlinter` is added. staticcheck v0.8.1 runs inside golangci-lint; a separate `-checks all` run is optional.
+Metric names are checked by a test in `internal/obs` and the exposition by `promtool check metrics` in the interop job (`promlinter` lints `client_golang` code, which gosftpd does not use; ADR 0009). staticcheck v0.8.1 runs inside golangci-lint; a separate `-checks all` run is optional.
 
 ### 9.3 Release pipeline
 
@@ -1518,7 +1519,7 @@ Once external contributors appear: `good first issue` labels, GitHub Discussions
 | Metric | Target | How we measure |
 |---|---|---|
 | Time from download to the first `put` | < 60 s in zero-config, < 5 minutes following the README with a config | Timed on a clean VM before a release |
-| Binary / image size | ≤ 10 MB / ≤ 15 MB (compressed) | Output in the release job. Reference figures from a measurement during research: a minimal `x/crypto/ssh` + `pkg/sftp` binary is about 4.8 MB, Prometheus adds about 2.6 MB |
+| Binary / image size | ≤ 12 MiB / ≤ 15 MB (compressed) | The `goreleaser-check` CI job fails a release binary over 12 MiB (12 582 912 bytes; D21, it was 10 MB). Reference figures: a minimal `x/crypto/ssh` + `pkg/sftp` binary is about 4.8 MB. Built with Go 1.27.2, `main` before M4-06 was 7.86 MB (linux/amd64; Go 1.27 alone added 0.6 MB); `net/http`, which the admin listener and `healthcheck --url` (M4-06) and the webhooks (M4-07) need, costs about 2.7 MB: 10.58 MB linux/amd64, 10.81 MB darwin/amd64 |
 | Idle RSS | ≤ 20 MB (a target, to be verified by measurement) | `ps`/cgroup in the benchmark |
 | Throughput | ≥ 80% of OpenSSH `internal-sftp` on W1 in variants (b) and (c) from §8.6 | `docs/benchmarks.md` |
 | Security | 0 known escapes from a mount; fuzz in CI; govulncheck clean; a reachable vulnerability is fixed by a patch release within ≤ 7 days (§9.6); ssh-audit without `fail` on `modern` with an ed25519 host key | CI, SECURITY log |
@@ -1529,19 +1530,20 @@ Once external contributors appear: `good first issue` labels, GitHub Discussions
 
 ### 11.2 Server operational metrics (Prometheus, M4)
 
-Metrics are prefixed with `gosftpd_`; labels contain no users or paths:
+Metrics are prefixed with `gosftpd_`; labels take values from fixed sets and contain no users, paths or addresses (ADR 0009, [docs/metrics.md](docs/metrics.md)):
 
 - `gosftpd_build_info{version,goversion}`;
-- `gosftpd_connections_active`, `gosftpd_connections_total{result}`;
-- `gosftpd_auth_attempts_total{method,result}`;
-- `gosftpd_sftp_requests_total{op,result}`, `gosftpd_sftp_request_duration_seconds{op}`;
-- `gosftpd_transfer_bytes_total{direction}`;
-- `gosftpd_upload_conflicts_total{action}`;
-- `gosftpd_bans_active`;
-- `gosftpd_config_reloads_total{result}`, `gosftpd_config_last_reload_success_timestamp_seconds`;
-- `gosftpd_audit_write_errors_total` (§6.4, D20).
+- `gosftpd_connections_active`, `gosftpd_connections_total{result}`, `gosftpd_connections_refused_total{reason}`;
+- `gosftpd_logins_total{result}`, `gosftpd_auth_attempts_total{method,result}`;
+- `gosftpd_sftp_operations_total{op,result}`;
+- `gosftpd_transfer_bytes_total{direction}`, `gosftpd_transfer_duration_seconds{direction}` (histogram);
+- `gosftpd_conflicts_total{op,conflict}`;
+- `gosftpd_bans_active`, `gosftpd_bans_total`;
+- `gosftpd_mounts_unavailable`;
+- `gosftpd_config_reloads_total{result}`, `gosftpd_config_last_reload_successful`, `gosftpd_config_last_reload_success_timestamp_seconds`;
+- `gosftpd_audit_write_errors_total`, `gosftpd_audit_log_failing` (§6.4, D20).
 
-The standard Go and process collectors are added to these.
+Go runtime and process metrics with the names of the Prometheus Go client are added to these, read without stopping the world.
 
 ---
 
@@ -1585,7 +1587,7 @@ Once a decision is made, `accepted YYYY-MM-DD, ADR 0001` (or the number of anoth
 | D9 | **Passwords** | keys only; passwords opt-in; passwords by default | **Opt-in from M3** (argon2id). In v1.0 the primary method is keys and certificates | M3 | open |
 | D10 | **Platforms** | Linux only; Linux + macOS; Windows as first-class | **Linux is Tier 1**; macOS is Tier 2; Windows is Tier 2 after the M3b track (may come after v1.0); Windows service after 1.0 | M2 | open |
 | D11 | **User model** | Virtual users under a single service account; OS system users (root, setuid) | **Virtual** | M2 | open |
-| D12 | **Metrics library** | `prometheus/client_golang` v1.24.1 (+2.6 MB, the standard, `testutil`, `promlinter`); `VictoriaMetrics/metrics` v1.44.1 (+0.44 MB) | **client_golang**: the industry standard, and the binary stays within ≤ 10 MB | M4 | open |
+| D12 | **Metrics library** | `prometheus/client_golang` v1.24.1 (+2.6 MB, the standard, `testutil`, `promlinter`); `VictoriaMetrics/metrics` v1.44.1 (+0.44 MB); none (own code) | **client_golang**: the industry standard, and the binary stays within ≤ 10 MB | M4 | decided 2026-10-11 by the owner: **none**, gosftpd writes the text format itself (ADR 0009) |
 | D13 | **Release process** | A manual signed tag + GoReleaser; release-please | **Manual tag + GoReleaser** | M2 | open |
 | D14 | **Minimum Go version** | 1.26.5 (forced by x/crypto and os.Root) | **Accept 1.26.5**, raise it per the "two latest" policy | M0 | accepted 2026-10-07 per recommendation, ADR 0001 |
 | D15 | **Storage other than the local FS** | never; after 1.0 | **Not before 1.0.** We keep the VFS interface | M6 | open |
@@ -1594,6 +1596,7 @@ Once a decision is made, `accepted YYYY-MM-DD, ADR 0001` (or the number of anoth
 | D18 | **Public Go API** | Only `internal/` until 1.0; public `vfs` and `sftptest` earlier | **`internal/` until 1.0**, `sftptest` after 1.0 | M6 | open |
 | D19 | **Language of the project** | English; Russian; both | **English** everywhere: code, documentation including `ROADMAP.md` and `TASKS.md`, commit messages, issues and pull requests; this makes the project accessible to the awesome-selfhosted and HN audiences and to every contributor | M0 | accepted 2026-10-07 per recommendation, ADR 0001; extended to `ROADMAP.md` and `TASKS.md` by the owner 2026-10-10, ADR 0006 |
 | D20 | **If the audit log cannot be written** (disk full) | fail-closed: new connections and data-modifying operations are refused, `/readyz` → 503; fail-open: work continues, errors go to stderr and a metric | **fail-closed by default** (`audit.on_error`): auditing is one of the project's main promises, and `min_free_space` already stops uploads on a nearly full disk. fail-open is for those who value availability over the audit trail | M1 | open |
+| D21 | **Binary size budget** | 10 MB; 11 MiB; 12 MiB; own minimal HTTP code to stay within 10 MiB | **12 MiB**: `net/http` (with `crypto/tls`, x509 and HTTP/2) is needed for the admin listener and the webhooks and costs about 2.7 MB; a hand-written HTTP server would be more security-sensitive code for a saving that the webhooks undo | M4 | decided 2026-10-11 by the owner: **12 MiB**, keep `net/http` |
 
 ---
 

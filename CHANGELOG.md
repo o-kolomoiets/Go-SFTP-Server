@@ -83,9 +83,25 @@ Incompatible changes are prefixed with **BREAKING:**.
   show the next key. During a rotation, or with a certificate, `hostkey
   show` prints more lines after those of the current key: a script that
   takes its last line should take the third.
+- Admin listener ([ADR 0009](docs/adr/0009-admin-listener-metrics.md)):
+  `[metrics] listen` serves `/metrics` (Prometheus text format, written by
+  gosftpd itself, without a new dependency), `/healthz` and `/readyz`
+  (`starting`, `stopping`, `audit_unavailable`). Metrics count connections
+  by result (including health probes and scanners, which the audit log
+  leaves out), refusals, logins, authentication attempts, SFTP operations,
+  bytes, transfer times, conflicts, bans, reloads and audit write errors,
+  with labels from fixed sets only. `metrics.pprof` serves `/debug/pprof` in
+  binaries built with `-tags pprof`. See [docs/metrics.md](docs/metrics.md).
+- `gosftpd healthcheck` for container health checks: without `--url` it
+  waits for the SSH banner of `server.listen` and leaves no trace in the
+  audit log; with `--url` it checks the admin listener. It exits with 0 or
+  1 only.
+- `server.start` has `metrics_listen` with an admin listener.
 
 ### Changed
 
+- A failing audit log is retried every 5 seconds also while no client
+  connects, in either `on_error` mode, so the server recovers on its own.
 - Host keys are read again on reload (they were restart-only): new
   connections use the new keys, open ones keep theirs. A reload never
   generates a key, and a host key that cannot be used keeps the running

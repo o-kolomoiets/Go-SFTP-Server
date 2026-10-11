@@ -129,8 +129,9 @@ host keys in use, not those of the edited file.
 **Restart-only settings** keep their running value; a change is logged as a
 warning and listed in `restart_required`: `server.listen`,
 `server.host_key_auto_generate`, `server.crypto_policy`, `log.format`,
-`audit.events` and `audit.on_error`. (`server.host_keys` was on this list
-until ADR 0008 made host keys reloadable.) A value of the file hidden by a flag or the environment
+`audit.events`, `audit.on_error` and `metrics.listen` (ADR 0009).
+(`server.host_keys` was on this list until ADR 0008 made host keys
+reloadable.) A value of the file hidden by a flag or the environment
 (`log.level`, `audit.output`) is reported on reload. With Landlock (M4d), a
 mount path outside the ruleset will be restart-only too.
 
