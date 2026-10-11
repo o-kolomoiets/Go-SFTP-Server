@@ -179,6 +179,18 @@ func (l *Logger) Healthy() bool {
 	return ok
 }
 
+// Available reports, without writing, whether the audit log lets the
+// server take connections: it is fail-open or its writes work.
+func (l *Logger) Available() bool { return l.sink.failOpen || !l.sink.failed.Load() }
+
+// Failing reports, without writing, whether the last write to the audit
+// output failed, in either mode.
+func (l *Logger) Failing() bool { return l.sink.failed.Load() }
+
+// WriteErrors returns how many writes to the audit output failed,
+// recovery probes included.
+func (l *Logger) WriteErrors() uint64 { return l.sink.errors.Load() }
+
 // Probe retries an unhealthy audit log at once instead of at the next
 // probe time, for example after its file was reopened. It reports whether
 // the log works.
@@ -194,6 +206,7 @@ type sink struct {
 	w        io.Writer
 	failOpen bool // a later successful write clears the failure
 	failed   atomic.Bool
+	errors   atomic.Uint64
 
 	mu        sync.Mutex
 	lastProbe time.Time
@@ -207,6 +220,7 @@ func (s *sink) Write(p []byte) (int, error) {
 	switch {
 	case err != nil:
 		s.failed.Store(true)
+		s.errors.Add(1)
 	case s.failOpen:
 		s.failed.Store(false)
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hostkey"
+	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/version"
@@ -399,18 +400,25 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		return configError{err}
 	}
 
+	// Without the admin listener nothing is counted.
+	var metrics *obs.Metrics
+	if c.Metrics.Listen != "" {
+		metrics = obs.NewMetrics(version.Get().Version)
+	}
 	cfg := serverConfig(c, authn, mounts, keys)
-	cfg.Audit, cfg.Log, cfg.CryptoPolicy = al, log, c.Server.CryptoPolicy
+	cfg.Audit, cfg.Log, cfg.Metrics, cfg.CryptoPolicy = al, log, metrics, c.Server.CryptoPolicy
 	srv, err := server.New(cfg)
 	if err != nil {
 		_ = mounts.Close()
 		return err
 	}
+	metrics.SetSources(obs.Sources{BansActive: srv.ActiveBans, AuditWriteErrors: al.WriteErrors, AuditFailing: al.Failing})
 	r := &running{
 		flags: flags, opts: o, getenv: getenv, log: log, level: level, out: out, al: al, srv: srv,
-		c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
+		metrics: metrics, c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
 		hostKeys: keys, reloaded: make(chan struct{}, 1),
 	}
+	r.pprof.Store(c.Metrics.Pprof)
 	if c.File != "" {
 		// A reload reads this file again, not the first one found then.
 		r.opts.config = absPath(c.File)
@@ -434,12 +442,26 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		}
 		listeners = append(listeners, ln)
 	}
-	printBanner(stderr, bannerInfo{c: c, listeners: listeners, keys: keys, auth: authn, mounts: mounts})
+	health := obs.NewHealth(al.Available)
+	var admin *adminListener
+	if c.Metrics.Listen != "" {
+		if admin, err = listenAdmin(ctx, c.Metrics.Listen, metrics, health, &r.pprof, log); err != nil {
+			for _, l := range listeners {
+				_ = l.Close()
+			}
+			return err
+		}
+	}
+	printBanner(stderr, bannerInfo{c: c, listeners: listeners, admin: admin, keys: keys, auth: authn, mounts: mounts})
 	addrs := make([]string, len(listeners))
 	for i, ln := range listeners {
 		addrs[i] = ln.Addr().String()
 	}
-	al.Event("server.start", slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ",")))
+	startAttrs := []slog.Attr{slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ","))}
+	if admin != nil {
+		startAttrs = append(startAttrs, slog.String("metrics_listen", admin.addr()))
+	}
+	al.Event("server.start", startAttrs...)
 
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -448,10 +470,16 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	background.Go(func() { cleanTemp(serveCtx, r.currentMounts, log) })
 	background.Go(func() { watchHostCerts(serveCtx, r.currentHostCerts, r.reloaded, log, time.Minute) })
 	background.Go(func() { r.reloadLoop(serveCtx, hup) })
+	background.Go(func() { recoverAudit(serveCtx, al, auditProbeInterval) })
+	if admin != nil {
+		admin.start() // before the SSH listeners accept; stopped last
+		defer admin.stop(ctx)
+	}
 	served := make(chan error, len(listeners))
 	for _, ln := range listeners {
 		go func() { served <- srv.Serve(serveCtx, ln) }()
 	}
+	health.SetReady()
 	if err := sdnotify.Ready(); err != nil {
 		log.DebugContext(ctx, "sd_notify", "err", err)
 	}
@@ -462,6 +490,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		pending--
 	case <-ctx.Done():
 	}
+	health.SetStopping()
 	if err := sdnotify.Stopping(); err != nil {
 		log.DebugContext(ctx, "sd_notify", "err", err)
 	}
@@ -590,6 +619,7 @@ func parseDirs(dirs []string, reload bool) ([]vfs.MountSpec, error) {
 type bannerInfo struct {
 	c         *config.Config
 	listeners []net.Listener
+	admin     *adminListener // nil without [metrics] listen
 	keys      hostKeys
 	auth      *auth.Authenticator
 	mounts    *vfs.Table
@@ -655,6 +685,9 @@ func printBanner(w io.Writer, b bannerInfo) {
 		addrs[i] = ln.Addr().String()
 	}
 	fmt.Fprintf(w, "listen:  %s\n", strings.Join(addrs, ", "))
+	if b.admin != nil {
+		fmt.Fprintf(w, "metrics: http://%s/metrics\n", b.admin.addr())
+	}
 	fmt.Fprintf(w, "connect: sftp -P %d %s@%s\n", port, user, host)
 }
 

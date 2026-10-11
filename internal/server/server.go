@@ -24,6 +24,7 @@ import (
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
+	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sftpd"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
@@ -42,8 +43,8 @@ const (
 	maxClientVersionLen      = 128
 )
 
-// Config configures a Server. New fixes CryptoPolicy, Audit and Log;
-// Reload changes the rest.
+// Config configures a Server. New fixes CryptoPolicy, Audit, Log and
+// Metrics; Reload changes the rest.
 type Config struct {
 	// HostKeys are used for key exchange, at most one per key type.
 	HostKeys []ssh.Signer
@@ -64,6 +65,9 @@ type Config struct {
 	Grants func(user string) []vfs.Grant
 	Audit  *audit.Logger
 	Log    *slog.Logger
+	// Metrics counts connections, logins and SFTP operations; nil counts
+	// nothing.
+	Metrics *obs.Metrics
 
 	// Methods lists the enabled login methods, auth.MethodPublicKey and
 	// auth.MethodPassword; empty means public keys only.
@@ -95,6 +99,7 @@ type Server struct {
 	algos   algorithms
 	audit   *audit.Logger
 	log     *slog.Logger
+	metrics *obs.Metrics
 	limits  *limiter
 	rejects rejectLog
 
@@ -135,12 +140,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		algos: algos,
-		audit: cfg.Audit,
-		log:   cfg.Log,
-		conns: make(map[net.Conn]struct{}),
-		live:  make(map[*liveConn]struct{}),
-		now:   time.Now,
+		algos:   algos,
+		audit:   cfg.Audit,
+		log:     cfg.Log,
+		metrics: cfg.Metrics,
+		conns:   make(map[net.Conn]struct{}),
+		live:    make(map[*liveConn]struct{}),
+		now:     time.Now,
 	}
 	if s.audit == nil {
 		s.audit = audit.Discard()
@@ -160,7 +166,7 @@ func New(cfg Config) (*Server, error) {
 }
 
 // Reload switches new logins to cfg, and new connections to its host
-// keys; CryptoPolicy, Audit and Log are ignored. Open connections keep
+// keys; CryptoPolicy, Audit, Log and Metrics are ignored. Open connections keep
 // their host keys, also for re-keying; logged-in connections keep the
 // configuration they logged in under; with cfg.DisconnectRevoked, those whose login cfg would refuse are
 // closed, and Reload returns how many. Bans, connection counts and the
@@ -364,6 +370,7 @@ func (s *Server) admit(c net.Conn) *admission {
 		return adm
 	}
 	_ = c.Close()
+	s.metrics.ConnectionRefused(reason)
 	if reason == rejectAudit {
 		s.log.Warn("refusing connection: audit log unavailable", "remote_addr", c.RemoteAddr().String())
 		return nil
@@ -425,6 +432,11 @@ func (s *Server) ServeConn(c net.Conn) {
 
 func (s *Server) serveConn(c net.Conn, adm *admission) {
 	defer adm.release()
+	// Every admitted connection ends with exactly one result: the one of
+	// conn.close, or why there was none.
+	s.metrics.ConnectionStarted()
+	result := "error"
+	defer func() { s.metrics.ConnectionEnded(result) }()
 	connID := newID()
 	log := s.log.With("conn_id", connID, "remote_addr", c.RemoteAddr().String())
 	defer func() {
@@ -447,14 +459,21 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	if err := c.SetDeadline(start.Add(sn.cfg.HandshakeTimeout)); err != nil {
 		return
 	}
-	sconn, chans, reqs, err := ssh.NewServerConn(c, cfg)
+	rc := &readConn{Conn: c}
+	sconn, chans, reqs, err := ssh.NewServerConn(rc, cfg)
 	adm.authenticated()
-	closed := func(result string) {
-		al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", result))
+	closed := func(r string) {
+		result = r
+		al.Event("conn.close", slog.Int64("duration_ms", time.Since(start).Milliseconds()), slog.String("result", r))
 	}
 	if err != nil {
 		log.Debug("handshake failed", "err", err)
-		if ca.accepted.Load() {
+		switch {
+		case !ca.accepted.Load() && !rc.read.Load():
+			result = "no_version" // health checks, port scanners
+		case !ca.accepted.Load():
+			result = "handshake_failed"
+		default:
 			u, _ := ca.attemptedUser.Load().(string)
 			attrs := []slog.Attr{slog.String("user", u), slog.Int("attempts", int(ca.failures.Load()))}
 			if re := ca.reason.Load(); re != nil {
@@ -463,6 +482,7 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 				attrs = append(attrs, keyAttrs(re.Key, re.Cert)...)
 			}
 			al.Event("auth.failure", attrs...)
+			s.metrics.Login(false)
 			ca.closedWithoutLogin()
 			closed("error")
 		}
@@ -503,12 +523,14 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 		logRefused(log, true, name, re)
 		ca.fail()
 		al.Event("auth.failure", append([]slog.Attr{slog.String("user", name), slog.Int("attempts", int(ca.failures.Load())+1), slog.String("reason", re.Reason)}, keyFields...)...)
+		s.metrics.Login(false)
 		closed("revoked")
 		return
 	}
 	al = al.With("user", name)
 	success := append([]slog.Attr{slog.String("auth_method", ext[auth.ExtMethod])}, keyFields...)
 	al.Event("auth.success", append(success, slog.Int("failed_attempts", int(ca.failures.Load())))...)
+	s.metrics.Login(true)
 
 	proofs := announce(accepted, sconn, al, log)
 	go proofs.serve(reqs)
@@ -518,11 +540,11 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	defer close(done)
 	go watch(sconn, act, sn.cfg.IdleTimeout, sn.cfg.KeepaliveInterval, done, lc.close)
 	s.serveChannels(sn, chans, name, act, proofs, al, log)
-	result := "ok"
+	end := "ok"
 	if r := lc.reason.Load(); r != nil {
-		result = *r
+		end = *r
 	}
-	closed(result)
+	closed(end)
 }
 
 // connAuth is the authentication state of one connection. Its callbacks
@@ -629,7 +651,11 @@ func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
 	}
 	cfg.AuthLogCallback = func(md ssh.ConnMetadata, method string, err error) {
 		ca.user.same(md.User()) // the first request, often "none", fixes the name
-		if method == "none" || err == nil {
+		if method == "none" {
+			return
+		}
+		ca.s.metrics.AuthAttempt(method, err == nil)
+		if err == nil {
 			return
 		}
 		ca.failures.Add(1)
@@ -703,6 +729,7 @@ func (ca *connAuth) fail() {
 	if bans == nil || !ca.isIP || !bans.Fail(ca.ip) {
 		return
 	}
+	ca.s.metrics.Banned()
 	src := auth.SourceKey(ca.ip).String()
 	ca.s.log.Warn("banning source after repeated login failures", "source", src, "duration", bans.Duration())
 	ca.al.Event("auth.ban", slog.String("source", src), slog.Int64("duration_ms", bans.Duration().Milliseconds()))
@@ -789,7 +816,7 @@ func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, proofs *ho
 		al.Event("fs.denied", slog.String("mount", mount), slog.String("reason", reason), slog.String("result", "denied"))
 	}
 
-	h := sftpd.New(vs, al, log, sn.cfg.MaxOpenHandles)
+	h := sftpd.New(vs, al, log, s.metrics, sn.cfg.MaxOpenHandles)
 	rs := sftp.NewRequestServer(sftpd.NewGate(ch), h.Handlers(), sftp.WithStartDirectory("/"))
 	err := rs.Serve()
 
@@ -815,6 +842,29 @@ var (
 	errBanned      = errors.New("source banned")
 	errMethodOff   = errors.New("authentication method disabled by a reload")
 )
+
+// ActiveBans returns the number of sources banned now; 0 with bans off.
+func (s *Server) ActiveBans() int {
+	if bans := s.snap.Load().bans; bans != nil {
+		return bans.Active()
+	}
+	return 0
+}
+
+// readConn notes whether the client sent anything: a connection closed
+// before the first byte is a health check or a port scan.
+type readConn struct {
+	net.Conn
+	read atomic.Bool
+}
+
+func (c *readConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && !c.read.Load() {
+		c.read.Store(true)
+	}
+	return n, err
+}
 
 // pinnedUser is the user name of a connection's first authentication
 // request.

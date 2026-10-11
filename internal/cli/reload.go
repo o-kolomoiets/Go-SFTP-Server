@@ -9,12 +9,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/pflag"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
+	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -31,6 +33,10 @@ type running struct {
 	out    *auditOutput
 	al     *audit.Logger
 	srv    *server.Server
+	// metrics is nil without the admin listener; pprof turns
+	// /debug/pprof on and off.
+	metrics *obs.Metrics
+	pprof   atomic.Bool
 
 	mu     sync.Mutex // serializes reloads; guards the fields below
 	c      *config.Config
@@ -107,6 +113,7 @@ func (r *running) reload(ctx context.Context) bool {
 		}
 	}
 	r.al.Event("server.reload", append(attrs, slog.Int64("duration_ms", time.Since(start).Milliseconds()))...)
+	r.metrics.Reloaded(err == nil, time.Now())
 	return err == nil
 }
 
@@ -191,6 +198,10 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 		r.al.Probe() // a new file may end a failure at once
 	}
 	r.level.Set(level)
+	r.metrics.SetMountsUnavailable(len(unavailable))
+	if was := r.pprof.Swap(c.Metrics.Pprof); r.metrics != nil && was != c.Metrics.Pprof {
+		r.log.InfoContext(ctx, "pprof changed", "enabled", c.Metrics.Pprof)
+	}
 	_ = r.mounts.Close()
 	hostKeys.logChanges(ctx, r.log, r.hostKeys)
 	r.c, r.mounts, r.keys, r.hostKeys = c, mounts, keys, hostKeys
@@ -231,6 +242,8 @@ func keepRestartOnly(cur, next *config.Config) []string {
 		func() { next.Server.HostKeyAutoGenerate = cur.Server.HostKeyAutoGenerate })
 	keep("server.crypto_policy", cur.Server.CryptoPolicy != next.Server.CryptoPolicy,
 		func() { next.Server.CryptoPolicy = cur.Server.CryptoPolicy })
+	keep("metrics.listen", cur.Metrics.Listen != next.Metrics.Listen,
+		func() { next.Metrics.Listen = cur.Metrics.Listen })
 	keep("log.format", cur.Log.Format != next.Log.Format,
 		func() { next.Log.Format = cur.Log.Format })
 	keep("audit.events", !slices.Equal(cur.Audit.Events, next.Audit.Events),

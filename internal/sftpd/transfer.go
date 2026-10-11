@@ -31,6 +31,7 @@ type reader struct {
 func (r *reader) ReadAt(p []byte, off int64) (int, error) {
 	n, err := r.f.ReadAt(p, off)
 	r.n.Add(int64(n))
+	r.h.metrics.Transferred(false, n)
 	if err != nil && !errors.Is(err, io.EOF) {
 		r.h.log.Debug("read failed", "path", r.path, "err", err)
 		_, st := toStatus(err)
@@ -56,11 +57,14 @@ func (r *reader) Close() error {
 			result = "aborted"
 		}
 		r.mu.Unlock()
+		d := time.Since(r.start)
 		r.h.audit.Event("fs.download",
 			slog.String("path", r.path),
 			slog.Int64("bytes", r.n.Load()),
-			slog.Int64("duration_ms", time.Since(r.start).Milliseconds()),
+			slog.Int64("duration_ms", d.Milliseconds()),
 			slog.String("result", result))
+		r.h.metrics.Operation("fs.download", result)
+		r.h.metrics.TransferClosed(false, d)
 	})
 	return err
 }
@@ -81,9 +85,11 @@ type writer struct {
 
 func (w *writer) WriteAt(p []byte, off int64) (int, error) {
 	n, err := w.wh.WriteAt(p, off)
+	w.h.metrics.Transferred(true, n)
 	if err != nil {
 		if (errors.Is(err, vfs.ErrImmutable) || errors.Is(err, vfs.ErrTooLarge)) && !w.denied.Swap(true) {
-			return n, w.h.fail("fs.upload", w.wh.Path(), err) // one fs.denied per upload
+			_, st := w.h.refuse("fs.upload", w.wh.Path(), err) // one fs.denied per upload
+			return n, st
 		}
 		w.h.log.Debug("write failed", "path", w.wh.Path(), "err", err)
 		_, st := toStatus(err)
@@ -133,10 +139,17 @@ func (w *writer) Close() error {
 		if v := w.wh.Version(); v != "" {
 			attrs = append(attrs, slog.String("version_path", v))
 		}
+		d := time.Since(w.start)
 		attrs = append(attrs,
-			slog.Int64("duration_ms", time.Since(w.start).Milliseconds()),
+			slog.Int64("duration_ms", d.Milliseconds()),
 			slog.String("result", result))
 		w.h.audit.Event("fs.upload", attrs...)
+		w.h.metrics.Operation("fs.upload", result)
+		w.h.metrics.TransferClosed(true, d)
+		w.h.metrics.Conflict("fs.upload", w.wh.Conflict())
+		if errors.Is(err, vfs.ErrConflict) { // an atomic upload under on_conflict = "reject"
+			w.h.metrics.Conflict("fs.upload", "rejected")
+		}
 		if err != nil {
 			_, err = toStatus(err)
 		}

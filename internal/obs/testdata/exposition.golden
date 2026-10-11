@@ -1,0 +1,44 @@
+# HELP t_active Active things.
+# TYPE t_active gauge
+t_active 1
+# HELP t_duration_seconds Durations.
+# TYPE t_duration_seconds histogram
+t_duration_seconds_bucket{dir="down",le="0.5"} 0
+t_duration_seconds_bucket{dir="down",le="5"} 0
+t_duration_seconds_bucket{dir="down",le="10"} 0
+t_duration_seconds_bucket{dir="down",le="100"} 0
+t_duration_seconds_bucket{dir="down",le="+Inf"} 0
+t_duration_seconds_sum{dir="down"} 0
+t_duration_seconds_count{dir="down"} 0
+t_duration_seconds_bucket{dir="up",le="0.5"} 2
+t_duration_seconds_bucket{dir="up",le="5"} 2
+t_duration_seconds_bucket{dir="up",le="10"} 4
+t_duration_seconds_bucket{dir="up",le="100"} 4
+t_duration_seconds_bucket{dir="up",le="+Inf"} 5
+t_duration_seconds_sum{dir="up"} 1014.6
+t_duration_seconds_count{dir="up"} 5
+# HELP t_events_total Events with a \\ backslash and a\nline feed in HELP.
+# TYPE t_events_total counter
+t_events_total 1
+# HELP t_float A float.
+# TYPE t_float gauge
+t_float 1.7600000123e+09
+# HELP t_info Info.
+# TYPE t_info gauge
+t_info{a="x",version="1.0 \"quoted\"\nnext \\ line"} 1
+# HELP t_ops_total Operations.
+# TYPE t_ops_total counter
+t_ops_total{op="a",result="error"} 1
+t_ops_total{op="a",result="ok"} 0
+t_ops_total{op="b",result="error"} 0
+t_ops_total{op="b",result="ok"} 3
+# HELP t_pause_seconds Pauses.
+# TYPE t_pause_seconds summary
+t_pause_seconds{quantile="0"} 0.001
+t_pause_seconds{quantile="0.5"} 0.01
+t_pause_seconds{quantile="1"} 0.3
+t_pause_seconds_sum 0.5
+t_pause_seconds_count 9
+# HELP t_special Special values.
+# TYPE t_special gauge
+t_special +Inf

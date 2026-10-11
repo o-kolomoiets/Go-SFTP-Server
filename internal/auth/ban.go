@@ -195,6 +195,39 @@ func (b *BanTable) Len() (failures, bans int) {
 	return b.failures.len(), b.bans.len()
 }
 
+// Active returns the number of sources banned now. Expired bans are
+// removed; a ban of a source that is now exempt as a whole is not
+// counted.
+func (b *BanTable) Active() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.elapsed()
+	n := 0
+	for e := b.bans.ll.Back(); e != nil; {
+		prev := e.Prev()
+		en := e.Value.(*lruEntry[netip.Prefix, time.Duration])
+		switch {
+		case now >= en.v:
+			b.bans.remove(en.k)
+		case !b.exemptPrefix(en.k):
+			n++
+		}
+		e = prev
+	}
+	return n
+}
+
+// exemptPrefix reports whether every address of src is exempt; b.mu must
+// be held.
+func (b *BanTable) exemptPrefix(src netip.Prefix) bool {
+	for _, p := range b.opts.Exempt {
+		if p.Bits() <= src.Bits() && p.Contains(src.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
 // lru is a map bounded to max entries that evicts the least recently used.
 type lru[K comparable, V any] struct {
 	max int

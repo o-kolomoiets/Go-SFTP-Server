@@ -192,3 +192,32 @@ func TestBanTableSetOptions(t *testing.T) {
 		t.Errorf("Len() = %d, %d after shrinking to 1", f, n)
 	}
 }
+
+// Active counts bans in force: not expired, not of a source exempt as a
+// whole; a ban of a /64 with one exempt address still counts.
+func TestBanTableActive(t *testing.T) {
+	t.Parallel()
+
+	b, now := newTestBans(BanOptions{AfterFailures: 1, Duration: time.Hour, Exempt: mustPrefixes(t, "::1/128")})
+	if n := b.Active(); n != 0 {
+		t.Fatalf("Active() = %d on an empty table", n)
+	}
+	b.Fail(netip.MustParseAddr("203.0.113.5"))
+	*now = now.Add(30 * time.Minute)
+	b.Fail(netip.MustParseAddr("198.51.100.9"))
+	b.Fail(netip.MustParseAddr("::2")) // bans ::/64, which holds the exempt ::1
+	if n := b.Active(); n != 3 {
+		t.Errorf("Active() = %d, want 3", n)
+	}
+	b.SetOptions(BanOptions{AfterFailures: 1, Duration: time.Hour, Exempt: mustPrefixes(t, "198.51.100.0/24", "::1/128")})
+	if n := b.Active(); n != 2 {
+		t.Errorf("Active() = %d with one source exempt, want 2", n)
+	}
+	*now = now.Add(31 * time.Minute) // the first ban expires
+	if n := b.Active(); n != 1 {
+		t.Errorf("Active() = %d after a ban expired, want 1", n)
+	}
+	if _, bans := b.Len(); bans != 2 {
+		t.Errorf("Active() left %d entries, want the expired one removed", bans)
+	}
+}

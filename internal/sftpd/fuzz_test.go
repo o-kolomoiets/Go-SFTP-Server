@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/sftp"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
+	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
 
@@ -153,6 +154,7 @@ func FuzzRequestServer(f *testing.F) {
 	)
 	f.Add(byte(1), seq(busy...))
 
+	metrics := obs.NewMetrics("fuzz") // every path counts without a panic
 	f.Fuzz(func(t *testing.T, mode byte, data []byte) {
 		base := t.TempDir()
 		share := filepath.Join(base, "share")
@@ -184,7 +186,7 @@ func FuzzRequestServer(f *testing.F) {
 			t.Fatal(errs)
 		}
 		defer s.Close()
-		h := New(s, audit.Discard(), slog.New(slog.DiscardHandler), 8)
+		h := New(s, audit.Discard(), slog.New(slog.DiscardHandler), metrics, 8)
 
 		in, client := io.Pipe()
 		resp, out := io.Pipe()

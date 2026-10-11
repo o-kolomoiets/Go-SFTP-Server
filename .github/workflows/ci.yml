@@ -94,7 +94,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - openssh: system # 9.6p1 on ubuntu-24.04, plus paramiko, rclone and lftp
+          - openssh: system # 9.6p1 on ubuntu-24.04, plus paramiko, rclone, lftp and promtool
             clients: true
           - openssh: V_10_6_P1 # built from source
     runs-on: ubuntu-24.04
@@ -103,6 +103,9 @@ jobs:
       CLIENT_PARAMIKO_VERSION: 5.0.0
       CLIENT_RCLONE_VERSION: v1.75.0
       CLIENT_RCLONE_SHA256: aa2804e08f48250e71009c727124b6341cd0288465804a9a09d14663cabafbaa
+      # promtool checks the /metrics output (ADR 0009).
+      CLIENT_PROMETHEUS_VERSION: 3.5.0
+      CLIENT_PROMETHEUS_SHA256: e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,7 +128,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/openssh-bin/bin"
           cp ssh sftp scp ssh-keygen "$RUNNER_TEMP/openssh-bin/bin/"
           echo "$RUNNER_TEMP/openssh-bin/bin" >> "$GITHUB_PATH"
-      - name: Install paramiko, rclone and lftp
+      - name: Install paramiko, rclone, lftp and promtool
         if: matrix.clients
         run: |
           sudo apt-get update -q
@@ -136,9 +139,15 @@ jobs:
             "https://github.com/rclone/rclone/releases/download/$CLIENT_RCLONE_VERSION/rclone-$CLIENT_RCLONE_VERSION-linux-amd64.zip"
           echo "$CLIENT_RCLONE_SHA256  $RUNNER_TEMP/rclone.zip" | sha256sum -c -
           unzip -q -j "$RUNNER_TEMP/rclone.zip" "*/rclone" -d "$RUNNER_TEMP/bin"
+          curl -fsSLo "$RUNNER_TEMP/prometheus.tar.gz" \
+            "https://github.com/prometheus/prometheus/releases/download/v$CLIENT_PROMETHEUS_VERSION/prometheus-$CLIENT_PROMETHEUS_VERSION.linux-amd64.tar.gz"
+          echo "$CLIENT_PROMETHEUS_SHA256  $RUNNER_TEMP/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/prometheus.tar.gz" -C "$RUNNER_TEMP/bin" --strip-components=1 \
+            "prometheus-$CLIENT_PROMETHEUS_VERSION.linux-amd64/promtool"
           {
             echo "PYTHON=$RUNNER_TEMP/venv/bin/python"
             echo "RCLONE=$RUNNER_TEMP/bin/rclone"
+            echo "PROMTOOL=$RUNNER_TEMP/bin/promtool"
             echo "REQUIRE_CLIENTS=1"
           } >> "$GITHUB_ENV"
       - name: Clients against gosftpd
@@ -252,6 +261,15 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
+      - name: Release binaries stay within 10 MiB (ROADMAP §11.1)
+        run: |
+          status=0
+          for f in dist/gosftpd_*/gosftpd; do
+            size=$(stat -c %s "$f")
+            echo "$f: $size bytes"
+            if [ "$size" -gt 10485760 ]; then echo "::error file=$f::$size bytes is over the 10 MiB budget"; status=1; fi
+          done
+          exit $status
 
   vuln:
     runs-on: ubuntu-24.04

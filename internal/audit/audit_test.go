@@ -127,6 +127,48 @@ func TestProbe(t *testing.T) {
 	}
 }
 
+// Available, Failing and WriteErrors read the state without probing; the
+// errors include failed probes.
+func TestStateWithoutProbe(t *testing.T) {
+	t.Parallel()
+
+	for _, failOpen := range []bool{false, true} {
+		var buf buffer
+		l, err := NewWithOptions(&buf, slog.New(slog.DiscardHandler), Options{FailOpen: failOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !l.Available() || l.Failing() || l.WriteErrors() != 0 {
+			t.Fatalf("fail-open %v: new logger: available %v, failing %v, errors %d", failOpen, l.Available(), l.Failing(), l.WriteErrors())
+		}
+		buf.setFail(true)
+		l.Event("fs.upload", slog.String("path", "/x"))
+		l.Event("fs.upload", slog.String("path", "/y"))
+		before := len(buf.lines())
+		if l.Available() != failOpen || !l.Failing() || l.WriteErrors() != 2 {
+			t.Errorf("fail-open %v: after two failed writes: available %v, failing %v, errors %d", failOpen, l.Available(), l.Failing(), l.WriteErrors())
+		}
+		if !failOpen {
+			l.Probe() // fails, and counts
+			if l.WriteErrors() != 3 {
+				t.Errorf("a failed probe is not counted: %d", l.WriteErrors())
+			}
+		}
+		buf.setFail(false)
+		if l.Available() != failOpen || len(buf.lines()) != before {
+			t.Errorf("fail-open %v: Available probed or changed state", failOpen)
+		}
+		if failOpen {
+			l.Event("fs.upload", slog.String("path", "/z"))
+		} else {
+			l.Probe()
+		}
+		if !l.Available() || l.Failing() {
+			t.Errorf("fail-open %v: after recovery: available %v, failing %v", failOpen, l.Available(), l.Failing())
+		}
+	}
+}
+
 func TestShortWriteFails(t *testing.T) {
 	t.Parallel()
 

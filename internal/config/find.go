@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/BurntSushi/toml"
 )
 
 // Environment variables. Command-line flags override them; they override the
@@ -62,4 +64,24 @@ func Find(explicit string, getenv func(string) string) (string, error) {
 		}
 	}
 	return "", ErrNotFound
+}
+
+// ReadListen returns server.listen of the file at path, read leniently for
+// gosftpd healthcheck: only that key, without includes or validation and
+// ignoring every other key, so that an edit a reload refused does not fail
+// the check. It returns nil when the file does not set the key.
+func ReadListen(path string) ([]string, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var f struct {
+		Server struct {
+			Listen []string `toml:"listen"`
+		} `toml:"server"`
+	}
+	if _, err := toml.Decode(string(data), &f); err != nil {
+		return nil, decodeError(path, err)
+	}
+	return f.Server.Listen, nil
 }

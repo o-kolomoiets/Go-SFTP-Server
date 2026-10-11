@@ -73,7 +73,57 @@ func (c *Config) Validate() (warnings []string, err error) {
 	c.validateMounts(p)
 	c.validateUsers(p)
 	c.validateLogs(p)
+	c.validateMetrics(p)
 	return p.result()
+}
+
+func (c *Config) validateMetrics(p *problems) {
+	m := c.Metrics
+	if m.Pprof && !pprofBuilt {
+		p.errorf("metrics.pprof", "this gosftpd is built without pprof (build it with -tags pprof)")
+	}
+	if m.Listen == "" {
+		if m.Pprof {
+			p.warnf("metrics.pprof", "has no effect without metrics.listen")
+		}
+		return
+	}
+	if strings.HasPrefix(m.Listen, "unix:") {
+		p.errorf("metrics.listen", "%q: Unix sockets are not supported; want HOST:PORT", m.Listen)
+		return
+	}
+	if err := validListen(m.Listen); err != nil {
+		p.errorf("metrics.listen", "%v", err)
+		return
+	}
+	if _, port, _ := net.SplitHostPort(m.Listen); port != "0" && slices.Contains(c.Server.Listen, m.Listen) {
+		p.errorf("metrics.listen", "%q is also in server.listen", m.Listen)
+		return
+	}
+	if host, _, _ := net.SplitHostPort(m.Listen); NonLoopback(host) {
+		p.warnf("metrics.listen", "%q is not a loopback address: %s", m.Listen, NotLoopbackRisk)
+	}
+	if m.Pprof {
+		p.warnf("metrics.pprof", "/debug/pprof shows process internals and lets a client slow the server down; turn it on only while profiling")
+	}
+}
+
+// NotLoopbackRisk explains the warning about an admin listener that is not
+// on loopback.
+const NotLoopbackRisk = "the admin listener has no authentication or TLS, and /metrics shows the exact gosftpd and Go versions and the load; keep it on a private network or behind a proxy"
+
+// NonLoopback reports whether a listen host is known not to be loopback:
+// empty (every address), or an IP that is not loopback. A host name other
+// than localhost is unknown until it is resolved.
+func NonLoopback(host string) bool {
+	if host == "" {
+		return true
+	}
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && !ip.IsLoopback()
 }
 
 func (c *Config) validateServer(p *problems) {
