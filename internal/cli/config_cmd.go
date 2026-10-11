@@ -32,9 +32,9 @@ func newConfigValidateCmd() *cobra.Command {
 		Short: "Check the configuration and print every problem",
 		Long: `Check the configuration and print every problem. Exit code 2 means the
 configuration is invalid. With --check-fs, also check that mount directories,
-host keys, authorized_keys files, the trusted CA keys and the revocation
-list exist and have safe permissions, and read the keys, as serve does at
-startup.`,
+host keys (with their next and previous keys and certificates),
+authorized_keys files, the trusted CA keys and the revocation list exist
+and have safe permissions, and read the keys, as serve does at startup.`,
 		Example: `  gosftpd config validate
   gosftpd config validate --check-fs --config /etc/gosftpd/config.toml`,
 		Args: noArgs,
@@ -49,6 +49,10 @@ startup.`,
 				var keyWarns []string
 				_, keyWarns, err = c.Authenticator()
 				warns = append(warns, keyWarns...)
+				if err == nil {
+					_, keyWarns, err = loadHostKeys(c.Server.HostKeys, hostKeyOptions{generate: c.Server.HostKeyAutoGenerate, certs: c.Server.HostCertificates, inspect: true})
+					warns = append(warns, keyWarns...)
+				}
 				if err != nil {
 					err = configError{err}
 				}

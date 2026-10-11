@@ -24,6 +24,7 @@ jobs:
           - { pkg: ./internal/config, fn: FuzzParseConfig }
           - { pkg: ./internal/auth, fn: FuzzAuthorizedKeys }
           - { pkg: ./internal/auth, fn: FuzzCertificate }
+          - { pkg: ./internal/server, fn: FuzzHostKeyProof }
           - { pkg: ./internal/sftpd, fn: FuzzRequestServer }
     runs-on: ubuntu-24.04
     permissions:

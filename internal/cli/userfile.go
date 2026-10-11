@@ -119,8 +119,14 @@ func partnerInstructions(c *config.Config, name, host string) string {
 			fmt.Fprintf(&b, "  host key: unknown (%v); see gosftpd hostkey show --host-key %s\n", err, path)
 			continue
 		}
-		fmt.Fprintf(&b, "  host key: %s %s\n", strings.ToUpper(strings.TrimPrefix(key.Type(), "ssh-")), hostkey.Fingerprint(key))
+		fmt.Fprintf(&b, "  host key: %s\n", keyLabel(key))
 		fmt.Fprintf(&b, "  known_hosts: %s\n", hostkey.KnownHostsLine(host, port, key))
+		// A rotation is in progress: the next key replaces this one at its
+		// end, and clients that do not learn it by themselves need it.
+		if next, err := hostPublicKey(hostkey.Next(path)); err == nil {
+			fmt.Fprintf(&b, "  next host key (after a planned key change): %s\n", keyLabel(next))
+			fmt.Fprintf(&b, "  known_hosts: %s\n", hostkey.KnownHostsLine(host, port, next))
+		}
 	}
 	portFlag := ""
 	if port != 22 {

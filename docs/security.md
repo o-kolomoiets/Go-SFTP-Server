@@ -136,11 +136,12 @@ user that owns only the served directories.
 
 ## Files gosftpd trusts
 
-The configuration, included files, host keys, `authorized_keys` files, the
-trusted CA keys and the revocation list must not be writable by group or
-others and must belong to root or to the user running gosftpd (like sshd's
-`StrictModes`); host keys must be private (`chmod 600`). None of them may
-lie inside a mount clients can write.
+The configuration, included files, host keys (with their next and previous
+keys and certificates), `authorized_keys` files, the trusted CA keys and
+the revocation list must not be writable by group or others and must belong
+to root or to the user running gosftpd (like sshd's `StrictModes`); host
+keys must be private (`chmod 600`). None of them may lie inside a mount
+clients can write.
 
 ## Certificates
 
@@ -153,6 +154,22 @@ no critical option but `source-address` (enforced) and an SFTP-only
 `force-command`. The revocation list fails closed: a list that cannot be
 read or parsed is an error at start and fails a reload. A revoked
 certificate revokes its key, as in sshd.
+
+## Host keys
+
+A host key can be replaced without teaching every user to ignore "REMOTE
+HOST IDENTIFICATION HAS CHANGED" ([ADR 0008](adr/0008-host-key-rotation.md)):
+gosftpd announces a next key to OpenSSH clients after login and proves that
+it holds it, and they add it to `known_hosts` before it is used. The
+announcement is sent once per connection, only to OpenSSH, and only after
+the login is accepted; proofs sign a string bound to the connection, so
+they cannot be replayed or used as a signing oracle. This does not help
+after a key is compromised: whoever holds the old key can announce a key of
+their own. Then retire the old key at once and distribute the new
+fingerprint by another channel, with a `@revoked` line for the old key (see
+[Rotation](configuration.md#rotation)). Host certificates are checked as
+OpenSSH checks them (host type, principals, no critical options, SHA-2 CA
+signature) and offered only while valid.
 
 ## Cryptography
 

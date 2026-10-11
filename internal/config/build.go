@@ -271,6 +271,17 @@ func (o AuthOptions) readRevoked(c *Config) (*auth.RevokedKeys, error) {
 	return r, nil
 }
 
+// CheckOwner applies the ownership rule of trusted files (ROADMAP §6.5) to
+// path: it belongs to root or to the user running gosftpd and is not
+// writable by group or others.
+func CheckOwner(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return checkOwner(path, fi)
+}
+
 // readTrustedFile reads a file gosftpd trusts: a regular file that only
 // its owner (root or the user running gosftpd) can change.
 func readTrustedFile(path string) ([]byte, error) {

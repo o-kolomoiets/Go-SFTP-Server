@@ -95,6 +95,7 @@ type startOpts struct {
 	categories []string // audit categories; nil means the defaults
 	tweak      func(*Config)
 	mount      func(*vfs.MountOptions)
+	server     func(*Server) // before it serves
 }
 
 func startWith(t *testing.T, o startOpts) *env {
@@ -147,6 +148,9 @@ func startWith(t *testing.T, o startOpts) *env {
 	srv, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if o.server != nil {
+		o.server(srv)
 	}
 	e.srv, e.cfg = srv, cfg
 	var lc net.ListenConfig

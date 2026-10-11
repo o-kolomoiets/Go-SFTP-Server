@@ -167,4 +167,5 @@ and its principals are not empty, so it gets no "cannot log in" warning;
   restrict a CA with `principals` or with `cert-authority` lines.
 - Certificates without principals are refused, also through
   `cert-authority` lines, where sshd accepts them.
-- Host certificates and host key rotation are a separate decision (M4-05).
+- Host certificates and host key rotation are a separate decision
+  ([ADR 0008](0008-host-key-rotation.md)).

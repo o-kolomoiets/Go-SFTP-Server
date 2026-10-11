@@ -594,10 +594,10 @@ flowchart LR
   - `key_id` and `serial` are written to the audit log;
   - requires x/crypto ≥ v0.52.0: GO-2026-5014, 5015 and 5019.
 - [ ] **`VerifiedPublicKeyCallback`** (x/crypto ≥ v0.43.0) is the place for key-related side effects. Returning `PartialSuccessError` together with non-nil `Permissions` is not allowed.
-- [ ] **Host keys:**
-  - `gosftpd hostkey rotate --type ed25519`: a transition period with a key of another type, then cutover;
-  - x/crypto does not support `hostkeys-00@openssh.com`, and `AddHostKey` replaces a key of the same type;
-  - host certificates via `ssh.NewCertSigner`; a warning 30 days before expiry.
+- [ ] **Host keys** (ADR 0008):
+  - x/crypto does not support `hostkeys-00@openssh.com`, and `AddHostKey` replaces a key of the same type, so gosftpd announces `KEY.next` and `KEY.old` itself after login (OpenSSH clients only, once per connection) and answers one `hostkeys-prove-00@openssh.com` per connection, RSA with the hash of the negotiated host key algorithm;
+  - `gosftpd hostkey rotate [--type]`, `--finish` (atomic: `KEY` always exists), `--rollback`, `--retire`, `--abort`; host keys become reloadable, never generated on reload;
+  - host certificates `KEY-cert.pub` via `ssh.NewCertSigner` with `server.host_certificates`, checked as OpenSSH does and offered only while valid, each connection building its own host key list; a warning 30 days (or a third of the lifetime) before expiry.
 - [ ] **Admin listener** `[metrics] listen = "127.0.0.1:9090"` (empty means disabled):
   - a separate `http.Server{ReadHeaderTimeout: ...}`;
   - `/metrics`, `/healthz`, `/readyz` (503 until ready and during drain), optionally `/debug/pprof`;
@@ -1233,6 +1233,7 @@ Per-version results are kept in `docs/interop.md`, including a "known limitation
 | `FuzzParseConfig` | `internal/config` | No panic on arbitrary bytes; `Validate()` does not panic |
 | `FuzzAuthorizedKeys` | `internal/auth` | No panic; the options allowlist is enforced |
 | `FuzzCertificate` | `internal/auth` | Arbitrary bytes offered as a certificate (M4): a login is accepted, or a reason recorded, only when the CA signature verifies; an accepted certificate has an allowed principal, is valid now, carries no refused option, and nothing of its own options but `source-address` reaches `Permissions` |
+| `FuzzHostKeyProof` | `internal/server` | Arbitrary bytes as a `hostkeys-prove-00@openssh.com` request (M4): it is answered only when it lists announced keys, each once, with nothing left over, and the keys proved are exactly those listed, in order |
 | `FuzzRequestServer` | `internal/sftpd` | A random stream of SFTP v3 packets via `net.Pipe` into `sftp.NewRequestServer` with real handlers on `t.TempDir()`; server responses are read by a separate goroutine, otherwise writing to `net.Pipe` blocks. Invariants: the sentinel outside the directory is unchanged, no panic, handles ≤ the limit |
 
 Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run only the client target. That is why `FuzzRequestServer` is especially valuable. Seeds come from `f.Add` and the committed `testdata/fuzz/<Target>/`. Every crash found is committed as a seed. In PRs each target runs for 60 s (job `fuzz-smoke`, from M3); nightly, 10 minutes per target.

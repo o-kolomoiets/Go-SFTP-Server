@@ -68,11 +68,16 @@ type Server struct {
 	Listen              []string `toml:"listen"`
 	HostKeys            []string `toml:"host_keys"`
 	HostKeyAutoGenerate bool     `toml:"host_key_auto_generate"`
-	CryptoPolicy        string   `toml:"crypto_policy"`
-	HandshakeTimeout    Duration `toml:"handshake_timeout"`
-	IdleTimeout         Duration `toml:"idle_timeout"`
-	KeepaliveInterval   Duration `toml:"keepalive_interval"`
-	ShutdownTimeout     Duration `toml:"shutdown_timeout"`
+	// HostCertificates serves "<key>-cert.pub" with each host key, and
+	// AnnounceHostKeys announces the host keys, with their next and
+	// previous keys, to OpenSSH clients after login (ADR 0008).
+	HostCertificates  bool     `toml:"host_certificates"`
+	AnnounceHostKeys  bool     `toml:"announce_host_keys"`
+	CryptoPolicy      string   `toml:"crypto_policy"`
+	HandshakeTimeout  Duration `toml:"handshake_timeout"`
+	IdleTimeout       Duration `toml:"idle_timeout"`
+	KeepaliveInterval Duration `toml:"keepalive_interval"`
+	ShutdownTimeout   Duration `toml:"shutdown_timeout"`
 }
 
 // Reload is the [reload] table: what a reload on SIGHUP does besides
@@ -225,6 +230,7 @@ func Default() *Config {
 		ConfigVersion: Version,
 		Server: Server{
 			Listen:            []string{":2022"},
+			AnnounceHostKeys:  true,
 			CryptoPolicy:      "modern",
 			HandshakeTimeout:  Duration(30 * time.Second),
 			IdleTimeout:       Duration(15 * time.Minute),

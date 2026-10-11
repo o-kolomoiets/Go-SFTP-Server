@@ -121,15 +121,16 @@ reload: deleting a file, or linking it to `/dev/null`, revokes its keys, and
 one user's broken file does not block another user's revocation (review
 finding). Only a pipe (the one of `--authorized-keys <(...)`), which can be
 read once, keeps the keys read from it before. With `--dir`, a missing
-directory is unavailable on reload, as a mount is. Host keys are not checked
-on reload, since they change only at restart; the trusted-file check uses
-the host keys in use, not those of the edited file.
+directory is unavailable on reload, as a mount is. Host keys are read again
+on reload since ADR 0008, and one that cannot be used keeps the running host
+keys instead of failing the reload; the trusted-file check then covers the
+host keys in use, not those of the edited file.
 
 **Restart-only settings** keep their running value; a change is logged as a
 warning and listed in `restart_required`: `server.listen`,
-`server.host_keys`, `server.host_key_auto_generate` (host key rotation is
-M4b), `server.crypto_policy`, `log.format`, `audit.events` and
-`audit.on_error`. A value of the file hidden by a flag or the environment
+`server.host_key_auto_generate`, `server.crypto_policy`, `log.format`,
+`audit.events` and `audit.on_error`. (`server.host_keys` was on this list
+until ADR 0008 made host keys reloadable.) A value of the file hidden by a flag or the environment
 (`log.level`, `audit.output`) is reported on reload. With Landlock (M4d), a
 mount path outside the ruleset will be restart-only too.
 
