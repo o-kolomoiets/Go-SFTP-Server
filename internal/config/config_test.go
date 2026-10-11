@@ -1400,3 +1400,72 @@ func TestIncludeSkipsDotFilesAndUnreadable(t *testing.T) {
 		t.Error("an unreadable include directory was taken as empty")
 	}
 }
+
+// The next and previous keys of a rotation and the host certificates are
+// trusted files like the host key (ADR 0008): refused inside mounts, at
+// start and on reload, and checked for their mode at start.
+func TestRotationFilesOutsideMounts(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks and Unix permissions")
+	}
+
+	dir := t.TempDir()
+	for _, d := range []string{"keys", "rw", "ro"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(name string, mode os.FileMode) {
+		t.Helper()
+		f := filepath.Join(dir, name)
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(f, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("keys/host_key", 0o600)
+	write("keys/host_key.old", 0o644)
+	write("ro/next", 0o600)
+	write("rw/cert", 0o644)
+	for link, target := range map[string]string{"keys/host_key.next": "ro/next", "keys/host_key-cert.pub": "rw/cert"} {
+		if err := os.Symlink(filepath.Join(dir, target), filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := Load(writeConfig(t, dir, `
+config_version = 1
+[server]
+host_keys = ["{dir}/keys/host_key"]
+host_certificates = true
+[mounts.rw]
+path = "{dir}/rw"
+[mounts.ro]
+path = "{dir}/ro"
+read_only = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustValidate(t, c)
+	next := "covers a host key (" + filepath.Join(dir, "keys", "host_key.next") + "): clients could read it"
+	cert := "covers a host certificate (" + filepath.Join(dir, "keys", "host_key-cert.pub") + "): clients could change it"
+	old := filepath.Join(dir, "keys", "host_key.old") + ": permissions 0644 are too open"
+	_, err = c.CheckFS()
+	for _, want := range []string{next, cert, old} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckFS() = %v, want %q", err, want)
+		}
+	}
+	_, _, err = c.CheckFSReload(nil)
+	for _, want := range []string{next, cert} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckFSReload() = %v, want %q", err, want)
+		}
+	}
+	if err != nil && strings.Contains(err.Error(), old) {
+		t.Error("CheckFSReload() checks the mode of the previous key; the loader does that on reload")
+	}
+}

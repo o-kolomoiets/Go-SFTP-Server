@@ -42,12 +42,23 @@ const (
 	maxClientVersionLen      = 128
 )
 
-// Config configures a Server. New fixes HostKeys, CryptoPolicy, Audit and
-// Log; Reload changes the rest.
+// Config configures a Server. New fixes CryptoPolicy, Audit and Log;
+// Reload changes the rest.
 type Config struct {
+	// HostKeys are used for key exchange, at most one per key type.
 	HostKeys []ssh.Signer
-	Auth     *auth.Authenticator
-	Mounts   *vfs.Table
+	// HostCertificates are certificates of HostKeys (ssh.NewCertSigner),
+	// each offered while it is valid.
+	HostCertificates []ssh.Signer
+	// AnnouncedKeys are announced with HostKeys and proved on request, but
+	// not used for key exchange: next and previous keys (ADR 0008).
+	AnnouncedKeys []ssh.Signer
+	// AnnounceHostKeys announces the host keys to OpenSSH clients after
+	// login (hostkeys-00@openssh.com), so that they learn new ones.
+	AnnounceHostKeys bool
+
+	Auth   *auth.Authenticator
+	Mounts *vfs.Table
 	// Grants returns the mounts an authenticated user may access; nil
 	// grants every mount with all permissions (zero-config).
 	Grants func(user string) []vfs.Grant
@@ -81,12 +92,11 @@ type Config struct {
 
 // Server serves SFTP over SSH.
 type Server struct {
-	hostKeys []ssh.Signer
-	algos    algorithms
-	audit    *audit.Logger
-	log      *slog.Logger
-	limits   *limiter
-	rejects  rejectLog
+	algos   algorithms
+	audit   *audit.Logger
+	log     *slog.Logger
+	limits  *limiter
+	rejects rejectLog
 
 	// snap is the configuration for new logins (see snapshot).
 	snap atomic.Pointer[snapshot]
@@ -97,37 +107,40 @@ type Server struct {
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
 	live  map[*liveConn]struct{} // logged-in connections
+
+	now func() time.Time // the clock for host certificates
 }
 
 // snapshot is the reloadable configuration. A connection takes its
-// transport settings (handshake timeout, MaxAuthTries, offered methods)
-// from the snapshot current at accept; every authentication attempt checks
-// the current one; and once logged in, the connection holds the then
-// current snapshot, and a reference to its mount table, for its life.
+// transport settings (host keys, handshake timeout, MaxAuthTries, offered
+// methods) from the snapshot current at accept, and announces its host
+// keys; every authentication attempt checks the current one; and once
+// logged in, the connection holds the then current snapshot, and a
+// reference to its mount table, for its life.
 type snapshot struct {
-	cfg                 Config // with defaults
+	cfg Config // with defaults
+	// ssh has no host keys: each connection adds its own to a copy (see
+	// connAuth.config).
 	ssh                 *ssh.ServerConfig
-	publicKey, password bool // enabled methods
+	announced           []ssh.Signer // host keys, then announced-only keys
+	publicKey, password bool         // enabled methods
 	bans                *auth.BanTable
 }
 
 // New validates cfg and returns a Server. The caller keeps cfg.Mounts open
 // while it is the current table (see Reload).
 func New(cfg Config) (*Server, error) {
-	if len(cfg.HostKeys) == 0 {
-		return nil, errors.New("no host keys")
-	}
 	algos, err := policy(cfg.CryptoPolicy)
 	if err != nil {
 		return nil, err
 	}
 	s := &Server{
-		hostKeys: cfg.HostKeys,
-		algos:    algos,
-		audit:    cfg.Audit,
-		log:      cfg.Log,
-		conns:    make(map[net.Conn]struct{}),
-		live:     make(map[*liveConn]struct{}),
+		algos: algos,
+		audit: cfg.Audit,
+		log:   cfg.Log,
+		conns: make(map[net.Conn]struct{}),
+		live:  make(map[*liveConn]struct{}),
+		now:   time.Now,
 	}
 	if s.audit == nil {
 		s.audit = audit.Discard()
@@ -146,9 +159,10 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// Reload switches new logins to cfg; HostKeys, CryptoPolicy, Audit and Log
-// are ignored. Logged-in connections keep the configuration they logged in
-// under; with cfg.DisconnectRevoked, those whose login cfg would refuse are
+// Reload switches new logins to cfg, and new connections to its host
+// keys; CryptoPolicy, Audit and Log are ignored. Open connections keep
+// their host keys, also for re-keying; logged-in connections keep the
+// configuration they logged in under; with cfg.DisconnectRevoked, those whose login cfg would refuse are
 // closed, and Reload returns how many. Bans, connection counts and the
 // password hashing limit carry over. The caller keeps cfg.Mounts open while
 // it is the current table and may drop its reference to the previous table
@@ -194,7 +208,11 @@ func (s *Server) newSnapshot(cfg Config) (*snapshot, error) {
 	if len(cfg.Methods) == 0 {
 		cfg.Methods = []string{auth.MethodPublicKey}
 	}
-	sn := &snapshot{bans: cfg.Bans}
+	announced, err := hostKeySet(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	sn := &snapshot{bans: cfg.Bans, announced: announced}
 	for _, m := range cfg.Methods {
 		switch m {
 		case auth.MethodPublicKey:
@@ -210,9 +228,6 @@ func (s *Server) newSnapshot(cfg Config) (*snapshot, error) {
 		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
 		MaxAuthTries:            cfg.MaxAuthTries,
 		ServerVersion:           serverVersion,
-	}
-	for _, k := range s.hostKeys {
-		sn.ssh.AddHostKey(k)
 	}
 	sn.cfg = cfg
 	return sn, nil
@@ -424,6 +439,7 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	al := s.audit.With("conn_id", connID, "remote_addr", c.RemoteAddr().String(), "local_addr", c.LocalAddr().String())
 
 	sn := s.snap.Load()
+	accepted := sn // its host keys are the connection's
 	ca := s.newConnAuth(c, al)
 	cfg := ca.config(sn)
 
@@ -494,13 +510,14 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	success := append([]slog.Attr{slog.String("auth_method", ext[auth.ExtMethod])}, keyFields...)
 	al.Event("auth.success", append(success, slog.Int("failed_attempts", int(ca.failures.Load())))...)
 
-	go ssh.DiscardRequests(reqs)
+	proofs := announce(accepted, sconn, al, log)
+	go proofs.serve(reqs)
 	act := &activity{}
 	act.touch(time.Now())
 	done := make(chan struct{})
 	defer close(done)
 	go watch(sconn, act, sn.cfg.IdleTimeout, sn.cfg.KeepaliveInterval, done, lc.close)
-	s.serveChannels(sn, chans, name, act, al, log)
+	s.serveChannels(sn, chans, name, act, proofs, al, log)
 	result := "ok"
 	if r := lc.reason.Load(); r != nil {
 		result = *r
@@ -532,9 +549,23 @@ func (s *Server) newConnAuth(c net.Conn, al *audit.Logger) *connAuth {
 }
 
 // config returns the server configuration for the connection: sn's
-// transport settings, with callbacks that check the current snapshot.
+// transport settings and host keys, with the host certificates valid now,
+// and callbacks that check the current snapshot.
 func (ca *connAuth) config(sn *snapshot) *ssh.ServerConfig {
+	// sn.ssh has no host keys, so AddHostKey fills a new array for this
+	// copy. Added to a copy of a config that has keys, it would write into
+	// the array the copies share: a data race, and an open connection
+	// could re-key with another connection's certificate (ADR 0008).
 	cfg := *sn.ssh
+	for _, k := range sn.cfg.HostKeys {
+		cfg.AddHostKey(k)
+	}
+	now := ca.s.now()
+	for _, c := range sn.cfg.HostCertificates {
+		if certValid(c, now) {
+			cfg.AddHostKey(c)
+		}
+	}
 	if sn.publicKey {
 		// The key is checked when the client offers it, and again once the
 		// client has proved that it holds it: x/crypto does not ask the
@@ -677,7 +708,7 @@ func (ca *connAuth) fail() {
 	ca.al.Event("auth.ban", slog.String("source", src), slog.Int64("duration_ms", bans.Duration().Milliseconds()))
 }
 
-func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user string, act *activity, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user string, act *activity, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
 	var (
 		sessions sync.WaitGroup
 		active   atomic.Int32
@@ -699,14 +730,14 @@ func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user s
 		active.Add(1)
 		sessions.Go(func() {
 			defer active.Add(-1)
-			s.serveSession(sn, activeChannel{ch, act}, creqs, user, al, log)
+			s.serveSession(sn, activeChannel{ch, act}, creqs, user, proofs, al, log)
 		})
 	}
 }
 
 // serveSession answers channel requests: only one "subsystem sftp" is
 // accepted; shell, exec, pty-req, env and the rest are refused.
-func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Request, user string, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Request, user string, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
 	var done chan struct{}
 	for req := range reqs {
 		if req.Type == "subsystem" && done == nil && isSFTP(req.Payload) {
@@ -714,7 +745,7 @@ func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Req
 			done = make(chan struct{})
 			go func() {
 				defer close(done)
-				s.serveSFTP(sn, ch, user, al, log)
+				s.serveSFTP(sn, ch, user, proofs, al, log)
 			}()
 			continue
 		}
@@ -734,7 +765,7 @@ func isSFTP(payload []byte) bool {
 	return ssh.Unmarshal(payload, &p) == nil && p.Name == "sftp"
 }
 
-func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
 	sessionID := newID()
 	al = al.With("session_id", sessionID)
 	log = log.With("session_id", sessionID)
@@ -762,6 +793,9 @@ func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, al *audit.
 	rs := sftp.NewRequestServer(sftpd.NewGate(ch), h.Handlers(), sftp.WithStartDirectory("/"))
 	err := rs.Serve()
 
+	// The client may still be waiting for a host key proof; it would not
+	// once the session ends.
+	proofs.wait(proofWait)
 	// Without exit-status OpenSSH scp reports failure even after a complete
 	// transfer. It must be sent before the channel is closed.
 	var code uint32

@@ -163,8 +163,8 @@ log.
 
 The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md);
 progress is tracked in [TASKS.md](TASKS.md). Done for v0.4: reload on
-SIGHUP, user management commands, SSH user certificates. Next: host key
-rotation and host certificates, metrics, hooks and systemd integration.
+SIGHUP, user management commands, SSH user certificates, host key rotation
+and host certificates. Next: metrics, hooks and systemd integration.
 
 ## Contributing
 

@@ -5,9 +5,9 @@ change. Tested:
 
 | Client | Version | What is checked |
 |---|---|---|
-| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; `on_conflict = "version"`; `kill -9` of the client during an atomic upload; user certificates from `ssh-keygen -s` (trusted CA, `force-command=internal-sftp`, another principal refused, revoked after a reload, a KRL refused); refused: symlink escape, `ln`, `ln -s`, shell and exec |
-| paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users, password login, user name change within a connection refused |
-| rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount |
+| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; `on_conflict = "version"`; `kill -9` of the client during an atomic upload; user certificates from `ssh-keygen -s` (trusted CA, `force-command=internal-sftp`, another principal refused, revoked after a reload, a KRL refused); host key rotation with `UpdateHostKeys` (the next key learned before `--finish`, the previous key forgotten after `--retire`; RSA with `HostKeyAlgorithms=rsa-sha2-256` and a one-command session); a host certificate with `@cert-authority`; refused: symlink escape, `ln`, `ln -s`, shell and exec |
+| paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users, password login, user name change within a connection refused; the plain host key while a host certificate is served |
+| rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount; with a host certificate served, `known_hosts_file` with the plain key fails and `host_key_algorithms` fixes it |
 | lftp | 4.9.2 | put, get, listing |
 
 WinSCP, FileZilla and Cyberduck are not tested automatically yet; WinSCP has
@@ -46,11 +46,22 @@ each time the content differs. For folders that are synced, use
 goes to `.versions`, which `rclone sync` does not see and so does not try to
 delete. Use `--inplace` to upload directly to the final name.
 
+With `server.host_certificates = true`, rclone (like other Go programs)
+prefers the certificate and fails with "ssh: no authorities for hostname"
+when `known_hosts_file` holds only the plain host key. Add
+`host_key_algorithms = ssh-ed25519` (the type of the key it knows), or a
+`@cert-authority` line for the CA.
+
 ### paramiko
 
 `SFTPClient.put(..., confirm=True)` checks the size of the uploaded file by
 name; with the rename policy the check is answered for the copy
 (`stat_redirect`), so it passes. `open(name, "a")` resumes a file.
+
+paramiko keeps one host key per type and host, and does not learn new keys
+from the server. During a host key rotation, it sees the new key at
+`rotate --finish`; replace its `known_hosts` line then, or rotate to another
+key type ([Rotation](configuration.md#rotation)).
 
 ### WinSCP
 

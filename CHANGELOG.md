@@ -62,9 +62,41 @@ Incompatible changes are prefixed with **BREAKING:**.
   sign its certificate. `user list` shows the principals.
 - `command="internal-sftp"` (or a path to `sftp-server`, without arguments)
   is accepted in `authorized_keys`, since gosftpd serves only SFTP.
+- Host key rotation without breaking clients
+  ([ADR 0008](docs/adr/0008-host-key-rotation.md)): after login, gosftpd
+  announces its host keys to OpenSSH clients, with a next key `KEY.next`
+  and a previous key `KEY.old` (`hostkeys-00@openssh.com`), and proves that
+  it holds them (`hostkeys-prove-00@openssh.com`), so that OpenSSH 8.5 and
+  later add the next key to `known_hosts` before it is used and drop retired
+  keys. `gosftpd hostkey rotate` creates the next key; `--finish`,
+  `--rollback`, `--retire` and `--abort` take the further steps. New setting
+  `server.announce_host_keys` (on by default); new audit event
+  `conn.hostkeys_proved`. See
+  [docs/configuration.md](docs/configuration.md#host-keys).
+- Host certificates: with `server.host_certificates = true`, `KEY-cert.pub`
+  is served with each host key while it is valid, after the checks OpenSSH
+  applies; warnings before expiry. Go clients that pin the plain host key
+  (rclone) then need `host_key_algorithms`, see
+  [Host certificates](docs/configuration.md#host-certificates).
+- `hostkey show --config` shows every configured host key with its next and
+  previous keys and certificates; the start banner and `user add --write`
+  show the next key. During a rotation, or with a certificate, `hostkey
+  show` prints more lines after those of the current key: a script that
+  takes its last line should take the third.
 
 ### Changed
 
+- Host keys are read again on reload (they were restart-only): new
+  connections use the new keys, open ones keep theirs. A reload never
+  generates a key, and a host key that cannot be used keeps the running
+  keys instead of failing the reload. A host key, next or previous key or
+  host certificate inside a mount fails the reload, as every file gosftpd
+  trusts does (also the running keys, when they stay). Configuration
+  management that edits `server.host_keys` changes the server's identity at
+  the next reload.
+- **BREAKING:** two host keys of one type are refused (only one of them was
+  used), and `host_key_auto_generate` no longer creates a key next to an
+  existing `KEY.next` or `KEY.old`.
 - **BREAKING:** `serve` refuses a configuration where the configuration
   file, an included file, an `authorized_keys` file, a host key or the
   audit log lies inside a mount clients can write, or a host key or
