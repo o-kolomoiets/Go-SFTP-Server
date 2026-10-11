@@ -153,6 +153,7 @@ log.
 - [Quick start](docs/quickstart.md)
 - [Configuration](docs/configuration.md)
 - [Audit log](docs/audit-log.md)
+- [Metrics and health checks](docs/metrics.md)
 - [Security model](docs/security.md), [threat model](docs/security/threat-model.md)
   and [hardening guide](docs/security/hardening.md)
 - [Client compatibility](docs/interop.md)
@@ -164,7 +165,8 @@ log.
 The plan, milestones and design decisions are in [ROADMAP.md](ROADMAP.md);
 progress is tracked in [TASKS.md](TASKS.md). Done for v0.4: reload on
 SIGHUP, user management commands, SSH user certificates, host key rotation
-and host certificates. Next: metrics, hooks and systemd integration.
+and host certificates, Prometheus metrics and health checks. Next: hooks
+and systemd integration.
 
 ## Contributing
 

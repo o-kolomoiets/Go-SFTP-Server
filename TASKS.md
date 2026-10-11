@@ -13,7 +13,7 @@ The plan, rationale and acceptance criteria are in [ROADMAP.md](ROADMAP.md). Thi
 | M2 MVP | v0.2.0 | ✅ | 18 / 18 |
 | M3 Hardening | v0.3.0 | ✅ | 12 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
-| M4 Multi-user and Ops | v0.4.0 | 🔄 | 3 / 9 |
+| M4 Multi-user and Ops | v0.4.0 | 🔄 | 5 / 9 |
 | M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
 | M6 v1.0 | v1.0.0 | ⬜ | 0 / 8 |
 
@@ -130,8 +130,8 @@ Three PRs: M3a — network and login (01–03, 07, 10, 12), M3b — disk and upl
 | M4-02 | sd_notify, drop-in for systemd < 253 | ✅ | `READY`/`RELOADING`+`MONOTONIC_USEC`/`STOPPING`; the `legacy-notify.conf` drop-in is installed with the packages (M4-08) |
 | M4-03 | `user add --write`, `disable`, `remove` | ✅ | `users.d/NAME.toml` with a config check and instructions for the partner; `disable`/`enable`/`remove` without losing comments; `reason=expired` (and others) in `auth.failure`; a key of such an account is rejected as soon as it is offered (without an "oracle"), `VerifiedPublicKeyCallback` re-checks after the signature |
 | M4-04 | SSH user certificates | ✅ | ADR 0007 after three design reviews; `auth.trusted_user_ca_keys[_file]` with `users.NAME.principals`, `cert-authority` lines with `principals=`, `auth.revoked_keys[_file]` (fails closed; a certificate revokes its key); checks in gosftpd's own order with reasons `key_revoked`, `cert_principal`, `cert_expired`, `cert_not_yet_valid`, `cert_invalid`; `cert_key_id`, `cert_serial`, `cert_ca_fp` in the audit log; interop with OpenSSH certificates |
-| M4-05 | Host key rotation, host certificates | 🔄 | ADR 0008 after three design reviews (43 findings); `hostkeys-00`/`hostkeys-prove-00@openssh.com` on top of x/crypto (RSA proofs with the negotiated hash, one proof per connection, a short wait before a session ends), `hostkey rotate` with `--finish`/`--rollback`/`--retire`/`--abort`, reloadable host keys, `server.host_certificates` and `server.announce_host_keys`, `conn.hostkeys_proved`, `FuzzHostKeyProof`; interop with OpenSSH `UpdateHostKeys`, `@cert-authority`, paramiko and rclone; awaiting a PR |
-| M4-06 | Admin listener (`/metrics`, `/healthz`, `/readyz`), `healthcheck` | ⬜ |
+| M4-05 | Host key rotation, host certificates | ✅ | ADR 0008 after three design reviews (43 findings); `hostkeys-00`/`hostkeys-prove-00@openssh.com` on top of x/crypto (RSA proofs with the negotiated hash, one proof per connection, a short wait before a session ends), `hostkey rotate` with `--finish`/`--rollback`/`--retire`/`--abort`, reloadable host keys, `server.host_certificates` and `server.announce_host_keys`, `conn.hostkeys_proved`, `FuzzHostKeyProof`; interop with OpenSSH `UpdateHostKeys`, `@cert-authority`, paramiko and rclone |
+| M4-06 | Admin listener (`/metrics`, `/healthz`, `/readyz`), `healthcheck` | 🔄 | D12 decided by the owner: no metrics library; ADR 0009 after three design reviews (46 findings); `internal/obs` writes the text format 0.0.4 (test parser, golden file, name rules, `promtool check metrics` in interop), 18 `gosftpd_` metrics with closed label sets plus Go and process metrics without stop-the-world reads; `/readyz` tokens `starting`/`stopping`/`audit_unavailable`, audit recovery without traffic; hardened HTTP server (limits, 421 for foreign hosts on loopback, pprof behind `-tags pprof`); `gosftpd healthcheck` with exit codes 0/1 only; CI fails release binaries over 10 MiB; awaiting a PR |
 | M4-07 | Hooks (exec, webhook with HMAC) | ⬜ |
 | M4-08 | PROXY protocol v2, systemd unit, sysusers, tmpfiles, Landlock | ⬜ |
 | M4-09 | Documents: operations, metrics, recipes; M4 DoD, release `v0.4.0` | ⬜ |
@@ -183,3 +183,4 @@ Three PRs: M3a — network and login (01–03, 07, 10, 12), M3b — disk and upl
 | 2026-10-10 | M4-03: `user add --write`, `user disable`/`enable`/`remove`, refusal reasons in `auth.failure`, key re-check after the signature; review from three angles (all findings fixed) | [o-kolomoiets/Go-SFTP-Server#14](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/14) |
 | 2026-10-10 | The whole project in English (ADR 0006): ROADMAP.md and TASKS.md translated line by line and reviewed against the original | [o-kolomoiets/Go-SFTP-Server#15](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/15) |
 | 2026-10-10 | M4-04: SSH user certificates and revoked keys (ADR 0007); review from three angles (all findings fixed) | [o-kolomoiets/Go-SFTP-Server#16](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/16) |
+| 2026-10-11 | M4-05: host key rotation (`hostkeys-00`/`hostkeys-prove-00@openssh.com`, `hostkey rotate`), reloadable host keys, host certificates (ADR 0008); three design reviews and three implementation reviews, one with crash injection at every file operation (all findings fixed) | [o-kolomoiets/Go-SFTP-Server#17](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/17) |

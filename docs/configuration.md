@@ -453,6 +453,17 @@ without a restart; see [Reload](#reload).
 |---|---|---|
 | `disconnect_removed_users` | `false` | After a reload, close the connections whose login the new configuration would refuse: the user was removed, disabled or has expired, the key, certificate CA or password used was removed, revoked or changed, or `allow_from` no longer matches. A certificate whose validity period has passed since the login does not count: sshd checks it only at login, and certificates often last hours. Otherwise open connections keep the configuration they logged in under. |
 
+## `[metrics]`
+
+The admin listener: an HTTP server with `/metrics` (Prometheus), `/healthz`
+and `/readyz`. See [metrics.md](metrics.md) for the endpoints, the metrics
+and examples.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `listen` | `""` | `HOST:PORT` of the admin listener, for example `"127.0.0.1:9090"`; empty means none. Restart only. It has no authentication or TLS: an address that is not loopback gets a warning. A failure to bind fails the start. |
+| `pprof` | `false` | Serves `/debug/pprof` there (Go profiles), in binaries built with `-tags pprof` only; release binaries refuse it as a configuration error. A reload turns it on and off. |
+
 ## Host keys
 
 `server.host_keys` lists the host private keys, at most one per key type
@@ -593,8 +604,8 @@ command-line flags and environment, and checks it like `config validate
   too, when they stay). A change of the host keys is logged with the
   fingerprints.
 - **Restart only:** `server.listen`, `server.host_key_auto_generate`,
-  `server.crypto_policy`, `log.format`, `audit.events` and
-  `audit.on_error`. A change is logged as a warning and listed in the
+  `server.crypto_policy`, `log.format`, `audit.events`, `audit.on_error`
+  and `metrics.listen`. A change is logged as a warning and listed in the
   `server.reload` audit event; the running value stays.
 
 Problems that concern one user or one mount do not stop a reload: an
@@ -654,5 +665,7 @@ is given: run it as a dedicated user.
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |
 | `gosftpd hostkey show [--config FILE] [--known-hosts HOST:PORT]` | Prints the fingerprint, public key and `known_hosts` line of the host key (`--host-key`, `--state-dir`) or, with `--config`, of every configured one; then its next and previous keys and the certificate files that exist. The first lines describe the current key. |
 | `gosftpd hostkey rotate [--type T] \| --finish \| --rollback \| --retire \| --abort` | Rotates a host key in steps, see [Rotation](#rotation). Selects the key like `show`; with `--config`, `--host-key` picks one of several. |
+| `gosftpd healthcheck [--address HOST:PORT \| --url URL] [--ready] [--timeout 5s]` | Checks that the server answers, for container health checks; see [metrics.md](metrics.md#gosftpd-healthcheck). |
 
 Exit codes: 0 success, 1 runtime error, 2 invalid usage or configuration.
+`gosftpd healthcheck` exits with 0 or 1 only: Docker reserves 2.

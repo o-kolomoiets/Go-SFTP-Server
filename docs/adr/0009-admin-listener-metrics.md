@@ -28,9 +28,11 @@ banner prints `metrics: http://ADDR` and `server.start` gets `metrics_listen`.
 `metrics.pprof` is reloadable (a flag the handlers check), so a running
 process can be profiled without a restart.
 
-Release binaries do not contain pprof: `net/http/pprof` costs 0.6 MB, and
-the HTTP server itself 2 MB, against the 10 MB budget of §11.1 (7.3 MB
-before). `pprof = true` in a binary built without `-tags pprof` is a
+Release binaries do not contain pprof: `net/http/pprof` costs 0.6 MB, the
+HTTP server itself 2.2 MB and the HTTP client of `healthcheck --url` 0.5 MB,
+against the 10 MiB budget of §11.1 (linux/amd64 7.27 MB before, 9.96 MB
+after; darwin/amd64 10.17 MB, 9.70 MiB). The webhooks of M4-07 need the same
+client. `pprof = true` in a binary built without `-tags pprof` is a
 configuration error that says so.
 
 The listener has no authentication or TLS. `config validate` and `serve`
@@ -145,7 +147,7 @@ work, all without `runtime.ReadMemStats` (which stops the world):
 |---|---|
 | `go_info{version}` | `runtime.Version()` |
 | `go_goroutines` | `runtime.NumGoroutine()` |
-| `go_threads` | `runtime/metrics` `/sched/threads/total:threads` |
+| `go_threads` | `runtime.ThreadCreateProfile(nil)`: threads created, as client_golang reports it (Go 1.26 has no `runtime/metrics` value for it) |
 | `go_memstats_heap_alloc_bytes` | `/memory/classes/heap/objects:bytes` |
 | `go_memstats_sys_bytes` | `/memory/classes/total:bytes` |
 | `go_gc_duration_seconds` (summary: quantiles 0, 0.25, 0.5, 0.75, 1) | `debug.ReadGCStats`: pause quantiles, `_sum` total pause, `_count` cycles |
@@ -179,8 +181,9 @@ an exception to §6.7), with exactly one line on stderr.
 - **TCP (default).** The address: `--address`, else `GOSFTPD_LISTEN`, else
   the first `server.listen` of the file `serve` would find (`--config`,
   `GOSFTPD_CONFIG`, the search path), read leniently (only that key: no
-  includes, no validation, unknown keys ignored, so a broken edit that a
-  reload refused does not fail the check), else `:2022`. Port 0 is refused.
+  includes, no validation, unknown keys ignored, so an invalid value that a
+  reload refused does not fail the check; a file that is not TOML does,
+  since the address cannot be known), else `:2022`. Port 0 is refused.
   A wildcard host is dialed as `127.0.0.1`, then `::1`. Only that one
   address is probed. The probe reads at most 255 bytes up to a line
   starting with `SSH-2.0-` and closes without sending a version. Outcomes:

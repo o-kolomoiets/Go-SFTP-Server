@@ -37,6 +37,9 @@ trusted.
 - Connection layer: channels and global requests (pre-auth → session).
 - SFTP packets, including extensions (session → `internal/sftpd` →
   `internal/vfs` → `os.Root`).
+- The admin listener (`[metrics] listen`, off by default): HTTP requests
+  to `/metrics`, `/healthz`, `/readyz` and, in binaries built with
+  `-tags pprof`, `/debug/pprof` (whoever can reach it → process).
 - Configuration, host keys, `authorized_keys` files, CLI flags and
   environment (administrator → process).
 - The process and the operating system; CI and the release artifacts.
@@ -63,11 +66,13 @@ trusted.
 | Repudiation | Acting while the audit log cannot be written | `audit.on_error = "fail-closed"`; a file that cannot be reopened after rotation fails writes instead of filling the rotated file | server and cli tests |
 | Information disclosure | Host paths in errors, host accounts in listings | Fixed client messages; virtual owners | protocol tests |
 | Information disclosure | Reading through planted hard links or bind mounts (N4) | Not prevented by `os.Root`; documented limit | — |
+| Information disclosure | Learning versions, users or load from the admin listener (N1) | Off by default; a warning when it is not on loopback; on loopback, requests must name a loopback host (DNS rebinding gets 421); labels hold no user, path, address or fingerprint; pprof only in binaries built for it, off by default, without `cmdline` (ADR 0009) | obs and cli tests, interop with promtool |
 | Denial of service | Connection floods, slow handshakes (N1) | Connection limits before the handshake; handshake, idle and keepalive timeouts; bans | 1000-connection test, synctest timeouts |
 | Denial of service | Password hashing exhaustion (N1) | Opt-in passwords, bounded hash costs, one check per CPU, 1024-byte limit | auth tests |
 | Denial of service | File descriptor or memory exhaustion through handles (N3) | 64 handles per session | handle limit test |
 | Denial of service | Filling the disk, sparse writes (N3) | `max_file_size` on the end of every write, `min_free_space` | vfs tests |
 | Denial of service | Crashing the process through a library race (N3) | `sftpd.Gate` | see above |
+| Denial of service | Exhausting the process through the admin listener (N1) | Header size and time limits, at most 64 connections and 4 concurrent scrapes or profiles (503 beyond), profiles of at most 60 s; its failure does not stop the SFTP server | obs tests |
 | Elevation of privilege | Shell, exec, forwarding, PTY | Only the `sftp` subsystem is accepted | server tests, interop |
 | Elevation of privilege | A confinement bug while running as root | `serve` refuses root without `--allow-root` | cli tests |
 | Supply chain (N5) | Compromised dependency or action | Minimal dependencies, `govulncheck`, CodeQL, actions pinned by commit SHA, Dependabot, OpenSSF Scorecard; checksums for releases | CI |
@@ -89,4 +94,7 @@ trusted.
   the Diffie-Hellman groups make each exchange costlier; rate-limit new
   connections in the firewall for servers on the internet (see
   [hardening.md](hardening.md)).
+- The admin listener has no authentication or TLS; who can reach it can
+  read the metrics, and with pprof on, profile the process (see
+  [hardening.md](hardening.md#admin-listener)).
 - Release artifacts are not signed yet (planned for v0.5).

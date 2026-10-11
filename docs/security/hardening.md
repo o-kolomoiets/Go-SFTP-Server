@@ -18,6 +18,8 @@ described in [configuration.md](../configuration.md).
 - [ ] Inbox mounts set `max_file_size`; `min_free_space` is not 0.
 - [ ] Mounts that other programs read use `atomic_uploads = true`.
 - [ ] The audit log goes to a file or journald that you keep and watch.
+- [ ] The admin listener, if on, is on loopback or a private network, and
+      `pprof` is off.
 - [ ] You follow releases and security advisories of the repository.
 
 ## Run as a dedicated user
@@ -118,6 +120,20 @@ forward 22 in the firewall.
   rather than turning bans off.
 - Bans live in memory; for longer bans, feed `auth.ban` audit events to
   fail2ban or the firewall.
+
+## Admin listener
+
+`[metrics] listen` serves `/metrics`, `/healthz` and `/readyz` over plain
+HTTP without authentication ([metrics.md](../metrics.md)).
+
+- Keep it on `127.0.0.1` and scrape from the host, or on a private network
+  that only Prometheus reaches; in Docker publish it as
+  `-p 127.0.0.1:9090:9090`. Never expose it to the internet.
+- Behind a reverse proxy with authentication, keep gosftpd on loopback.
+- Release binaries do not contain pprof. A binary built with `-tags pprof`
+  should run with `pprof = false` and turn it on only while profiling.
+- For a container health check, `gosftpd healthcheck` needs no admin
+  listener.
 
 ## Authentication
 

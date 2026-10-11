@@ -12,9 +12,12 @@ A new dependency requires removing another one or revisiting this rule.
 | `github.com/pkg/sftp`            | v1.13.11 | SFTP `RequestServer`                     | M1    |
 | `golang.org/x/sys`               | v0.48.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
+| `golang.org/x/term`              | v0.46.0  | password input without echo              | M3    |
 
-Planned later (see ROADMAP.md §4.5): `golang.org/x/time`, `golang.org/x/term`
-(M3), Prometheus `client_golang`, `go-landlock`, `go-proxyproto` (M4).
+Planned later (see ROADMAP.md §4.5): `go-landlock`, `go-proxyproto` (M4);
+`golang.org/x/time` for bandwidth limits, if they come.
+Metrics need no library: gosftpd writes the Prometheus text format itself
+(decision D12, ADR 0009).
 
 ### Why `golang.org/x/crypto` is a direct dependency
 
