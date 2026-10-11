@@ -37,6 +37,11 @@ type runner struct {
 
 	spec atomic.Pointer[Spec]
 
+	// startMu: a worker holds it for reading from its last look at
+	// removed until its process started; remove takes it for writing.
+	startMu sync.RWMutex
+	gone    chan struct{} // closed by remove
+
 	mu       sync.Mutex
 	cond     *sync.Cond
 	queue    []*item
@@ -48,10 +53,11 @@ type runner struct {
 
 	drops    map[string]int // dropped events per user since the last warning
 	lastWarn time.Time
+	flush    *time.Timer // warns of the drops held back by the once-a-minute limit
 }
 
 func newRunner(d *Dispatcher, s *Spec) *runner {
-	r := &runner{d: d, name: s.Name, kind: s.Kind(), changed: make(chan struct{}), drops: map[string]int{}}
+	r := &runner{d: d, name: s.Name, kind: s.Kind(), changed: make(chan struct{}), gone: make(chan struct{}), drops: map[string]int{}}
 	r.cond = sync.NewCond(&r.mu)
 	r.spec.Store(s)
 	d.track(r)
@@ -204,17 +210,26 @@ func (r *runner) enqueue(e *Event) {
 }
 
 // dropLocked counts an event dropped at the door and warns at most once a
-// minute with the counts per user; r.mu is held.
+// minute with the counts per user: drops within the minute are warned of
+// when it ends. r.mu is held.
 func (r *runner) dropLocked(user string, s *Spec) {
 	r.count(resultDropped)
 	r.drops[user]++
-	if time.Since(r.lastWarn) < time.Minute {
+	wait := time.Until(r.lastWarn.Add(time.Minute))
+	if wait > 0 && !r.removed && !r.d.isClosing.Load() {
+		if r.flush == nil {
+			r.flush = time.AfterFunc(wait, r.flushDrops)
+		}
 		return
 	}
 	r.warnDropsLocked(s)
 }
 
 func (r *runner) warnDropsLocked(s *Spec) {
+	if r.flush != nil {
+		r.flush.Stop()
+		r.flush = nil
+	}
 	if len(r.drops) == 0 {
 		return
 	}
@@ -270,12 +285,17 @@ func (r *runner) update(s *Spec) {
 	r.cond.Broadcast()
 }
 
-// remove stops the hook: it takes no more events and drops those queued;
-// a delivery in progress finishes.
+// remove stops the hook: it takes no more events and drops those queued
+// or held; a process or an attempt already started finishes. Once it
+// returns, the hook starts no process.
 func (r *runner) remove() {
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.removed = true
+	close(r.gone)
+	r.warnDropsLocked(r.spec.Load())
 	if n := len(r.queue); n > 0 {
 		for range n {
 			r.count(resultDropped)

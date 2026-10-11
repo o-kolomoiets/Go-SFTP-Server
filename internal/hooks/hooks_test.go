@@ -4,6 +4,7 @@ package hooks
 
 import (
 	"bytes"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -291,8 +292,100 @@ func TestWebhookGivesUp(t *testing.T) {
 		if v := value(m, `gosftpd_hook_deliveries_total{result="failed",type="webhook"}`); v != 1 {
 			t.Errorf("failed = %v", v)
 		}
-		if !strings.Contains(logs.String(), "attempts=5") || strings.Contains(logs.String(), "secret-token") {
+		if !strings.Contains(logs.String(), "attempts=5") || strings.Contains(logs.String(), "secret-token") || strings.Contains(logs.String(), "secret-query") {
 			t.Errorf("log:\n%s", logs)
+		}
+	})
+}
+
+// A timeout and a TLS error leave no trace of the URL's path or query in
+// the log, at any level.
+func TestWebhookErrorsWithoutToken(t *testing.T) {
+	t.Parallel()
+	for name, fail := range map[string]func(*http.Request) (*http.Response, error){
+		"timeout": func(r *http.Request) (*http.Response, error) {
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		},
+		"tls": func(*http.Request) (*http.Response, error) {
+			return nil, x509.UnknownAuthorityError{}
+		},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			m := obs.NewMetrics("test")
+			log, logs := testLog()
+			d := New(Options{Log: log, Metrics: m, Transport: &fakeTransport{fn: func(_ int, r *http.Request) (*http.Response, error) { return fail(r) }}})
+			s := webhookSpec("notify")
+			s.Webhook.Timeout = time.Second
+			d.Update([]Spec{s})
+			d.Notify(upload("alice", "/a.pdf"))
+			for range 200 {
+				time.Sleep(time.Second)
+			}
+			synctest.Wait()
+			d.Close(time.Now().Add(time.Second))
+			if v := value(m, `gosftpd_hook_deliveries_total{result="failed",type="webhook"}`); v != 1 {
+				t.Errorf("%s: failed = %v", name, v)
+			}
+			if out := logs.String(); strings.Contains(out, "secret-token") || strings.Contains(out, "secret-query") {
+				t.Errorf("%s: the URL's token is in the log:\n%s", name, out)
+			}
+		})
+	}
+}
+
+// A hook removed while its event waits for a retry drops it at once: no
+// further attempt, no retry counted, nothing left for shutdown.
+func TestRemovedDuringRetry(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := obs.NewMetrics("test")
+		log, logs := testLog()
+		ft := &fakeTransport{fn: func(int, *http.Request) (*http.Response, error) {
+			return reply(http.StatusServiceUnavailable, "Retry-After", "120"), nil
+		}}
+		d := New(Options{Log: log, Metrics: m, Transport: ft})
+		d.Update([]Spec{webhookSpec("notify")})
+		d.Notify(upload("alice", "/report.pdf"))
+		synctest.Wait() // the first attempt failed; the retry waits
+		d.Update(nil)
+		synctest.Wait()
+		if n := d.QueueLength(); n != 0 {
+			t.Errorf("QueueLength = %d right after the removal", n)
+		}
+		start := time.Now()
+		d.Close(time.Now().Add(30 * time.Second))
+		if el := time.Since(start); el != 0 {
+			t.Errorf("Close took %v", el)
+		}
+		if ft.count() != 1 || value(m, `gosftpd_hook_retries_total`) != 0 || value(m, `gosftpd_hook_deliveries_total{result="dropped",type="webhook"}`) != 1 {
+			t.Errorf("attempts %d, retries %v, dropped %v", ft.count(), value(m, `gosftpd_hook_retries_total`),
+				value(m, `gosftpd_hook_deliveries_total{result="dropped",type="webhook"}`))
+		}
+		if strings.Contains(logs.String(), "reason=shutdown") {
+			t.Errorf("an event of a removed hook is offered for replay:\n%s", logs)
+		}
+	})
+}
+
+// Shutdown during a retry wait: the event is dropped and logged for
+// replay, and the retry that never happened is not counted.
+func TestCloseDuringRetry(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := obs.NewMetrics("test")
+		log, logs := testLog()
+		ft := &fakeTransport{fn: func(int, *http.Request) (*http.Response, error) { return reply(http.StatusServiceUnavailable), nil }}
+		d := New(Options{Log: log, Metrics: m, Transport: ft})
+		d.Update([]Spec{webhookSpec("notify")})
+		d.Notify(upload("alice", "/report.pdf"))
+		synctest.Wait()
+		d.Close(time.Now())
+		if ft.count() != 1 || value(m, `gosftpd_hook_retries_total`) != 0 || value(m, `gosftpd_hook_deliveries_total{result="dropped",type="webhook"}`) != 1 {
+			t.Errorf("attempts %d, retries %v", ft.count(), value(m, `gosftpd_hook_retries_total`))
+		}
+		if !strings.Contains(logs.String(), "path=/report.pdf") {
+			t.Errorf("not logged for replay:\n%s", logs)
 		}
 	})
 }
@@ -335,6 +428,38 @@ func TestQueueFull(t *testing.T) {
 		if !strings.Contains(logs.String(), "alice=") || !strings.Contains(logs.String(), "bob=") {
 			t.Errorf("drop warning without users:\n%s", logs)
 		}
+	})
+}
+
+// The drops of a burst are warned of when the minute ends, with their
+// count per user, without waiting for another drop or for shutdown.
+func TestQueueFullWarnsOfTheBurst(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		log, logs := testLog()
+		block := make(chan struct{})
+		ft := &fakeTransport{fn: func(int, *http.Request) (*http.Response, error) {
+			<-block
+			return reply(http.StatusOK), nil
+		}}
+		d := New(Options{Log: log, Transport: ft})
+		s := webhookSpec("notify")
+		s.Queue = 1
+		d.Update([]Spec{s})
+		d.Notify(upload("alice", "/f0"))
+		synctest.Wait() // f0 is in flight; then one is queued and 98 dropped
+		for i := 1; i < 100; i++ {
+			d.Notify(upload("alice", fmt.Sprintf("/f%d", i)))
+		}
+		synctest.Wait()
+		time.Sleep(61 * time.Second)
+		synctest.Wait()
+		out := logs.String()
+		if !strings.Contains(out, `dropped=1 by_user="alice=1"`) || !strings.Contains(out, `dropped=97 by_user="alice=97"`) {
+			t.Errorf("the burst is not warned of within a minute:\n%s", out)
+		}
+		close(block)
+		d.Close(time.Now().Add(time.Second))
 	})
 }
 
@@ -451,6 +576,38 @@ func TestUpdate(t *testing.T) {
 		}
 		// hr for a (filtered again), x and y for b (removed).
 		if v := value(m, `gosftpd_hook_deliveries_total{result="dropped",type="webhook"}`); v != 3 {
+			t.Errorf("dropped = %v", v)
+		}
+	})
+}
+
+// A reload that narrows a hook's mounts drops the event its worker holds
+// in its delay when the delay ends, not only the queued ones.
+func TestUpdateRefiltersHeldEvent(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		m := obs.NewMetrics("test")
+		ft := &fakeTransport{fn: func(int, *http.Request) (*http.Response, error) { return reply(http.StatusOK), nil }}
+		d := New(Options{Metrics: m, Transport: ft})
+		s := webhookSpec("notify")
+		s.Delay = time.Minute
+		s.Mounts = []string{"inbox", "hr"}
+		d.Update([]Spec{s})
+		hr := upload("alice", "/salaries.pdf")
+		hr.Mount = "hr"
+		d.Notify(hr) // held by the worker for its delay
+		d.Notify(upload("alice", "/x.pdf"))
+		synctest.Wait()
+		narrowed := s
+		narrowed.Mounts = []string{"inbox"}
+		d.Update([]Spec{narrowed})
+		time.Sleep(3 * time.Minute)
+		synctest.Wait()
+		d.Close(time.Now().Add(time.Second))
+		if ft.count() != 1 || !bytes.Contains(ft.body[0], []byte("/x.pdf")) {
+			t.Errorf("%d deliveries, want only /x.pdf", ft.count())
+		}
+		if v := value(m, `gosftpd_hook_deliveries_total{result="dropped",type="webhook"}`); v != 1 {
 			t.Errorf("dropped = %v", v)
 		}
 	})

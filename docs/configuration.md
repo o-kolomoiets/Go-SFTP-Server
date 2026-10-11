@@ -484,7 +484,7 @@ webhook = { url = "https://example.internal/hooks/sftp", secret_file = "/etc/gos
 | Key | Default | Meaning |
 |---|---|---|
 | `name` | required | Unique; it names the hook in the log. |
-| `on` | required | Events: `fs.upload`, `fs.download`, `fs.rename`, `fs.remove`, `fs.mkdir`, `fs.rmdir`, `fs.setstat`. A hook fires only for a result of `ok`. `fs.upload` also fires for the rename that completes a temp-file upload (`"uploaded":true`, see [hooks.md](hooks.md#a-file-arrived)). |
+| `on` | required | Events: `fs.upload`, `fs.download`, `fs.rename`, `fs.remove`, `fs.mkdir`, `fs.rmdir`, `fs.setstat`. A hook fires only for a result of `ok`. `fs.upload` also fires for the first rename of a file its uploader just uploaded, which completes a temp-file upload (`"uploaded":true`, see [hooks.md](hooks.md#a-file-arrived)). |
 | `mounts` | all | Only events in these mounts (names compared case-insensitively). |
 | `glob` | all | File name patterns (`path.Match`, case-sensitive) matched against the base name of the event's file (`final_path` for uploads and renames); the hook fires if one matches. |
 | `exclude` | none | Patterns like `glob`; the hook does not fire if one matches. `["*.filepart", "*.partial"]` leaves out WinSCP's and rclone's temporary names. |

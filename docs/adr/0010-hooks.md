@@ -1,6 +1,7 @@
 # ADR 0010: Hooks (exec and webhook)
 
-- **Status:** accepted, 2026-10-11; amends ADR 0005 (state that outlives
+- **Status:** accepted, 2026-10-11, revised after the implementation
+  review (19 confirmed findings); amends ADR 0005 (state that outlives
   snapshots), the audit schema (additive) and vfs's owned-file rule
 - **Context:** ROADMAP M4 (M4-07) asks for `[[hooks]]`: filters `on`,
   `mounts`, `glob`; `exec` (argv without a shell, `GOSFTPD_*` environment,
@@ -85,12 +86,20 @@ and `authorized_keys` files are. Hooks are reloadable (see Reload).
     the upload created is removed when it is aborted empty). A resumed
     `.filepart` can then be renamed under `upload` (refused before, a vfs
     bug since M3), and the rename is marked if the resume closed ok.
-  - A resume that wrote no byte changed nothing: it fires no hook and does
-    not set the flag. A resume of a file that is not the user's when it
-    opens (another user's file, or the user's own after `OwnTTL` or a
-    restart) is audited as before but fires no hook: append-only resume
-    needs only `write`, so otherwise any user of a shared mount could make
-    hooks act on another user's file under their own name.
+  - An upload that opened an existing file without truncating it (a
+    resume, or an overwrite in place without TRUNC) and changed nothing
+    fires no hook and does not set the flag. An append-only resume of a
+    file that is not the user's when it opens (another user's file, or the
+    user's own after `OwnTTL` or a restart) is audited as before but fires
+    no hook: it needs only `write`, so otherwise any user of a shared mount
+    could make hooks act on another user's file under their own name. A
+    plain resume or an overwrite in place needs `overwrite`, which lets the
+    user replace the file anyway: it fires when it changed the file.
+  - An upload whose write failed in the file system (a full disk, an I/O
+    error) has result `error`; a truncation refused by the append-only
+    guard makes it `denied`, as a refused write does. Neither sets the flag
+    or fires a hook, and an atomic upload with a failed write is not
+    published.
   - An upload that opened an existing file with WRITE|CREAT and neither
     TRUNC nor APPEND (ROADMAP §6.2 row 3: WinSCP's resume, OpenSSH scp in
     place) and that the conflict policy or `atomic_uploads` sent to a new
@@ -447,62 +456,70 @@ rotating a secret must reach connections that stay open for days.
 ### Code
 
 `internal/hooks` holds the dispatcher, the exec and webhook runners and
-their tests; it imports `obs` and nothing that imports it. The import
-edges are `cli`, `server` and `sftpd` → `hooks`, `hooks` → `obs`, and
-`config` → `hooks` for the list of event names (ROADMAP §4.2 is corrected:
-no `hooks` → `config`). The cli converts `config.Hook` into `hooks.Spec`,
-reading secrets, builds the dispatcher at start, calls `Update` on reload
-and `Close` at shutdown. `audit.Logger.Render(event, attrs...)` formats an
+their tests; it imports `obs` and nothing that imports it. The import edges
+are `cli`, `server` and `sftpd` → `hooks`, `hooks` → `obs`, and `config` →
+`hooks` for the list of event names (ROADMAP §4.2 is corrected: no `hooks`
+→ `config`). The cli converts `config.Hook` into `hooks.Spec`, reading
+secrets, builds the dispatcher at start, calls `Update` on reload and
+`Close` at shutdown. `audit.Logger.Render(event, attrs...)` formats an
 event as the audit output would, with the logger's context, whatever
 `audit.events` says. sftpd calls `Wants` and then `Notify` after each
 audited file event with result ok. vfs returns, with each operation, the
 mount name, the host path and the identity in a `vfs.Where` (`vfs.Moved`
-gets `Uploaded` and a `Where`; uploads get the same through their
-handles; `Session.SetstatAt` returns a `Where` only when it changed the
-times of the named file itself, and sftpd notifies hooks only then;
-for downloads, mkdir, remove and rmdir sftpd calls `Session.Locate`, an
-`Lstat` through the mount's `os.Root` right after the operation, before a
-download's handle is closed). vfs sets the flag exactly when the close's `fs.upload` has result
-ok: `WriteHandle` records a write refused by the append-only guard as it
-records one refused by `max_file_size`, and the flag is set only after
-`f.Close` succeeds. sftpd derives `result` from the same handle state, so
-the audit result and the mark cannot disagree. The upload handle also
-tells sftpd whether the upload is news for hooks (`Fresh`: not an empty
-resume, not a resume of a file that is not the user's).
+gets `Uploaded` and a `Where`; uploads get the same through their handles;
+`Session.SetstatAt` returns a `Where` only when it changed the times of the
+named file itself, and sftpd notifies hooks only then; for downloads,
+mkdir, remove and rmdir sftpd calls `Session.Locate`, an `Lstat` through
+the mount's `os.Root` right after the operation, before a download's handle
+is closed). vfs sets the flag exactly when the close's `fs.upload` has
+result ok: `WriteHandle` records a write or truncation refused by the
+append-only guard as it records one refused by `max_file_size`, and one
+that failed in the file system; the flag is set only after `f.Close`
+succeeds. sftpd derives `result` from the same handle state, so the audit
+result and the mark cannot disagree. The upload handle also tells sftpd
+whether the upload is news for hooks (`Fresh`, see the `fs.upload` bullet).
+An atomic upload's identity is the `Stat` of its temporary file before it
+is published (the rename keeps the inode), never an `Lstat` of the name
+afterwards, where another rename may have put a file.
 
 Tests: `internal/hooks` has goleak in `TestMain` and a coverage floor in
 test/coverage.sh; the signature test vector is a golden test; backoff and
 `Retry-After` run under synctest with a fake transport; exec tests cover a
-background child, a grandchild that calls `setsid` (skipped where
-setsid(1) is missing, as on macOS), 1 MiB of output, the timeout, a
-left-over group member, hostile names and a program made group-writable
-after start (not started, counted as failed); the URL-token test above; a
-reload that narrows `mounts` while delayed events are pending, one of them
-held by the worker in its delay, delivers none of the removed mount's
-events; a hook removed while a worker holds an event in its delay
-delivers nothing; a retry after a reload that rotated the secret is signed
-with the new one; at shutdown a receiver that never answers does not
-delay `Close` beyond the hooks' share. vfs tests: an aborted or cancelled
-`.filepart` upload, a retry or a WinSCP-style resume under every conflict
-policy with and without `atomic_uploads`, and the client's rename: a mark
-only where the rename moves the complete file; under `overwrite` a resume
-or a retry of the user's own file in place, then the rename: one mark; an
-upload to `x.filepart` and 100 renames back and forth give one mark; empty
-resumes between renames give none; a resume of another user's file is not
-news for hooks; a resume with a write refused by the append-only guard,
-then the rename: no mark. An in-process test in `internal/cli` uploads
-with a real SSH client to an `httptest` receiver that recomputes the
-signature over the raw body, for `on_conflict = "rename"` (final_path
-differs from path), atomic uploads and a `.filepart` upload plus rename
-(exactly one delivery), and checks that the webhook of a flattened
-single-mount user carries `"mount":"inbox"` and `final_path`
-`/report.pdf`; another reloads an exec hook in and out with a connection
-open. The interop test adds a python3 receiver for OpenSSH sftp and rclone
-(one delivery per file, with the final name) and a `/bin/sh` hook from
-docs/hooks.md that receives, uploaded with paramiko (OpenSSH sftp cannot
-send a newline in a name), the names `*`, `a b`, a name with a newline,
-`-rf`, `$(touch pwned)` and a backtick name: each run acts on exactly the
-uploaded file, nothing else moves, and no `pwned` appears.
+background child, a grandchild that calls `setsid` (skipped where setsid(1)
+is missing, as on macOS), 1 MiB of output, the timeout, a left-over group
+member, hostile names and a program made group-writable after start (not
+started, counted as failed), and a program still running when the hooks'
+share of the shutdown ends (dropped, logged for replay); the URL-token test
+above; a hook removed while its event waits for a retry drops it at once; a
+burst of queue drops is warned of when the minute ends; a reload that
+narrows `mounts` while delayed events are pending, one of them held by the
+worker in its delay, delivers none of the removed mount's events; a hook
+removed while a worker holds an event in its delay delivers nothing; a
+retry after a reload that rotated the secret is signed with the new one; at
+shutdown a receiver that never answers does not delay `Close` beyond the
+hooks' share. vfs tests: an aborted or cancelled `.filepart` upload, a
+retry or a WinSCP-style resume under every conflict policy with and without
+`atomic_uploads`, a refused truncation or a failed write, and the client's
+rename: a mark only where the rename moves the complete file; under
+`overwrite` a resume or a retry of the user's own file in place, then the
+rename: one mark; an upload to `x.filepart` and 100 renames back and forth
+give one mark; empty resumes between renames give none; a resume of another
+user's file is not news for hooks, nor is an upload in place that changed
+nothing; a resume with a write refused by the append-only guard, then the
+rename: no mark; no mark while another upload has the file open; the
+setstat rule above. An in-process test in `internal/cli` uploads with a
+real SSH client to an `httptest` receiver that recomputes the signature
+over the raw body, for `on_conflict = "rename"` (final_path differs from
+path), atomic uploads and a `.filepart` upload plus rename (exactly one
+delivery), and checks that the webhook of a flattened single-mount user
+carries `"mount":"inbox"` and `final_path` `/report.pdf`; another reloads
+an exec hook in and out with a connection open. The interop test adds a
+python3 receiver for OpenSSH sftp and rclone (one delivery per file, with
+the final name) and a `/bin/sh` hook from docs/hooks.md that receives,
+uploaded with paramiko (OpenSSH sftp cannot send a newline in a name), the
+names `*`, `a b`, a name with a newline, `-rf`, `$(touch pwned)` and a
+backtick name: each run acts on exactly the uploaded file, nothing else
+moves, and no `pwned` appears.
 
 ## Consequences
 

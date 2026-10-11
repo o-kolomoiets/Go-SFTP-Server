@@ -126,6 +126,8 @@ func (w *writer) Close() error {
 			result = "aborted"
 		case w.denied.Load(), w.wh.Refused():
 			result = "denied"
+		case w.wh.Failed(): // a write failed in the file system: the file is incomplete
+			result = "error"
 		case err != nil:
 			// An atomic upload is published on close, by the conflict policy.
 			if r, _ := toStatus(err); r == "denied" {
@@ -153,7 +155,7 @@ func (w *writer) Close() error {
 			slog.String("result", result))
 		attrs = w.h.event("fs.upload", w.requested, attrs...)
 		w.h.metrics.Operation("fs.upload", result)
-		if result == "ok" && w.wh.Fresh() { // not an empty resume or one of another user's file
+		if result == "ok" && w.wh.Fresh() { // not a change-less in-place upload or a resume of another user's file
 			w.h.notify("fs.upload", fileEvent{path: w.requested, final: w.wh.Path(), where: w.wh.Located}, attrs)
 		}
 		w.h.metrics.TransferClosed(true, d)

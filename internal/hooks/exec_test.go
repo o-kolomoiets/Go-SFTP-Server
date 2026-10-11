@@ -285,3 +285,29 @@ func TestExecUntrustedProgram(t *testing.T) {
 		t.Errorf("log: %s", logs)
 	}
 }
+
+// A program still running when the hooks' share of the shutdown ends is
+// killed, and its event is counted as dropped and logged for replay.
+func TestExecKilledAtShutdownIsDropped(t *testing.T) {
+	t.Parallel()
+	m := obs.NewMetrics("test")
+	log, logs := testLog()
+	d := New(Options{Log: log, Metrics: m})
+	s := sh("sleep 30", time.Minute)
+	s.Name, s.On, s.Concurrency, s.Queue = "x", []string{"fs.upload"}, 1, DefaultQueue
+	d.Update([]Spec{s})
+	e, _ := fileEvent(t, "report.pdf")
+	d.Notify(e)
+	time.Sleep(300 * time.Millisecond) // running
+	start := time.Now()
+	d.Close(time.Now().Add(200 * time.Millisecond))
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("Close took %v", el)
+	}
+	if v := value(m, `gosftpd_hook_deliveries_total{result="dropped",type="exec"}`); v != 1 {
+		t.Errorf("dropped = %v, failed = %v", v, value(m, `gosftpd_hook_deliveries_total{result="failed",type="exec"}`))
+	}
+	if !strings.Contains(logs.String(), "path=/report.pdf") || !strings.Contains(logs.String(), "mount=inbox") {
+		t.Errorf("not logged for replay:\n%s", logs)
+	}
+}

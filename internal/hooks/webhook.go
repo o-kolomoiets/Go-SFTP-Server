@@ -88,6 +88,12 @@ func (r *runner) runWebhook(s *Spec, it *item) string {
 	log := r.d.log.With("hook", r.name, "event", e.Name, "user", e.User, "url", target)
 	id := newDeliveryID()
 	for attempt := 1; ; attempt++ {
+		if r.isRemoved() { // a reload removed the hook: no new attempt
+			return resultDropped
+		}
+		if attempt > 1 {
+			r.d.metrics.HookRetry()
+		}
 		s = r.spec.Load() // a reload may change the URL or the secret between attempts
 		status, retryAfter, reason := r.attempt(s, it, id)
 		if status/100 == 2 {
@@ -108,16 +114,15 @@ func (r *runner) runWebhook(s *Spec, it *item) string {
 		if retryAfter > 0 {
 			wait = min(retryAfter, maxRetryAfter)
 		}
-		r.d.metrics.HookRetry()
 		t := time.NewTimer(wait)
 		select {
 		case <-t.C:
+		case <-r.gone: // a reload removed the hook meanwhile
+			t.Stop()
+			return resultDropped
 		case <-r.d.killCtx.Done():
 			t.Stop()
 			r.logDropped(it, "shutdown")
-			return resultDropped
-		}
-		if r.isRemoved() { // a reload removed the hook meanwhile
 			return resultDropped
 		}
 	}

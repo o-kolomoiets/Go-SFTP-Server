@@ -93,19 +93,23 @@ func (s *Session) tempHandle(v *view, target string) (*WriteHandle, error) {
 
 // closeTemp finishes an upload written to a temporary file: it publishes
 // the file under its target name, or removes it if the upload was aborted,
-// is incomplete (a write was refused: ErrTooLarge) or cannot be published.
+// is incomplete (a write was refused, ErrTooLarge, or failed) or cannot be
+// published.
 func (h *WriteHandle) closeTemp(aborted bool) error {
 	s, v := h.s, h.v
 	refused := !aborted && h.refused.Load()
-	aborted = aborted || refused
+	failed := !aborted && h.failed.Load()
+	aborted = aborted || refused || failed
 	s.t.release(h)
 	tmp := h.rel
 	var err error
+	var info fs.FileInfo // the uploaded file, for hooks: the rename keeps it
 	if !aborted {
 		err = h.f.Chmod(v.opts().filePerm())
 		if err == nil && v.opts().Fsync {
 			err = h.f.Sync()
 		}
+		info, _ = h.f.Stat()
 	}
 	err = errors.Join(osError(err), osError(h.f.Close()))
 	if !aborted && err == nil {
@@ -114,8 +118,12 @@ func (h *WriteHandle) closeTemp(aborted bool) error {
 	if aborted || err != nil {
 		_ = removeEntry(v.root, tmp, false)
 		s.unregister(h, true)
-		if refused && err == nil {
+		switch {
+		case err != nil:
+		case refused:
 			err = ErrTooLarge
+		case failed:
+			err = errWriteFailed
 		}
 		return err
 	}
@@ -123,9 +131,10 @@ func (h *WriteHandle) closeTemp(aborted bool) error {
 	// The handle proves the upload created the file, even if its entry
 	// was evicted while the upload was open.
 	if st, err := v.root.Lstat(h.rel); err == nil {
-		s.closedCreated(h, st, !h.noMark)
-		h.info = st
+		s.closedCreated(h, st, h.arrived(false))
 	}
+	// Not the name's Lstat: another rename may have put a file there.
+	h.info = info
 	if h.rel != h.target && v.opts().StatRedirect {
 		s.setRedirect(v, h.target, h.rel)
 	}

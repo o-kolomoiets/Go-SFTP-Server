@@ -51,7 +51,7 @@ never host paths. Strings from clients are JSON-escaped.
 | `session.end` | session | `duration_ms`, `exit_status` |
 | `fs.upload` | transfer | `path` (requested), `final_path`, `conflict` (`none`, `renamed`, `overwritten`, `versioned`), `version_path` (where the replaced file was kept, with `versioned`), `open_flags`, `bytes`, `start_offset` (resumed uploads), `duration_ms`, `result` |
 | `fs.download` | transfer | `path`, `bytes`, `duration_ms`, `result` |
-| `fs.rename` | modify | `path`, `target_path`, `final_path`, `conflict` (posix-rename: `none`, `renamed`, `overwritten`, `versioned`), `version_path` (with `versioned`), `uploaded` (`true` for the rename that completes a temp-file upload, see [hooks.md](hooks.md#a-file-arrived)), `result` |
+| `fs.rename` | modify | `path`, `target_path`, `final_path`, `conflict` (posix-rename: `none`, `renamed`, `overwritten`, `versioned`), `version_path` (with `versioned`), `uploaded` (`true` for the first rename by its uploader, within an hour, of a file whose upload closed ok: the rename that completes a temp-file upload, or a plain upload renamed later; see [hooks.md](hooks.md#a-file-arrived)), `result` |
 | `fs.mkdir`, `fs.rmdir`, `fs.remove`, `fs.setstat` | modify | `path`, `result` |
 | `fs.denied` | denied | `reason`, `result`, and `op` and `path`, or `mount` for an unavailable home |
 | `fs.list` | list (opt-in) | `path`, `result` |

@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -423,4 +424,292 @@ func TestUploadedNotAfterRefusedWrite(t *testing.T) {
 	if move(t, s, "/r.part", "/r") {
 		t.Error("a resume with a refused write is marked")
 	}
+}
+
+// A truncation refused by the append-only guard makes the upload refused,
+// as a refused write does: audited as denied, and no mark.
+func TestUploadedNotAfterRefusedTruncate(t *testing.T) {
+	t.Parallel()
+	s, _, _ := partner(t, DefaultMountOptions())
+	partial(t, s, "/r.part", true)
+	r, err := s.OpenWrite("/r.part", reput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Setstat("/r.part", Attrs{Size: 0, HasSize: true}); !errors.Is(err, ErrImmutable) {
+		t.Fatalf("truncate below the start: %v", err)
+	}
+	if _, err := r.WriteAt([]byte("more"), 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Refused() {
+		t.Error("a refused truncation does not make the upload refused")
+	}
+	if move(t, s, "/r.part", "/r") {
+		t.Error("marked after a refused truncation")
+	}
+}
+
+// A write that fails in the file system (a full disk) leaves the upload
+// incomplete: no mark, and an atomic upload is not published.
+func TestUploadedNotAfterFailedWrite(t *testing.T) {
+	t.Parallel()
+	for _, atomic := range []bool{false, true} {
+		opts := DefaultMountOptions()
+		opts.AtomicUploads = atomic
+		s, _, inbox := partner(t, opts)
+		h, err := s.OpenWrite("/big.filepart", put)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.WriteAt([]byte("abc"), 0); err != nil {
+			t.Fatal(err)
+		}
+		// Stand in for ENOSPC: a handle on the file that cannot write.
+		w := h.f
+		ro, err := h.v.root.Open(h.rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.f = ro
+		if _, err := h.WriteAt([]byte("def"), 3); err == nil {
+			t.Fatal("a write through a read-only handle succeeded")
+		}
+		_ = w.Close()
+		err = h.Close(false)
+		if !h.Failed() {
+			t.Errorf("atomic=%v: Failed() = false after a failed write", atomic)
+		}
+		if atomic {
+			if !errors.Is(err, errWriteFailed) {
+				t.Errorf("atomic: Close = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(inbox, "big.filepart")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("atomic: an upload with a failed write was published: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if move(t, s, "/big.filepart", "/big") {
+			t.Error("marked after a failed write")
+		}
+	}
+}
+
+// Under overwrite, an upload that writes an existing file in place without
+// truncating it is news for hooks only if it changed the file; one that
+// truncates it always changed it.
+func TestInPlaceUploadsFresh(t *testing.T) {
+	t.Parallel()
+	opts := DefaultMountOptions()
+	opts.OnConflict = ConflictOverwrite
+	tbl, _ := permFixture(t, opts)
+	alice := session(t, tbl, "alice", []Grant{{Mount: "inbox", Perm: mustPerm(t, "list,write,overwrite")}})
+	bob := session(t, tbl, "bob", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	cases := []struct {
+		name  string
+		s     *Session
+		fl    OpenFlags
+		data  string
+		fresh bool
+	}{
+		{"another user's file, WRITE, nothing written", alice, writeOff, "", false},
+		{"another user's file, WRITE|CREAT, nothing written", alice, winscpResume, "", false},
+		{"another user's file, WRITE, written", alice, writeOff, "!", true},
+		{"another user's file, TRUNC, nothing written", alice, put, "", true},
+		{"own file, WRITE, nothing written", bob, reput, "", false},
+	}
+	for i, c := range cases {
+		name := "/f" + string(rune('a'+i)) + ".csv"
+		if _, err := upload(t, bob, name, put, "bob"); err != nil {
+			t.Fatal(err)
+		}
+		h, err := c.s.OpenWrite(name, c.fl)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if c.data != "" {
+			if _, err := h.WriteAt([]byte(c.data), 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := h.Close(false); err != nil {
+			t.Fatal(err)
+		}
+		if h.Fresh() != c.fresh {
+			t.Errorf("%s: Fresh() = %v, want %v", c.name, h.Fresh(), c.fresh)
+		}
+	}
+}
+
+// An empty overwrite of the user's own file in place changed it (TRUNC):
+// it stays the user's and is marked.
+func TestUploadedEmptyOverwriteOfOwnFile(t *testing.T) {
+	t.Parallel()
+	opts := DefaultMountOptions()
+	opts.OnConflict = ConflictOverwrite
+	tbl, _ := permFixture(t, opts)
+	s := session(t, tbl, "partner", []Grant{{Mount: "inbox", Perm: mustPerm(t, "list,write,overwrite")}})
+	if _, err := upload(t, s, "/batch.tmp", put, "x"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := s.OpenWrite("/batch.tmp", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Move("/batch.tmp", "/batch.ready", true) // no rename permission: only as the user's file
+	if err != nil || !m.Uploaded {
+		t.Errorf("rename = %+v, %v", m, err)
+	}
+}
+
+// While another user's upload has the file open, a rename is not marked.
+func TestUploadedNotWhileAnotherUploadIsOpen(t *testing.T) {
+	t.Parallel()
+	s, tbl, _ := partner(t, DefaultMountOptions())
+	bob := session(t, tbl, "bob", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	if _, err := upload(t, s, "/x.filepart", put, "data"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := bob.OpenWrite("/x.filepart", reput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(false)
+	if move(t, s, "/x.filepart", "/x") {
+		t.Error("marked while another upload of the file is open")
+	}
+}
+
+// An upload that opens clears the mark of the name its bytes go to, also
+// through a stat redirect.
+func TestUploadedClearedThroughRedirect(t *testing.T) {
+	t.Parallel()
+	s, _, _ := partner(t, DefaultMountOptions())
+	if _, err := upload(t, s, "/a.txt", put, "mine"); err != nil { // a.txt exists: goes to "a (1).txt"
+		t.Fatal(err)
+	}
+	r, err := s.OpenWrite("/a.txt", reput) // through the redirect to "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Path() != "/a (1).txt" {
+		t.Fatalf("the resume went to %s", r.Path())
+	}
+	if err := r.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if move(t, s, "/a (1).txt", "/b.txt") {
+		t.Error("marked after an upload to the name gave up what was there")
+	}
+}
+
+// Under overwrite with atomic uploads, a retry to a fixed temporary name
+// replaces the partial file: the rename moves the complete file and is
+// marked, unless the retry was a WinSCP resume (written from the old size).
+func TestUploadedRetriedTempNameOverwriteAtomic(t *testing.T) {
+	t.Parallel()
+	for _, retry := range []OpenFlags{put, winscpResume} {
+		opts := DefaultMountOptions()
+		opts.OnConflict, opts.AtomicUploads = ConflictOverwrite, true
+		tbl, _ := permFixture(t, opts)
+		s := session(t, tbl, "partner", []Grant{{Mount: "inbox", Perm: mustPerm(t, "list,write,overwrite")}})
+		partial(t, s, "/x.filepart", false)
+		h, err := s.OpenWrite("/x.filepart", retry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.WriteAt([]byte("complete"), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Close(false); err != nil {
+			t.Fatal(err)
+		}
+		m, err := s.Move("/x.filepart", "/x", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := retry == put; m.Uploaded != want {
+			t.Errorf("%+v: marked %v, want %v", retry, m.Uploaded, want)
+		}
+	}
+}
+
+// Hooks hear of a setstat only when it set the times of the file the path
+// names itself (ADR 0010).
+func TestSetstatAtWhere(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	times := Attrs{Atime: now, Mtime: now, HasTimes: true}
+	s, _, inbox := partner(t, DefaultMountOptions())
+	if _, err := upload(t, s, "/t.txt", put, "t"); err != nil {
+		t.Fatal(err)
+	}
+	w, err := s.SetstatAt("/t.txt", times)
+	fi, _ := os.Lstat(filepath.Join(inbox, "t.txt"))
+	if err != nil || w.HostPath != filepath.Join(inbox, "t.txt") || w.Info == nil || !os.SameFile(w.Info, fi) || w.Mount != "inbox" {
+		t.Errorf("times on the named file: %+v, %v", w, err)
+	}
+	if _, err := upload(t, s, "/a.txt", put, "mine"); err != nil { // to "a (1).txt", redirected
+		t.Fatal(err)
+	}
+	if w, err := s.SetstatAt("/a.txt", times); err != nil || w.HostPath != "" {
+		t.Errorf("times through a stat redirect: %+v, %v", w, err)
+	}
+	h, err := s.OpenWrite("/open.txt", put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, err := s.SetstatAt("/open.txt", times); err != nil || w.HostPath != "" {
+		t.Errorf("times on an open upload: %+v, %v", w, err)
+	}
+	if err := h.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := s.SetstatAt("/t.txt", Attrs{}); err != nil || w.HostPath != "" {
+		t.Errorf("no times: %+v, %v", w, err)
+	}
+	opts := DefaultMountOptions()
+	opts.SetstatMode = SetstatIgnore
+	s2, _, _ := partner(t, opts)
+	if _, err := upload(t, s2, "/t.txt", put, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := s2.SetstatAt("/t.txt", times); err != nil || w.HostPath != "" {
+		t.Errorf("setstat_mode = ignore: %+v, %v", w, err)
+	}
+}
+
+// h.owned is set before claim publishes the handle: other sessions read it
+// (go test -race).
+func TestOwnedSetBeforeClaim(t *testing.T) {
+	t.Parallel()
+	s, tbl, _ := partner(t, DefaultMountOptions())
+	bob := session(t, tbl, "bob", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	if _, err := upload(t, s, "/mine.part", put, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	stop := time.Now().Add(100 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for time.Now().Before(stop) {
+			if r, err := s.OpenWrite("/mine.part", reput); err == nil {
+				_ = r.Close(false)
+			}
+		}
+	}()
+	now := time.Now()
+	for time.Now().Before(stop) {
+		_ = bob.Setstat("/a.txt", Attrs{Atime: now, Mtime: now, HasTimes: true})
+	}
+	<-done
 }

@@ -45,6 +45,7 @@ type WriteHandle struct {
 	id        fs.FileInfo // identity of the created file
 	ino       fs.FileInfo // the open file, for the table's writer registry
 	guarded   bool        // append-only resume: bytes below minOffset are immutable
+	inPlace   bool        // opened an existing file and did not truncate it: a resume, or an overwrite without TRUNC
 	minOffset int64
 	maxSize   int64 // max_file_size; 0: no limit
 	// For an upload through a temporary file (see publish.go): rel is the
@@ -55,6 +56,8 @@ type WriteHandle struct {
 	written   atomic.Int64
 	refused   atomic.Bool // a write or truncation past max_file_size
 	immutable atomic.Bool // a write or truncation refused by the append-only guard
+	failed    atomic.Bool // a write or truncation failed in the file system (ENOSPC, EIO)
+	changed   atomic.Bool // this upload truncated the file
 	// noMark: this upload never marks its file as arrived. It opened an
 	// existing file with WRITE|CREAT and neither TRUNC nor APPEND (WinSCP's
 	// resume, which writes from the old size) and went to a new file.
@@ -82,9 +85,13 @@ func (h *WriteHandle) Version() string {
 	return h.s.virtual(h.v, h.version)
 }
 
-// Refused reports whether a write or truncation was refused for
-// max_file_size: the upload is incomplete.
-func (h *WriteHandle) Refused() bool { return h.refused.Load() }
+// Refused reports whether a write or truncation was refused, for
+// max_file_size or by the append-only guard: the upload is incomplete.
+func (h *WriteHandle) Refused() bool { return h.refused.Load() || h.immutable.Load() }
+
+// Failed reports whether a write or truncation failed in the file system
+// (a full disk, an I/O error): the upload is incomplete.
+func (h *WriteHandle) Failed() bool { return h.failed.Load() }
 
 // Written returns the number of bytes written so far.
 func (h *WriteHandle) Written() int64 { return h.written.Load() }
@@ -108,6 +115,9 @@ func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
 	}
 	n, err := h.f.WriteAt(p, off)
 	h.written.Add(int64(n))
+	if err != nil {
+		h.failed.Store(true)
+	}
 	return n, osError(err)
 }
 
@@ -123,7 +133,12 @@ func (h *WriteHandle) truncate(size int64) error {
 		h.refused.Store(true)
 		return ErrTooLarge
 	}
-	return osError(h.f.Truncate(size))
+	if err := h.f.Truncate(size); err != nil {
+		h.failed.Store(true)
+		return osError(err)
+	}
+	h.changed.Store(true)
+	return nil
 }
 
 // removeIfUnused deletes the file this upload created, if it is still empty
@@ -189,31 +204,41 @@ func (s *Session) reservedHandle(v *view, rel string, f *os.File, conflict strin
 	return h, nil
 }
 
-// resumed claims the file of a resume; own makes it the user's.
+// resumed claims the file of an upload written in place; own makes it the
+// user's.
 func (s *Session) resumed(v *view, h *WriteHandle, own bool) (*WriteHandle, error) {
+	h.owned = own // before claim publishes h: isCreated of other sessions reads it
 	h, err := s.openedHandle(v, h)
 	if err != nil {
 		return nil, err
 	}
 	if own {
-		h.owned, h.id = true, h.ino
+		h.id = h.ino // read only by this session
 	}
 	return h, nil
 }
 
 // arrived reports whether the upload, being closed, marks its file as
-// arrived: closed by the client with nothing refused and no error. That
-// is all a server can know: a client that cancels closes normally too.
+// arrived: closed by the client with nothing refused or failed and no
+// error, the cases sftpd audits as ok. That is all a server can know: a
+// client that cancels closes normally too.
 func (h *WriteHandle) arrived(aborted bool) bool {
-	return !aborted && !h.noMark && !h.refused.Load() && !h.immutable.Load() && h.closeErr == nil
+	return !aborted && !h.noMark && !h.Refused() && !h.failed.Load() && h.closeErr == nil
 }
 
-// Fresh reports whether hooks should hear of this upload (ADR 0010): not
-// a resume that wrote nothing, and not a resume of a file that was not the
-// user's when it opened (append-only resume needs only write, so anyone
-// sharing a mount could otherwise fire hooks on another user's file).
+// Fresh reports whether hooks should hear of this upload (ADR 0010). An
+// upload that wrote an existing file in place without truncating it is
+// news only if it changed the file; an append-only resume, which needs
+// only write, also only if the file was the user's when it opened, so that
+// nobody sharing a mount can fire hooks on another user's file.
 func (h *WriteHandle) Fresh() bool {
-	return !h.guarded || (h.owned && h.written.Load() > 0)
+	switch {
+	case h.guarded:
+		return h.owned && h.written.Load() > 0
+	case h.inPlace:
+		return h.written.Load() > 0 || h.changed.Load()
+	}
+	return true
 }
 
 // Located returns the file of a closed upload with its identity, for hooks.
@@ -239,7 +264,7 @@ func (h *WriteHandle) Close(aborted bool) error {
 		h.closeErr = osError(h.f.Close())
 		// A resume that wrote nothing changed nothing: its entry stays as
 		// it was (ADR 0010).
-		if st != nil && h.owned && (h.reserved || h.written.Load() > 0) {
+		if st != nil && h.owned && (h.reserved || h.written.Load() > 0 || h.changed.Load()) {
 			h.s.closedCreated(h, st, h.arrived(aborted))
 		}
 		h.s.unregister(h, removed)
@@ -389,7 +414,7 @@ func (s *Session) openConflict(v *view, rel string, fl OpenFlags) (*WriteHandle,
 		if cur, err := f.Stat(); err == nil {
 			own = s.ownedFile(v, rel, cur)
 		}
-		h, err := s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, own)
+		h, err := s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten, inPlace: !fl.Trunc}, own)
 		if err != nil {
 			return nil, err
 		}
@@ -399,6 +424,7 @@ func (s *Session) openConflict(v *view, rel string, fl OpenFlags) (*WriteHandle,
 				_ = f.Close()
 				return nil, osError(err)
 			}
+			h.changed.Store(true)
 		}
 		return h, nil
 	case ConflictRename:
@@ -465,9 +491,9 @@ func (s *Session) openResume(v *view, rel string, appendOnly bool) (*WriteHandle
 	// not by its name, which another connection could change meanwhile.
 	own := s.ownedFile(v, rel, fi)
 	if plain {
-		return s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, own)
+		return s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten, inPlace: true}, own)
 	}
-	h, err := s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true}, own)
+	h, err := s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true, inPlace: true}, own)
 	if err != nil {
 		return nil, err
 	}

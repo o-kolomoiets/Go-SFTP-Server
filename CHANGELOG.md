@@ -110,9 +110,10 @@ Incompatible changes are prefixed with **BREAKING:**.
   `gosftpd_hook_deliveries_total`, `gosftpd_hook_retries_total`,
   `gosftpd_hook_queue_length` and `gosftpd_hooks_not_updated`.
 - Audit: every `fs.*` event on a path in a mount has `mount`; `fs.rename`
-  has `"uploaded":true` for the rename that completes a temp-file upload
-  (WinSCP's `.filepart`, rclone's `.partial`), and `fs.upload` hooks fire
-  for it.
+  has `"uploaded":true` for the first rename by its uploader, within an
+  hour, of a file whose upload closed ok: the rename that completes a
+  temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
+  upload renamed later. `fs.upload` hooks fire for it.
 
 ### Changed
 
@@ -151,9 +152,15 @@ Incompatible changes are prefixed with **BREAKING:**.
 ### Fixed
 
 - After an interrupted upload to a temporary name was resumed (OpenSSH
-  `reput`) or retried in place (`on_conflict = "overwrite"`), the client's
-  rename was refused for a user with the `upload` preset: the resumed file
-  was no longer counted as the user's own.
+  `reput`), the client's rename was refused for a user with the `upload`
+  preset; likewise after a retry in place under `on_conflict =
+  "overwrite"` for a user with `write` and `overwrite` but not `rename`.
+  The file was no longer counted as the user's own.
+- An upload whose write failed in the file system (a full disk, an I/O
+  error) was audited with `result` `ok`; it is now `error`, and an atomic
+  upload with a failed write is not published. A truncation refused by the
+  append-only guard now makes the upload `denied`, as a refused write
+  does.
 - `known_hosts` lines for IPv6 addresses (`serve` banner, `hostkey show`,
   `user add --write`) are written as `[addr]:port`, which OpenSSH matches.
 - An `include` whose directory exists but cannot be read is an error

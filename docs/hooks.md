@@ -85,10 +85,18 @@ No hook fires for a rename that is not marked:
   or with `atomic_uploads`: the resume goes to a new file, and gosftpd
   never marks a file that a resume wrote into from the middle.
 
-A resume that wrote nothing, and a resume of another user's file, fire no
-hook either: append-only resume needs only the `write` permission, so in a
-shared mount anyone could otherwise make a hook act on someone else's
-file.
+Some uploads fire no hook at all, also under their own name:
+
+- an upload that opened an existing file without truncating it (a resume,
+  or a WinSCP-style overwrite in place under `on_conflict = "overwrite"`)
+  and changed nothing;
+- an append-only resume of a file that is not the uploader's: another
+  user's file, or the uploader's own more than an hour after they last
+  changed it or after gosftpd restarted. Append-only resume needs only the
+  `write` permission, so in a shared mount anyone could otherwise make a
+  hook act on someone else's file;
+- an upload whose result is not `ok`: a write refused (`max_file_size`,
+  the append-only guard) or failed in the file system (a full disk).
 
 ## Payload
 
@@ -239,7 +247,9 @@ a final newline, the signature is
 
 **A receiver** must verify the signature over the raw body, before parsing
 it, and compare in constant time; refuse timestamps more than 5 minutes
-off; and remember delivery IDs for at least 15 minutes, so that it handles
+off; and remember delivery IDs for at least 20 minutes (the 5 minutes plus
+the retry span, which reaches about 13 minutes with `timeout = "60s"` and
+`Retry-After`), so that it handles
 a retry, or a replayed request, only once. In Python:
 
 ```python

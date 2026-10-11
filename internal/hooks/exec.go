@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,6 +32,13 @@ func (r *runner) runExec(s *Spec, it *item) string {
 		log.Warn("hook not run: its program cannot be trusted", "reason", err.Error())
 		return resultFailed
 	}
+	// Held until the process started: once a reload removed the hook, it
+	// starts no process (ADR 0010).
+	r.startMu.RLock()
+	if r.isRemoved() {
+		r.startMu.RUnlock()
+		return resultDropped
+	}
 	ctx, cancel := context.WithTimeout(r.d.killCtx, s.Exec.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.Exec.Argv[0], s.Exec.Argv[1:]...) //nolint:gosec // argv comes from the configuration, never from a client
@@ -38,7 +46,7 @@ func (r *runner) runExec(s *Spec, it *item) string {
 	cmd.Env = environment(e)
 	ownGroup(cmd)
 	start := time.Now()
-	stdout, stderr, leftover, err := run(cmd, e.Line)
+	stdout, stderr, leftover, err := run(cmd, e.Line, r.startMu.RUnlock)
 	dur := time.Since(start)
 	if leftover {
 		log.Debug("hook output still open after the program exited: a process left its group", "duration_ms", dur.Milliseconds())
@@ -47,11 +55,12 @@ func (r *runner) runExec(s *Spec, it *item) string {
 		log.Debug("hook ran", "duration_ms", dur.Milliseconds())
 		return resultOK
 	}
+	if r.d.killed.Load() { // killed at shutdown, or not started any more
+		r.logDropped(it, "shutdown")
+		return resultDropped
+	}
 	reason := err.Error()
-	switch {
-	case r.d.killed.Load():
-		reason = "killed at shutdown"
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		reason = "timed out after " + s.Exec.Timeout.String()
 	}
 	log.Warn("hook failed", "reason", reason, "duration_ms", dur.Milliseconds(),
@@ -60,11 +69,15 @@ func (r *runner) runExec(s *Spec, it *item) string {
 }
 
 // run starts cmd with stdin and returns the start of its output and the
-// leader's result. The pipes are gosftpd's own, so the wait ends when the
-// leader exits; then the rest of its process group is killed at once. A
-// process that left the group (setsid) and holds a pipe is cut off after
-// waitDelay: leftover is then true.
-func run(cmd *exec.Cmd, stdin []byte) (stdout, stderr string, leftover bool, err error) {
+// leader's result; started is called once the process started or failed
+// to. The pipes are gosftpd's own, so the wait ends when the leader exits;
+// then the rest of its process group is killed at once. A process that
+// left the group (setsid) and holds a pipe is cut off after waitDelay:
+// leftover is then true.
+func run(cmd *exec.Cmd, stdin []byte, started func()) (stdout, stderr string, leftover bool, err error) {
+	var once sync.Once
+	start := func() { once.Do(started) }
+	defer start()
 	inR, inW, err := os.Pipe()
 	if err != nil {
 		return "", "", false, err
@@ -81,6 +94,7 @@ func run(cmd *exec.Cmd, stdin []byte) (stdout, stderr string, leftover bool, err
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, errW
 	err = cmd.Start()
+	start()
 	closeAll(inR, outW, errW) // the child has its copies
 	if err != nil {
 		closeAll(inW, outR, errR)
