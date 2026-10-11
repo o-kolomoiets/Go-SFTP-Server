@@ -225,21 +225,25 @@ func TestServeAdminAuditAndMounts(t *testing.T) {
 		}
 	}
 	path := filepath.Join(dir, "gosftpd.toml")
-	writeFile(t, path, `config_version = 1
+	key := authorizedKey(newSigner(t))
+	config := func(extra string) string {
+		return `config_version = 1
 [server]
 listen = ["127.0.0.1:0"]
 host_keys = ["state/host_key"]
 host_key_auto_generate = true
 [mounts.data]
-path = "`+filepath.ToSlash(filepath.Join(dir, "data"))+`"
+path = "` + filepath.ToSlash(filepath.Join(dir, "data")) + `"
 [mounts.extra]
-path = "`+filepath.ToSlash(filepath.Join(dir, "extra"))+`"
+path = "` + filepath.ToSlash(filepath.Join(dir, extra)) + `"
 [users.alice]
-authorized_keys = ["`+authorizedKey(newSigner(t))+`"]
+authorized_keys = ["` + key + `"]
 access = { data = "full", extra = "full" }
 [metrics]
 listen = "127.0.0.1:0"
-`)
+`
+	}
+	writeFile(t, path, config("extra"))
 	ts := startServe(t, "--config", path)
 	m := regexp.MustCompile(`metrics: http://(127\.0\.0\.1:\d+)/metrics`).FindStringSubmatch(ts.stderr.String())
 	if m == nil {
@@ -250,11 +254,10 @@ listen = "127.0.0.1:0"
 		t.Errorf("mounts_unavailable at start = %v, %v", v, ok)
 	}
 
-	// A reload leaves out the missing mount; its server.reload event fails
-	// to be written.
-	if err := os.Remove(filepath.Join(dir, "extra")); err != nil {
-		t.Fatal(err)
-	}
+	// A reload leaves out a mount whose directory is missing (the file
+	// names another one: Windows does not remove a directory in use); its
+	// server.reload event fails to be written.
+	writeFile(t, path, config("missing"))
 	ts.stdout.setFail(true)
 	ts.hup <- syscall.SIGHUP
 	waitUntil(t, "/readyz says audit_unavailable", func() bool {
