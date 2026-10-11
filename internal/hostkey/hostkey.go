@@ -125,8 +125,8 @@ func WritePublic(path string, key ssh.PublicKey, prepare func(string) error) err
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path+".pub"); err != nil {
-		_ = os.Remove(tmp)
+	if err := osRename(tmp, path+".pub"); err != nil {
+		_ = osRemove(tmp)
 		return err
 	}
 	return SyncDir(filepath.Dir(path))
@@ -140,8 +140,8 @@ func writeNew(path string, data []byte, mode os.FileMode, prepare func(string) e
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp)
-	if err := os.Link(tmp, path); err != nil {
+	defer osRemove(tmp) //nolint:errcheck // gone after a rename
+	if err := osLink(tmp, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return err
 		}
@@ -149,7 +149,7 @@ func writeNew(path string, data []byte, mode os.FileMode, prepare func(string) e
 		if _, serr := os.Lstat(path); serr == nil {
 			return &fs.PathError{Op: "create", Path: path, Err: fs.ErrExist}
 		}
-		if err := os.Rename(tmp, path); err != nil {
+		if err := osRename(tmp, path); err != nil {
 			return err
 		}
 	}
@@ -159,7 +159,7 @@ func writeNew(path string, data []byte, mode os.FileMode, prepare func(string) e
 // writeTemp writes data to a new temporary file next to path and returns
 // its name.
 func writeTemp(path string, data []byte, mode os.FileMode, prepare func(string) error) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	f, err := osCreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return "", err
 	}
@@ -178,7 +178,7 @@ func writeTemp(path string, data []byte, mode os.FileMode, prepare func(string) 
 		err = prepare(tmp)
 	}
 	if err != nil {
-		_ = os.Remove(tmp)
+		_ = osRemove(tmp)
 		return "", err
 	}
 	return tmp, nil

@@ -51,6 +51,25 @@ func TestHostkeyRotateFinishOwner(t *testing.T) {
 		t.Errorf("the new host key belongs to uid %d, want 4242", owner(key))
 	}
 
+	// A next key that is a hard link to another root file is not chowned:
+	// that file would be handed to the owner of the key.
+	if code, _, errOut := execute(t, "hostkey", "rotate", "--retire", "--host-key", key); code != exitOK {
+		t.Fatalf("retire: %s", errOut)
+	}
+	secret := filepath.Join(t.TempDir(), "secret_key")
+	if _, err := hostkey.Generate(secret); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(secret, hostkey.Next(key)); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := execute(t, "hostkey", "rotate", "--finish", "--host-key", key); code != exitUsage || !strings.Contains(errOut, "other hard links") {
+		t.Errorf("finish with a linked next key: exit %d, %s", code, errOut)
+	}
+	if owner(secret) != 0 {
+		t.Errorf("the linked file now belongs to uid %d", owner(secret))
+	}
+
 	other := filepath.Join(t.TempDir(), "other")
 	writeFile(t, other, "x")
 	if err := sameOwner(other, key, false); err == nil || !strings.Contains(err.Error(), "belongs to uid 0") {

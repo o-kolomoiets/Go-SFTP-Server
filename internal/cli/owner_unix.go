@@ -67,3 +67,41 @@ func sameOwner(f, like string, rootOK bool) error {
 	}
 	return fmt.Errorf("%s belongs to uid %d, %s to uid %d: give it the owner of %s (chown --reference=%s %s)", f, st.Uid, like, lt.Uid, like, like, f)
 }
+
+// chownKeyLike gives the key file f, as root, the owner and group of like.
+// It changes only a regular file with no other hard link, through the
+// opened file, so that a link planted at f cannot hand over another file.
+func chownKeyLike(f, like string) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	li, err := os.Stat(like)
+	if err != nil {
+		return err
+	}
+	lt, ok := li.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	file, err := os.OpenFile(f, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	fi, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	switch {
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", f)
+	case !ok:
+		return nil
+	case st.Uid == lt.Uid && st.Gid == lt.Gid:
+		return nil
+	case st.Nlink != 1:
+		return fmt.Errorf("%s has other hard links: copy the key there instead", f)
+	}
+	return file.Chown(int(lt.Uid), int(lt.Gid))
+}

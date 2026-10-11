@@ -14,3 +14,6 @@ func keyOwner(string) (func(string) error, error) { return nil, nil }
 
 // sameOwner checks nothing where files have no Unix owner.
 func sameOwner(string, string, bool) error { return nil }
+
+// chownKeyLike does nothing where files have no Unix owner.
+func chownKeyLike(string, string) error { return nil }

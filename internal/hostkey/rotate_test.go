@@ -294,9 +294,8 @@ func TestRotationInterrupted(t *testing.T) {
 		t.Parallel()
 		p, a, b := rollbackRenamed(t)
 		changes, err := RollbackRotation(p, nil)
-		refused(t, err, "no previous key")
-		if len(changes) == 0 {
-			t.Error("no files brought in line")
+		if err != nil || len(changes) == 0 {
+			t.Fatalf("RollbackRotation() again = %q, %v", changes, err)
 		}
 		consistent(t, p, a)
 		consistent(t, Next(p), b)
@@ -352,15 +351,17 @@ func TestRotationInterrupted(t *testing.T) {
 		consistent(t, p, a)
 	})
 
-	// Files of a previous key that is gone are not taken for a rollback.
+	// Files of a previous key that is gone are removed; a rollback without
+	// a previous key changes no key.
 	t.Run("stale files of a previous key", func(t *testing.T) {
 		t.Parallel()
 		p, a, b := rotating(t)
 		if err := os.WriteFile(Old(p)+".pub", ssh.MarshalAuthorizedKey(b.PublicKey()), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := RollbackRotation(p, nil)
-		refused(t, err, "no previous key")
+		if _, err := RollbackRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
 		if exists(Old(p) + ".pub") {
 			t.Error("the stale file is left")
 		}

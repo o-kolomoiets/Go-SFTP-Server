@@ -296,21 +296,29 @@ P.next.pub, to each of them.`,
 				fmt.Fprintf(w, "deleted the previous key %s\nreload gosftpd: OpenSSH clients forget it at their next login\n", hostkey.Old(p))
 				return nil
 			case rollback:
-				// The previous key's certificate becomes P's; a bad one does
-				// not block going back.
+				// The previous key's certificate becomes P's (the file is
+				// written anew); a bad one does not block going back.
+				hadOld := false
 				if old, err := hostkey.Load(hostkey.Old(p)); err == nil {
-					if err := checkCertFile(hostkey.Old(p), old.PublicKey(), p); err != nil {
-						fmt.Fprintf(w, "warning: %v; it will not be served\n", err)
+					hadOld = true
+					if _, err := os.Stat(hostkey.Cert(hostkey.Old(p))); err == nil {
+						if _, err := hostkey.LoadCertificate(hostkey.Cert(hostkey.Old(p)), old.PublicKey()); err != nil {
+							fmt.Fprintf(w, "warning: host certificate %v; the server will not serve it\n", err)
+						}
 					}
 				}
 				if err := report(hostkey.RollbackRotation(p, prepare)); err != nil {
 					return err
 				}
-				fmt.Fprintf(w, "%s is the host key again; the newer key is the next key %s\n", p, hostkey.Next(p))
+				if !hadOld {
+					fmt.Fprintf(w, "there is no previous key: %s is the host key and %s the next key, as after a rollback\n", p, hostkey.Next(p))
+				} else {
+					fmt.Fprintf(w, "%s is the host key again; the newer key is the next key %s\n", p, hostkey.Next(p))
+				}
 				fmt.Fprintln(w, "reload gosftpd: both stay announced")
 				return nil
 			case finish:
-				if err := checkFinish(p, c, prepare, w); err != nil {
+				if err := checkFinish(p, c, w); err != nil {
 					return configError{err}
 				}
 				f, err := hostkey.FinishRotation(p, prepare)
@@ -350,16 +358,14 @@ P.next.pub, to each of them.`,
 // checkFinish checks the next key before it becomes P, as the server will
 // load it: owner, type and certificate. As root it first gives the key P's
 // owner.
-func checkFinish(p string, c *config.Config, prepare func(string) error, w io.Writer) error {
+func checkFinish(p string, c *config.Config, w io.Writer) error {
 	next := hostkey.Next(p)
 	key, err := hostkey.Load(next)
 	if err != nil {
 		return nil //nolint:nilerr // FinishRotation reports it, or completes an interrupted finish
 	}
-	if prepare != nil {
-		if err := prepare(next); err != nil {
-			return err
-		}
+	if err := chownKeyLike(next, p); err != nil {
+		return err
 	}
 	if err := sameOwner(next, p, false); err != nil {
 		return err

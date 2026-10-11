@@ -23,6 +23,15 @@ import (
 // SyncFiles then puts every public key file and certificate with its key.
 // Each step can therefore be run again after an interruption.
 
+// File operations of the steps; tests replace them to interrupt a step at
+// every point.
+var (
+	osLink       = os.Link
+	osRename     = os.Rename
+	osRemove     = os.Remove
+	osCreateTemp = os.CreateTemp
+)
+
 // Next returns the name of P's next key.
 func Next(p string) string { return p + ".next" }
 
@@ -117,7 +126,7 @@ func FinishRotation(p string, prepare func(string) error) (*Finished, error) {
 	if err := keep(p, Old(p), cur, "retire it first (rotate --retire)", prepare); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(Next(p), p); err != nil {
+	if err := osRename(Next(p), p); err != nil {
 		return nil, err
 	}
 	if err := SyncDir(filepath.Dir(p)); err != nil {
@@ -148,13 +157,14 @@ func finished(p string, age time.Duration, prepare func(string) error) (*Finishe
 func RollbackRotation(p string, prepare func(string) error) ([]string, error) {
 	old, err := Load(Old(p))
 	if errors.Is(err, fs.ErrNotExist) {
-		// Perhaps a rollback that stopped after its rename: bring the
-		// files in line, and say that there is nothing left to undo.
-		changes, serr := SyncFiles(p, prepare)
-		if serr != nil {
-			return changes, serr
+		// With P.next, this is where a rollback leads, perhaps one that
+		// stopped after its rename: bring the files in line.
+		cur, cerr := Load(p)
+		next, nerr := Load(Next(p))
+		if cerr != nil || nerr != nil || sameKey(cur, next) {
+			return nil, fmt.Errorf("%s does not exist: there is no previous key to return to", Old(p))
 		}
-		return changes, fmt.Errorf("%s does not exist: there is no previous key to return to", Old(p))
+		return SyncFiles(p, prepare)
 	}
 	if err != nil {
 		return nil, err
@@ -169,7 +179,7 @@ func RollbackRotation(p string, prepare func(string) error) ([]string, error) {
 	if err := keep(p, Next(p), cur, "abort that rotation first (rotate --abort)", prepare); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(Old(p), p); err != nil {
+	if err := osRename(Old(p), p); err != nil {
 		return nil, err
 	}
 	if err := SyncDir(filepath.Dir(p)); err != nil {
@@ -188,7 +198,7 @@ func RetireRotation(p string, prepare func(string) error) ([]string, error) {
 		}
 		return changes, fmt.Errorf("%s does not exist: there is no previous key to retire", Old(p))
 	}
-	if err := interrupted(p); err != nil {
+	if err := interrupted(p, false); err != nil {
 		return nil, err
 	}
 	if err := removeAll(Old(p)); err != nil {
@@ -206,7 +216,7 @@ func AbortRotation(p string, prepare func(string) error) ([]string, error) {
 		}
 		return changes, fmt.Errorf("%s does not exist: no rotation is in progress", Next(p))
 	}
-	if err := interrupted(p); err != nil {
+	if err := interrupted(p, true); err != nil {
 		return nil, err
 	}
 	if err := removeAll(Next(p)); err != nil {
@@ -216,8 +226,10 @@ func AbortRotation(p string, prepare func(string) error) ([]string, error) {
 }
 
 // interrupted refuses to retire or abort while a finish or rollback is
-// half done: P.next and P.old both exist, and one holds P's key.
-func interrupted(p string) error {
+// half done: P.next and P.old both exist, and one holds P's key. A copy of
+// P (not a link, which only an interrupted step makes where the
+// filesystem has links) at P.next may be aborted: P keeps the key.
+func interrupted(p string, abort bool) error {
 	if !exists(Next(p)) || !exists(Old(p)) {
 		return nil
 	}
@@ -226,9 +238,9 @@ func interrupted(p string) error {
 		return err
 	}
 	if k, err := Load(Old(p)); err == nil && sameKey(k, cur) {
-		return fmt.Errorf("%s holds the key of %s: a --finish was interrupted; run rotate --finish again", Old(p), p)
+		return fmt.Errorf("%s holds the key of %s: a --finish was interrupted (run rotate --finish again), or it is a copy of %s (delete it)", Old(p), p, p)
 	}
-	if k, err := Load(Next(p)); err == nil && sameKey(k, cur) {
+	if k, err := Load(Next(p)); err == nil && sameKey(k, cur) && (!abort || sameFile(p, Next(p))) {
 		return fmt.Errorf("%s holds the key of %s: a --rollback was interrupted; run rotate --rollback again", Next(p), p)
 	}
 	return nil
@@ -238,15 +250,16 @@ func interrupted(p string) error {
 // unless dst already holds that key: then an interrupted step made it.
 // Another key at dst is refused with hint.
 func keep(p, dst string, key ssh.Signer, hint string, prepare func(string) error) error {
-	err := os.Link(p, dst)
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, fs.ErrExist):
-		if prev, lerr := Load(dst); lerr == nil && sameKey(prev, key) {
+	// Some filesystems refuse a link before they look at dst.
+	if exists(dst) {
+		if prev, err := Load(dst); err == nil && sameKey(prev, key) {
 			return nil
 		}
 		return fmt.Errorf("%s exists and holds another key; %s", dst, hint)
+	}
+	err := osLink(p, dst)
+	if err == nil || errors.Is(err, fs.ErrExist) {
+		return err
 	}
 	data, rerr := readFile(p)
 	if rerr != nil {
@@ -292,14 +305,14 @@ func SyncFiles(p string, prepare func(string) error) ([]string, error) {
 				changes = append(changes, "wrote "+pub)
 			}
 		case !f.present && exists(pub):
-			if err := os.Remove(pub); err != nil {
+			if err := osRemove(pub); err != nil {
 				return changes, err
 			}
 			changes = append(changes, "removed "+pub+": "+f.path+" does not exist")
 		}
 	}
 
-	// The certificates, read first, so that two can trade places.
+	// The certificates, read first: one may move to another key file.
 	type certFile struct {
 		f    *keyFile
 		data []byte
@@ -317,48 +330,87 @@ func SyncFiles(p string, prepare func(string) error) ([]string, error) {
 		}
 		cf := certFile{f: f, data: data}
 		for _, g := range files {
-			if g.key != nil && bytes.Equal(c.Key.Marshal(), g.key.Marshal()) {
-				cf.of = g
+			if g.key != nil && bytes.Equal(c.Key.Marshal(), g.key.Marshal()) && (cf.of == nil || g == f) {
+				cf.of = g // its own key file first
 			}
 		}
 		certs = append(certs, cf)
 	}
-	want := map[*keyFile][]byte{}
+	type move struct {
+		data []byte
+		from *keyFile
+	}
+	want := map[*keyFile]move{}
+	cur := map[*keyFile][]byte{}
 	for _, c := range certs {
+		cur[c.f] = c.data
 		if c.of == nil {
 			continue
 		}
-		if _, ok := want[c.of]; !ok || c.f == c.of {
-			want[c.of] = c.data // its own file first
+		if m, ok := want[c.of]; !ok || c.f == c.of && m.from != c.of {
+			want[c.of] = move{c.data, c.f} // its own file first
 		}
 	}
+	// Writes first, each only once the certificate it replaces is safe in
+	// its new place, so that an interruption loses none; then removals.
+	var pending []*keyFile
 	for _, f := range files {
 		if f.present && f.key == nil {
 			continue // cannot be read: leave its certificate alone
 		}
-		var cur []byte
-		parsed := false
-		for _, c := range certs {
-			if c.f == f {
-				cur, parsed = c.data, true
+		if m, ok := want[f]; ok && !bytes.Equal(cur[f], m.data) {
+			pending = append(pending, f)
+		}
+	}
+	moved := map[*keyFile]bool{} // certificate files whose content moved
+	for len(pending) > 0 {
+		next := -1
+		for i, f := range pending {
+			needed := false
+			for _, g := range pending {
+				if g != f && cur[f] != nil && bytes.Equal(want[g].data, cur[f]) {
+					needed = true
+				}
+			}
+			if !needed {
+				next = i
+				break
 			}
 		}
-		data, ok := want[f]
+		if next < 0 {
+			next = 0 // a cycle, which no step makes
+		}
+		f := pending[next]
+		pending = append(pending[:next], pending[next+1:]...)
+		m := want[f]
+		tmp, err := writeTemp(Cert(f.path), m.data, 0o644, prepare)
+		if err != nil {
+			return changes, err
+		}
+		if err := osRename(tmp, Cert(f.path)); err != nil {
+			_ = osRemove(tmp)
+			return changes, err
+		}
+		cur[f] = m.data
+		moved[m.from] = true
+		changes = append(changes, "moved "+Cert(m.from.path)+" to "+Cert(f.path))
+	}
+	for _, c := range certs {
+		f := c.f
+		if f.present && f.key == nil {
+			continue
+		}
+		if _, ok := want[f]; ok {
+			continue
+		}
+		if err := osRemove(Cert(f.path)); err != nil {
+			return changes, err
+		}
 		switch {
-		case ok && !bytes.Equal(cur, data):
-			tmp, err := writeTemp(Cert(f.path), data, 0o644, prepare)
-			if err != nil {
-				return changes, err
-			}
-			if err := os.Rename(tmp, Cert(f.path)); err != nil {
-				_ = os.Remove(tmp)
-				return changes, err
-			}
-			changes = append(changes, "moved the certificate of "+f.path+" to "+Cert(f.path))
-		case !ok && parsed:
-			if err := os.Remove(Cert(f.path)); err != nil {
-				return changes, err
-			}
+		case moved[f]:
+		case c.of != nil:
+			changes = append(changes, "removed "+Cert(f.path)+": "+Cert(c.of.path)+" certifies that key")
+		default:
 			changes = append(changes, "removed "+Cert(f.path)+": it certifies no key of "+p)
 		}
 	}
@@ -377,7 +429,7 @@ func certifies(path string, key ssh.PublicKey) bool {
 
 func removeAll(paths ...string) error {
 	for _, f := range paths {
-		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := osRemove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
@@ -400,6 +452,12 @@ func readPublic(path string) (ssh.PublicKey, error) {
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+func sameFile(a, b string) bool {
+	fa, err1 := os.Stat(a)
+	fb, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
 }
 
 func sameKey(a, b ssh.Signer) bool {

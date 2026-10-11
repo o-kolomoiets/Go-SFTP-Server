@@ -498,9 +498,10 @@ each step:
 always exists, and a step that was interrupted is completed by running it
 again. Each step puts the `.pub` files and certificates with the keys they
 belong to, and removes those of keys that are gone. `--finish` refuses a
-next key of another owner (as root, it gives the key the owner of `KEY`), of
-the type of another host key, or with a certificate the server would refuse
-(with `--config` and `host_certificates` off, only a warning).
+next key of another owner (as root, it gives the key the owner of `KEY`,
+unless the file has other hard links), of the type of another host key, or
+with a certificate the server would refuse (with `--config` and
+`host_certificates` off, only a warning).
 
 OpenSSH 8.5 and later update `known_hosts` by default only when
 `UserKnownHostsFile` is the default one and `VerifyHostKeyDNS` is off (else, set

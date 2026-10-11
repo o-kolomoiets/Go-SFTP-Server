@@ -110,11 +110,14 @@ running it again, and `--retire` and `--abort` refuse to run in between.
 Then every step puts each `.pub` file and certificate with the key it
 belongs to (a certificate with the key it certifies) and removes those of
 keys that are gone, so an interrupted step never leaves a certificate that
-a later one takes for another key's. `--finish` refuses a next key of
-another owner (as root it first gives it `P`'s owner, since gosftpd must
-read it), of the type of another host key, or with a certificate the
-server would refuse; `--rollback` only warns about a bad certificate, since
-it is the way back.
+a later one takes for another key's; a certificate is written to its new
+place before the one it replaces is moved on, and files are removed last.
+`--finish` refuses a next key of another owner (as root it first gives it
+`P`'s owner, since gosftpd must read it, through the open file and only if
+it has no other hard link, so that a planted link cannot hand over another
+file), of the type of another host key, or with a certificate the server
+would refuse; `--rollback` only warns about a bad certificate, since it is
+the way back. A test interrupts every step at each file operation.
 
 **Several servers under one name.** A client takes the announcement as the
 complete key set of the host name and removes every other key. Servers
