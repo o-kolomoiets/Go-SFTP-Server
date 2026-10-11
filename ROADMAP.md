@@ -1484,13 +1484,13 @@ Notes on the unit file:
 2. A one-minute quickstart and a demo GIF of a real session (`docs/assets/demo.gif`, recorded by `docs/assets/record-demo.py`):
    - Binary: `gosftpd serve --dir ./inbox` and `sftp -P 2022 "$USER@localhost"`, the real banner, and the zero-config caveat (every key gets full access).
    - Docker, once the image exists (M5): `docker run --rm ghcr.io/o-kolomoiets/gosftpd:vX.Y.Z config example > config.toml` (the minimal config from §6.7) and paste the contents of `~/.ssh/id_ed25519.pub` in place of the placeholder; `sudo chown root:65532 config.toml && sudo chmod 0640 config.toml` (the container will not load a file owned by your uid or writable by the group, §6.5); `mkdir -p data state && sudo chown 65532:65532 data state`; `docker run -d -p 2022:2022 -v ./config.toml:/etc/gosftpd/config.toml:ro -v ./data:/srv/sftp -v ./state:/var/lib/gosftpd ghcr.io/o-kolomoiets/gosftpd:vX.Y.Z`, then `sftp -P 2022 alice@localhost`. When running with `--user "$(id -u):$(id -g)"`, neither `chown` is needed; `chmod 0600 config.toml` is enough. The `state` volume holds the host key, so the fingerprint does not change when the container is recreated.
-3. Why it exists, who it is for, and what it is not: SFTP only; no shell, legacy SCP or FTP; not a replacement for OpenSSH.
+3. Why it exists and who it is for.
 4. What a client cannot do and what the operator gets, with the limitations of `os.Root` and a link.
 5. A config snippet (the partner inbox) with real `sftp` and audit output, and a link to the reference.
 6. Evidence instead of adjectives: fuzzing, interop, ssh-audit, coverage, CI gates, dependencies.
 7. The comparison from §1.3 (only figures that were checked, with a date) and client compatibility, including untested clients.
 8. Install; what the latest release has and what is only on `main` (instead of a per-feature status table while `main` runs ahead of the release).
-9. Documentation, roadmap, contributing, a call to star and to report client results, license.
+9. What it is not (SFTP only; no shell, legacy SCP or FTP; runs next to OpenSSH, not instead of it), then documentation, roadmap, contributing, a call to star and to report client results, license.
 
 Every claim in the README is covered by a test, CI or a real run; transcripts and the GIF are real output of the release they name.
 

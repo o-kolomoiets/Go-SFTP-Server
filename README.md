@@ -4,12 +4,13 @@
   <strong>Turn a folder into an SFTP drop-box.</strong><br>
   A single Go binary for taking files from partners, devices and backup jobs.<br>
   No root, no system accounts, no database. Clients can't leave the folder,
-  uploads don't overwrite by default, and every action lands in a JSON audit log.
+  uploads don't overwrite by default, and every login, transfer and change lands
+  in a JSON audit log.
 </p>
 
 <p align="center">
   <a href="https://github.com/o-kolomoiets/go-sftp-server/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/o-kolomoiets/go-sftp-server/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/o-kolomoiets/go-sftp-server/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/o-kolomoiets/go-sftp-server?include_prereleases"></a>
+  <a href="https://github.com/o-kolomoiets/go-sftp-server/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/o-kolomoiets/go-sftp-server"></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/o-kolomoiets/go-sftp-server"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <!-- Add once the first weekly Scorecard run has published a score:
@@ -21,8 +22,8 @@
   <a href="#try-it-in-one-minute">Quick start</a> ·
   <a href="#a-partner-inbox-in-nine-lines">Partner inbox in 9 lines</a> ·
   <a href="https://github.com/o-kolomoiets/go-sftp-server/releases">Releases</a> ·
-  <a href="docs/quickstart.md">Docs</a> ·
-  <a href="docs/security.md">Security model</a> ·
+  <a href="#files-from-strangers-safely">Security</a> ·
+  <a href="#documentation">Docs</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -34,17 +35,19 @@ mkdir -p inbox && gosftpd serve --dir ./inbox                          # as your
 sftp -P 2022 "$USER@localhost"                                         # in a second terminal
 ```
 
-No config file. gosftpd lets in the keys from your `~/.ssh/authorized_keys`,
-creates an ed25519 host key on first start and prints its fingerprint and a
+No config file: every key in your `~/.ssh/authorized_keys` gets full access
+to `./inbox`, under any user name, on port 2022 of every interface (add
+`--listen 127.0.0.1:2022` to keep it on this machine). On first start
+gosftpd creates an ed25519 host key and prints its fingerprint and a
 `known_hosts` line, so you can check what your client is told. No Go
-toolchain? Take a [release archive](#install): a static binary of about 7 MB
-for Linux or macOS.
+toolchain? Take a [release archive](#install): one binary of about 7 MB for
+Linux or macOS.
 
 <p align="center">
   <img src="docs/assets/demo.gif" width="760" alt="Terminal recording in two panes. Server pane: gosftpd serve --dir ./inbox --audit-output audit.jsonl prints its version, a newly generated ed25519 host key saved with mode 0600, its SHA256 fingerprint, a known_hosts line, the mount / -> /home/alex/inbox with on_conflict=rename, listen 0.0.0.0:2022 and a connect hint. Client pane: sftp uploads report.pdf twice; ls -l lists report (1).pdf next to report.pdf, both owned by alex; cd .. and pwd still show /; ls /etc says not found. Finally jq prints the audit event from audit.jsonl: fs.upload by alex, path /report.pdf, final_path /report (1).pdf, conflict renamed, 48000 bytes.">
 </p>
 <p align="center"><sub>
-  A real session with the v0.3.0 release, typed by <a href="docs/assets/record-demo.py">a script</a> you can run to record it again.
+  A real session with the v0.3.0 release binary, typed by <a href="docs/assets/record-demo.py">a script</a> you can run to record it again.
   The second upload becomes <code>report (1).pdf</code>, <code>cd ..</code> goes nowhere, and the audit log says exactly what happened.
 </sub></p>
 
@@ -52,12 +55,13 @@ With one command on the server, you got:
 
 - **A host key you can verify.** The fingerprint is printed, so the first
   "yes" to your client is not a blind one.
-- **A client that stays in the folder.** `/` is `./inbox`; `..`, absolute
-  paths and symlinks that lead outside are refused.
+- **A client that stays in the folder.** `/` is `./inbox`: `..` stops
+  there, `/etc` means `./inbox/etc`, and symlinks that lead outside are
+  refused.
 - **No silent overwrites.** A second `report.pdf` arrives as
   `report (1).pdf`. Want something else? `--on-conflict reject`, `overwrite`
   or `version`.
-- **A record of everything.** Each login, transfer and change is one JSON
+- **A paper trail.** Each login, transfer and change is one JSON
   line on stdout, or in a file with `--audit-output audit.jsonl`, as in the
   recording.
 - **SFTP and nothing more.** No shell, no exec, no port forwarding, even for
@@ -65,20 +69,20 @@ With one command on the server, you got:
 
 Serve several folders with `--dir docs=/srv/docs --dir inbox=/srv/inbox`,
 make them `--read-only`, or accept only one login name with `--user NAME`.
-In this mode every key in that file gets full access, under any user name;
-for anything narrower, such as a partner who may only upload, write a
+For anything narrower, such as a partner who may only upload, write a
 [config file](#a-partner-inbox-in-nine-lines).
 
 <details>
 <summary>What the server prints, and what to do if it stops right away</summary>
 
-The real output of the first start, on a host named `vm`:
+The real output of the first start, from the session in the GIF, on a host
+named `vm`:
 
 ```text
-gosftpd v0.3.0 (commit 2bd0b1fb2102, 2026-10-09T21:19:06Z, go1.26.5 linux/amd64)
+gosftpd v0.3.0 (commit 2bd0b1fb2102, 2026-10-09T21:19:06Z, go1.27.2 linux/amd64)
 host key: /home/alex/.config/gosftpd/ssh_host_ed25519_key (generated, 0600)
-  ED25519 SHA256:eXrhF7Az/r/Jb2vpOWDCrL2BfI80w+fZDFf7s2nBKYc
-  known_hosts: [vm]:2022 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGBdIb0gvieNM/7SSDREnKIFfSHHa1P1/C6PDUrWZb3a
+  ED25519 SHA256:abbhjU4ZiDmJE0dNQVwJ4LuCj4L36ufuu5MarxbQs6s
+  known_hosts: [vm]:2022 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHPCKbAEGDs8uNKcEO8EAZCUkEJMOP8XHoDCccnDQCGG
 auth:    publickey, 1 keys from /home/alex/.ssh/authorized_keys
 mounts:  / -> /home/alex/inbox (rw, on_conflict=rename)
 listen:  0.0.0.0:2022
@@ -94,18 +98,20 @@ If you have no `~/.ssh/authorized_keys`, gosftpd says so and exits:
 Error: no --authorized-keys given and /home/alex/.ssh/authorized_keys does not exist; add your public key there or pass --authorized-keys FILE
 ```
 
-`cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys` fixes that (create a
-key with `ssh-keygen -t ed25519` first if you have none). `go install` puts
-the binary in `$(go env GOPATH)/bin`, which must be in your `PATH`.
+`cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`
+fixes that (create a key with `ssh-keygen -t ed25519` first if you have
+none). Like sshd, gosftpd refuses an `authorized_keys` that group or others
+can write. `go install` puts the binary in `$(go env GOPATH)/bin`, which
+must be in your `PATH`.
 
 </details>
 
 > [!NOTE]
-> **Alpha, and honest about it.** v0.3.0 is tested hard (see
-> [Proof, not promises](#proof-not-promises)), but configuration and behavior
-> may still change until the v1.0 compatibility freeze. Read the
-> [hardening guide](docs/security/hardening.md) before you expose it to the
-> internet.
+> **Alpha.** Every change is fuzzed and run in CI against OpenSSH `sftp` and
+> `scp`, paramiko, rclone and lftp ([the evidence](#proof-not-promises)), but
+> configuration and behavior may still change until the v1.0 compatibility
+> freeze. Read the [hardening guide](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security/hardening.md)
+> before you expose v0.3.0 to the internet.
 
 ## Why gosftpd
 
@@ -125,20 +131,22 @@ gosftpd does one job: **a folder that other people can put files into,
 safely.** One binary that you run as an ordinary user, one TOML file, one JSON
 log. Your accountant doesn't need a Unix account on your server.
 
-What people use it for:
+What it is for:
 
 - **Partner inbox.** Payroll sheets, statements, invoices, EDI files. The
-  `upload` preset lets a partner list and upload, nothing else, and
-  `allow_from` and `expires` tie them to a network and an end date. If
-  someone sends `payroll-october.xlsx` twice, the second one lands as
-  `payroll-october (1).xlsx`.
+  `upload` preset lets a partner list, upload and create folders, but not
+  read, delete or overwrite anything, and `allow_from` and `expires` tie
+  them to a network and an end date. If someone sends `payroll-october.xlsx`
+  twice, the second one lands as `payroll-october (1).xlsx`.
 - **Devices and scripts that push files.** Give each one a folder of its own
   with a `{user}` home. Password login (argon2id) is there, off by default,
-  for senders that can't use keys. With `atomic_uploads = true` the job that
-  watches the folder never sees half a file.
+  for senders that can't use keys. With `atomic_uploads = true` a file takes
+  its name only when the client closes it; until then it is a hidden
+  `.gosftpd-*.part` file in the same folder, so have the watching job skip
+  dot-files.
 - **Backup targets.** Use `on_conflict = "version"`: rclone and friends keep
   their file names, and the old content moves to a hidden `.versions/`
-  folder (10 versions per file, for 30 days). With the default `rename`,
+  folder that clients can read but not change. With the default `rename`,
   every sync run would add a copy.
 - **CI artifacts.** A deploy key, `scp` or `sftp -b`, and
   `on_conflict = "reject"`, so an upload never replaces a published file.
@@ -153,17 +161,20 @@ starts from what such a client must **not** be able to do. All of this is in
 the v0.3.0 release. A client can't:
 
 - **Leave the folder.** Each mount is opened as a Go
-  [`os.Root`](https://pkg.go.dev/os#Root). `..`, absolute paths and symlinks
-  that lead outside are refused. Clients can't create symlinks or hard links,
-  FIFOs and devices are hidden, no host path appears in any reply, and
-  listings show the user's own name as owner instead of your uids.
+  [`os.Root`](https://pkg.go.dev/os#Root). `..` stops at the folder's `/`,
+  absolute paths start there, and symlinks that lead outside are refused.
+  Clients can't create symlinks or hard links, FIFOs and devices are hidden,
+  no host path appears in any reply, and listings show the user's own name
+  as owner instead of your uids.
 - **Overwrite what is already there.** A second `report.pdf` arrives as
   `report (1).pdf` (and `a.tar.gz` as `a (1).tar.gz`). For a minute
   afterwards, a stat of the name the client asked for answers for its copy,
   so paramiko `put(confirm=True)` and rclone's size checks still pass. Per
   folder you can choose `reject`, `overwrite` (needs that permission) or
-  `version`, which keeps the last 10 copies for up to 30 days in a hidden
-  `.versions` folder that clients can read but not change.
+  `version`, which moves the old file into a hidden `.versions` folder that
+  clients can read but not change. Each new version of a file removes that
+  file's versions older than 30 days and, if the uploader may delete or
+  overwrite, all but the newest 10.
 - **Rewrite bytes that already arrived.** Resuming works (OpenSSH `reput`,
   paramiko append mode), but only by appending: existing data is immutable.
 - **Read or delete the inbox,** if you give it the `upload` preset: list,
@@ -179,17 +190,21 @@ the v0.3.0 release. A client can't:
   the end of every write, so sparse writes can't slip past it. There are no
   per-user quotas.
 - **Leave half a file behind.** With `atomic_uploads = true`, uploads go to
-  a hidden temp file and take their name only when complete. A killed upload
-  leaves nothing. Off by default, since resume is not possible in this mode.
-- **Act without a trace.** One JSON line per login, transfer and change,
-  with a versioned schema. If the log can't be written (disk full, closed
+  a hidden temp file and take their name only when the client closes it. A
+  killed client or a dropped connection leaves nothing. Off by default,
+  since resume is not possible in this mode.
+- **Transfer or change anything unrecorded.** One JSON line per login,
+  transfer and change, with a versioned schema. If the log can't be written (disk full, closed
   pipe), gosftpd refuses new connections and every change until it can:
   **fail-closed** by default.
 - **Probe for users or hammer the door.** An unknown user, a wrong key or
   password, a disabled or expired account and a disallowed address all fail
-  the same way; only your audit log knows the reason. Connections are counted
-  before the SSH handshake (256 in total, 16 per IP or IPv6 /64, 64 not yet
-  logged in), and 10 failures in 10 minutes earn a 30-minute ban.
+  the same way, and each failed login is in your audit log. Connections are
+  counted before the SSH handshake (256 in total, 16 per IP or IPv6 /64, 64
+  not yet logged in), and 10 failures in 10 minutes earn a 30-minute ban.
+  With password login on, response times hide which users exist only while
+  all password hashes share one kind and cost (`config validate` warns
+  otherwise).
 
 And for you, the person running it:
 
@@ -216,7 +231,7 @@ And for you, the person running it:
 Know the limits, too. `os.Root` keeps clients in the folder, but it does not
 cover bind mounts inside a served folder, hard links made on the host, or
 races with symlinks that local users create.
-[Here is exactly what is and isn't covered.](docs/security.md#limits-of-the-protection)
+[Here is exactly what is and isn't covered.](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security.md#limits-of-the-protection)
 Bans are kept in memory and reset on restart, and the limits count
 connections, not their rate: rate-limit new connections in your firewall.
 
@@ -238,6 +253,7 @@ access = { inbox = "upload" }      # list and upload; no reading, deleting or ov
 ```
 
 ```console
+$ chmod 600 gosftpd.toml     # gosftpd refuses a config that group or others can write
 $ gosftpd config validate --check-fs
 /home/alex/gosftpd.toml: OK (1 mounts, 1 users)
 $ gosftpd serve
@@ -248,18 +264,18 @@ Run it as a dedicated user that owns `/srv/sftp/inbox` and `/var/lib/gosftpd`
 already have a host key, drop `host_key_auto_generate` and it's eight lines.
 
 Your partner sees one folder as `/`. Their client says both uploads went to
-`/report.pdf`, yet nothing was replaced, and that is all the partner can do:
+`/report.pdf`, yet nothing was replaced, and reading and deleting are refused:
 
 ```console
 sftp> put report.pdf
 Uploading report.pdf to /report.pdf
-report.pdf                                    100%   47KB  37.4MB/s   00:00
+report.pdf                                    100%   47KB  42.0MB/s   00:00
 sftp> put report.pdf
 Uploading report.pdf to /report.pdf
-report.pdf                                    100%   47KB  40.7MB/s   00:00
+report.pdf                                    100%   47KB  48.8MB/s   00:00
 sftp> ls -l
--rw-r-----    1 partner  partner     48000 Oct 11 18:26 report (1).pdf
--rw-r-----    1 partner  partner     48000 Oct 11 18:26 report.pdf
+-rw-r-----    1 partner  partner     48000 Oct 11 19:03 report (1).pdf
+-rw-r-----    1 partner  partner     48000 Oct 11 19:03 report.pdf
 sftp> get report.pdf
 Fetching /report.pdf to report.pdf
 remote open "/report.pdf": Permission denied
@@ -273,14 +289,14 @@ it to the audit log (pretty-printed here):
 
 ```json
 {
-  "time": "2026-10-11T18:26:17.822637092Z",
+  "time": "2026-10-11T19:03:51.877756975Z",
   "level": "INFO",
   "msg": "audit",
-  "conn_id": "1a8db46260eb8b37",
-  "remote_addr": "127.0.0.1:51090",
+  "conn_id": "7bc79af4f34b75f4",
+  "remote_addr": "127.0.0.1:38934",
   "local_addr": "127.0.0.1:2022",
   "user": "partner",
-  "session_id": "ce06b100c8cd0685",
+  "session_id": "83aa8a68188c1ebe",
   "schema": 1,
   "event": "fs.upload",
   "path": "/report.pdf",
@@ -295,14 +311,15 @@ it to the audit log (pretty-printed here):
 
 The refused download and delete are there too, as `fs.denied` events, and the
 `auth.success` event for the same `conn_id` names the key that logged in
-(`key_fp`). Every key is in the [configuration reference](docs/configuration.md).
+(`key_fp`). Every key is in the
+[configuration reference](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/configuration.md).
 
 Several partners on one shared upload folder can see each other's file
 names. When that matters, as with payroll, give each partner a folder of
 their own:
 
 <details>
-<summary>A bigger example: you, a partner, per-user folders, a network and an end date</summary>
+<summary>A bigger example: a folder per partner, a shared read-only folder, a network and an end date</summary>
 
 ```toml
 config_version = 1
@@ -312,26 +329,28 @@ host_keys = ["/var/lib/gosftpd/ssh_host_ed25519_key"]
 host_key_auto_generate = true
 
 [mounts.inbox]
-path = "/srv/sftp/inbox"
-on_conflict = "version"            # replace, keeping old copies in .versions/
-
-[mounts.home]
-path = "/srv/sftp/home/{user}"     # a folder of their own for every user
+path = "/srv/sftp/inbox/{user}"    # a folder of their own for every user
 create = true
+on_conflict = "version"            # a new upload replaces, the old copy goes to .versions/
 
-[users.alice]                      # you: everything everywhere
-authorized_keys_file = "/etc/gosftpd/keys/alice.pub"
-access = { inbox = "full", home = "full" }
+[mounts.docs]
+path = "/srv/sftp/docs"            # one folder that everyone may read
 
 [users.partner]
 authorized_keys = ["ssh-ed25519 AAAA... partner@laptop"]
 allow_from = ["203.0.113.0/24"]    # only from their network
 expires = 2026-12-31T23:59:59Z     # and only until the end of the year
-access = { inbox = "upload", home = "readwrite" }
+access = { inbox = "upload", docs = "read" }
+
+[users.scanner]
+authorized_keys_file = "/etc/gosftpd/keys/scanner.pub"
+access = { inbox = "upload" }
 ```
 
-`gosftpd config example --full` prints every key with its default, and
-`gosftpd user add` prints a ready `[users.NAME]` block for a new partner.
+You collect the files on the server, in `/srv/sftp/inbox/partner/` and
+`/srv/sftp/inbox/scanner/`. `gosftpd config example --full` prints every key
+with its default, and `gosftpd user add` prints a ready `[users.NAME]` block
+for a new partner.
 
 </details>
 
@@ -378,7 +397,7 @@ Found a vulnerability? Please report it privately, as described in
 
 |  | Runs as | Users live in | Same file uploaded twice | Audit trail | Choose it when |
 |---|---|---|---|---|---|
-| **gosftpd** | an ordinary user (refuses root) | one TOML file | **kept**: the second one is `report (1).pdf`; or reject, version, overwrite | a JSON line per action, fail-closed | you want a safe drop folder with a paper trail |
+| **gosftpd** | an ordinary user (refuses root) | one TOML file | **kept**: the second one is `report (1).pdf`; or reject, version, overwrite | a JSON line per login, transfer and change; fail-closed | you want a safe drop folder with a paper trail |
 | OpenSSH `internal-sftp` + `ChrootDirectory` | root (sshd, root-owned chroot) | system accounts | replaced | syslog (`internal-sftp -l`) | you already run sshd and manage a few system accounts |
 | SFTPGo | an ordinary user | its database, via web UI or REST API | replaced, if the user has the `overwrite` permission | JSON logs, event actions | you need a web UI, FTP/WebDAV/HTTP or S3/GCS/Azure storage |
 | AWS Transfer Family | managed by AWS | service-managed users or your identity provider | replaced (S3 versioning optional) | CloudWatch | you want AWS to run it; billed per endpoint-hour plus per GB |
@@ -387,9 +406,8 @@ Found a vulnerability? Please report it privately, as described in
 
 This compares defaults and design as of October 2026, not speed: none of
 these, gosftpd included, has been benchmarked here. If you need a web UI,
-other protocols or cloud storage, SFTPGo is the better tool, and it's fine to
-say so. If a cell is wrong,
-[open an issue](https://github.com/o-kolomoiets/go-sftp-server/issues).
+other protocols or cloud storage, SFTPGo is the better tool. If a cell is
+wrong, [open an issue](https://github.com/o-kolomoiets/go-sftp-server/issues).
 
 ## Client compatibility
 
@@ -408,8 +426,8 @@ Quirks and settings per client are in [docs/interop.md](docs/interop.md).
 
 ## Install
 
-**Release archive.** Linux and macOS, amd64 and arm64; a static binary of
-about 7 MB.
+**Release archive.** Linux and macOS, amd64 and arm64; one binary of about
+7 MB, nothing else to install (static on Linux).
 
 ```sh
 curl -fsSLO https://github.com/o-kolomoiets/go-sftp-server/releases/download/v0.3.0/gosftpd_0.3.0_linux_amd64.tar.gz
@@ -431,10 +449,11 @@ go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest
 Not there yet: Windows and FreeBSD binaries, a Docker image, deb/rpm
 packages, a systemd unit, and signed releases (the checksums are SHA-256 and
 unsigned). Until then any process supervisor works: on SIGTERM gosftpd gives
-running transfers 30 seconds to finish, and a second signal stops it at once.
-To run it as a service under its own user, see the
-[quickstart](docs/quickstart.md#running-it-as-a-service) and the
-[hardening guide](docs/security/hardening.md).
+running transfers 30 seconds to finish, a second signal stops it at once,
+and v0.3.0 ignores SIGHUP, so restart it to apply a changed configuration.
+To run it as a service under its own user, see the v0.3.0
+[quickstart](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/quickstart.md#running-it-as-a-service) and
+[hardening guide](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security/hardening.md).
 
 ## Released and on its way
 
@@ -476,11 +495,15 @@ refused because it would serve your own `authorized_keys`. See the
 SFTP only, [by design](docs/adr/0002-non-goals.md): no shell, exec, port
 forwarding, legacy `scp -O`, rsync or git; no FTP/FTPS, WebDAV or HTTP; no
 web UI, share links or REST admin API; no S3, GCS or Azure backends; no LDAP,
-OIDC or MFA; no encryption at rest; no database, HA or clustering; no quotas
-or bandwidth limits. It runs next to OpenSSH (on port 2022 by default), not
-instead of it.
+OIDC or MFA; no encryption at rest; no database, HA or clustering. Not there
+yet either: per-user quotas and bandwidth limits (post-1.0 backlog). It runs
+next to OpenSSH (on port 2022 by default), not instead of it.
 
 ## Documentation
+
+These pages describe `main`. For the v0.3.0 release, read them
+[at the v0.3.0 tag](https://github.com/o-kolomoiets/go-sftp-server/tree/v0.3.0/docs):
+v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 
 - [Quickstart](docs/quickstart.md): from nothing to a first upload, and running it as a service
 - [Configuration](docs/configuration.md): every key, with its default

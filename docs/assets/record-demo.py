@@ -7,10 +7,11 @@ the terminal shows, with timestamps, as an asciicast v2 file. Nothing is
 staged: the output is what gosftpd, sftp and jq print.
 
 Run it as an ordinary user (gosftpd refuses root) whose ~/.ssh holds an
-ed25519 key in authorized_keys, with gosftpd, sftp, tmux and jq installed,
-an empty ~/inbox, a 48 kB ~/report.pdf, no ~/.config/gosftpd (so the host
-key is generated) and "StrictHostKeyChecking accept-new" plus "LogLevel
-ERROR" for localhost in ~/.ssh/config. Then:
+ed25519 key in authorized_keys (mode 0600), with the gosftpd binary from
+the release archive, sftp, tmux and jq in PATH, an empty ~/inbox, a 48 kB
+~/report.pdf, no ~/.config/gosftpd (so the host key is generated), no
+[localhost]:2022 line in ~/.ssh/known_hosts, and "StrictHostKeyChecking
+accept-new" plus "LogLevel ERROR" for localhost in ~/.ssh/config. Then:
 
     python3 record-demo.py demo.cast
     agg --font-family "JetBrains Mono" --font-size 16 --theme dracula \
