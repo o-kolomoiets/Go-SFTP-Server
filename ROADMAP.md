@@ -78,7 +78,7 @@ The tasks are ordered; each takes from 30 minutes to 3 hours, 12–20 hours in t
 | Users | system accounts | DB (SQLite by default) and web admin | `users.conf` / `SFTP_USERS` | effectively one (several only via `--auth-proxy`) | virtual, in a TOML file |
 | Upload conflict | overwrite | overwrite; can be forbidden via the `overwrite` permission (the upload is then rejected); atomicity via `upload_mode`; no rename on conflict | overwrite | overwrite | `rename` / `reject` / `overwrite` / `version` |
 | Audit | syslog | extensive | OpenSSH syslog | rclone log | JSON Lines with a stable schema |
-| Size | part of the OS | 58 MB binary, default config of 447 lines and 368 keys | alpine image 9.2 MB (compressed) | full rclone | binary ≤ 10 MB, image ≤ 15 MB |
+| Size | part of the OS | 58 MB binary, default config of 447 lines and 368 keys | alpine image 9.2 MB (compressed) | full rclone | binary ≤ 12 MiB, image ≤ 15 MB |
 | Activity (as of 2026-10) | OpenSSH 10.6p1 (2026-10) | v2.7.6 (2026-09-18) | stagnant, 195 open issues | active | — |
 | Why it does not fit our niche | complex setup, no drop-box semantics | heavy, large web surface (CVEs), AGPL, open-core | stagnation, chroot limitations | not designed for multi-user file intake | young project (this is our risk) |
 
@@ -1519,7 +1519,7 @@ Once external contributors appear: `good first issue` labels, GitHub Discussions
 | Metric | Target | How we measure |
 |---|---|---|
 | Time from download to the first `put` | < 60 s in zero-config, < 5 minutes following the README with a config | Timed on a clean VM before a release |
-| Binary / image size | ≤ 10 MiB / ≤ 15 MB (compressed) | The `goreleaser-check` CI job fails a release binary over 10 MiB (10 485 760 bytes). Reference figures: a minimal `x/crypto/ssh` + `pkg/sftp` binary is about 4.8 MB; M4-06 (the HTTP server for the admin listener and the HTTP client of `healthcheck --url`) took linux/amd64 from 7.27 to 9.96 MB and darwin/amd64 from 7.40 to 10.17 MB (9.70 MiB) |
+| Binary / image size | ≤ 12 MiB / ≤ 15 MB (compressed) | The `goreleaser-check` CI job fails a release binary over 12 MiB (12 582 912 bytes; D21, it was 10 MB). Reference figures: a minimal `x/crypto/ssh` + `pkg/sftp` binary is about 4.8 MB. Built with Go 1.27.2, `main` before M4-06 was 7.86 MB (linux/amd64; Go 1.27 alone added 0.6 MB); `net/http`, which the admin listener and `healthcheck --url` (M4-06) and the webhooks (M4-07) need, costs about 2.7 MB: 10.58 MB linux/amd64, 10.81 MB darwin/amd64 |
 | Idle RSS | ≤ 20 MB (a target, to be verified by measurement) | `ps`/cgroup in the benchmark |
 | Throughput | ≥ 80% of OpenSSH `internal-sftp` on W1 in variants (b) and (c) from §8.6 | `docs/benchmarks.md` |
 | Security | 0 known escapes from a mount; fuzz in CI; govulncheck clean; a reachable vulnerability is fixed by a patch release within ≤ 7 days (§9.6); ssh-audit without `fail` on `modern` with an ed25519 host key | CI, SECURITY log |
@@ -1596,6 +1596,7 @@ Once a decision is made, `accepted YYYY-MM-DD, ADR 0001` (or the number of anoth
 | D18 | **Public Go API** | Only `internal/` until 1.0; public `vfs` and `sftptest` earlier | **`internal/` until 1.0**, `sftptest` after 1.0 | M6 | open |
 | D19 | **Language of the project** | English; Russian; both | **English** everywhere: code, documentation including `ROADMAP.md` and `TASKS.md`, commit messages, issues and pull requests; this makes the project accessible to the awesome-selfhosted and HN audiences and to every contributor | M0 | accepted 2026-10-07 per recommendation, ADR 0001; extended to `ROADMAP.md` and `TASKS.md` by the owner 2026-10-10, ADR 0006 |
 | D20 | **If the audit log cannot be written** (disk full) | fail-closed: new connections and data-modifying operations are refused, `/readyz` → 503; fail-open: work continues, errors go to stderr and a metric | **fail-closed by default** (`audit.on_error`): auditing is one of the project's main promises, and `min_free_space` already stops uploads on a nearly full disk. fail-open is for those who value availability over the audit trail | M1 | open |
+| D21 | **Binary size budget** | 10 MB; 11 MiB; 12 MiB; own minimal HTTP code to stay within 10 MiB | **12 MiB**: `net/http` (with `crypto/tls`, x509 and HTTP/2) is needed for the admin listener and the webhooks and costs about 2.7 MB; a hand-written HTTP server would be more security-sensitive code for a saving that the webhooks undo | M4 | decided 2026-10-11 by the owner: **12 MiB**, keep `net/http` |
 
 ---
 

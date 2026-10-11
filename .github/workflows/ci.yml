@@ -261,13 +261,13 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
-      - name: Release binaries stay within 10 MiB (ROADMAP §11.1)
+      - name: Release binaries stay within 12 MiB (ROADMAP §11.1, D21)
         run: |
           status=0
           for f in dist/gosftpd_*/gosftpd; do
             size=$(stat -c %s "$f")
             echo "$f: $size bytes"
-            if [ "$size" -gt 10485760 ]; then echo "::error file=$f::$size bytes is over the 10 MiB budget"; status=1; fi
+            if [ "$size" -gt 12582912 ]; then echo "::error file=$f::$size bytes is over the 12 MiB budget"; status=1; fi
           done
           exit $status
 

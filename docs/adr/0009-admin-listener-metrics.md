@@ -28,11 +28,12 @@ banner prints `metrics: http://ADDR` and `server.start` gets `metrics_listen`.
 `metrics.pprof` is reloadable (a flag the handlers check), so a running
 process can be profiled without a restart.
 
-Release binaries do not contain pprof: `net/http/pprof` costs 0.6 MB, the
-HTTP server itself 2.2 MB and the HTTP client of `healthcheck --url` 0.5 MB,
-against the 10 MiB budget of §11.1 (linux/amd64 7.27 MB before, 9.96 MB
-after; darwin/amd64 10.17 MB, 9.70 MiB). The webhooks of M4-07 need the same
-client. `pprof = true` in a binary built without `-tags pprof` is a
+Release binaries do not contain pprof: `net/http/pprof` costs 0.6 MB.
+`net/http` itself, for the server and the client of `healthcheck --url`,
+costs about 2.7 MB (built with Go 1.27.2: linux/amd64 7.86 MB before, 10.58
+MB after; darwin/amd64 10.81 MB), more than the 10 MB budget of §11.1
+allowed; the owner raised the budget to 12 MiB (D21) rather than replace
+`net/http`, which the webhooks of M4-07 need as well. `pprof = true` in a binary built without `-tags pprof` is a
 configuration error that says so.
 
 The listener has no authentication or TLS. `config validate` and `serve`
@@ -211,7 +212,8 @@ an exception to §6.7), with exactly one line on stderr.
   the interop job runs `promtool check metrics` (pinned, checksummed)
   against a live server. `promlinter` (a client_golang linter) does not
   apply; a test checks the names (prefix, `_total` on counters, base
-  units). CI also checks the release binary against the 10 MB budget.
+  units). CI also checks the release binaries against the size budget
+  (12 MiB, D21).
 - The admin listener has no authentication or TLS: keep it on loopback or a
   private network, or put it behind a proxy. The threat model gains it as
   an entry point.
