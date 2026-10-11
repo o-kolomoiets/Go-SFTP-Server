@@ -433,7 +433,8 @@ access = { data = "full" }
 	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
 		t.Errorf("server.reload = %v", ev)
 	}
-	if !strings.Contains(ts.stderr.String(), "server.host_keys in "+path+" has no effect: --host-key overrides it") {
+	// The log quotes the path, escaping a Windows path's backslashes.
+	if log := ts.stderr.String(); !strings.Contains(log, "server.host_keys in ") || !strings.Contains(log, filepath.Base(path)+" has no effect: --host-key overrides it") {
 		t.Errorf("no warning about the hidden setting:\n%s", ts.stderr.String())
 	}
 }
