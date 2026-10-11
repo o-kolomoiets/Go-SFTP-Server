@@ -49,7 +49,11 @@ note in the CHANGELOG.
    `gosftpd version` must print `vX.Y.Z` and the commit of the tag.
 8. `go list -m github.com/o-kolomoiets/go-sftp-server@vX.Y.Z` finds the
    version through the Go module proxy.
-9. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
+9. In `README.md`, name the new version: the install commands, the
+   "Released and on its way" and Roadmap tables, and what the page says is
+   only on `main`. If the banner or the demo session changed, record
+   `docs/assets/demo.gif` again with `docs/assets/record-demo.py`.
+10. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
 
 ## Patch releases
 
