@@ -325,31 +325,6 @@ path = "`+filepath.ToSlash(filepath.Join(dir, "m"))+`"
 	}
 }
 
-// A next key that does not belong to the owner of the host key (or root) is
-// not made the host key: gosftpd might not read it.
-func TestHostkeyRotateFinishOwner(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() != 0 {
-		t.Skip("needs root to give a file another owner")
-	}
-	isolate(t)
-	key := filepath.Join(t.TempDir(), "key")
-	if _, err := hostkey.Generate(key); err != nil {
-		t.Fatal(err)
-	}
-	if code, _, errOut := execute(t, "hostkey", "rotate", "--host-key", key); code != exitOK {
-		t.Fatalf("rotate: %s", errOut)
-	}
-	if err := os.Chown(hostkey.Next(key), 4242, 4242); err != nil {
-		t.Fatal(err)
-	}
-	if code, _, errOut := execute(t, "hostkey", "rotate", "--finish", "--host-key", key); code != exitUsage || !strings.Contains(errOut, "belongs to uid 4242") {
-		t.Errorf("finish with a foreign next key: exit %d, %s", code, errOut)
-	}
-	if exists(hostkey.Old(key)) {
-		t.Error("the refused finish changed files")
-	}
-}
-
 // A reload keeps the running host keys when the new ones cannot be used,
 // and then checks those against new mounts; it uses changed paths; it
 // leaves out a broken next certificate but keeps announcing the next key.
@@ -413,7 +388,7 @@ read_only = true
 	// A broken certificate of the next key is left out; the key is still
 	// announced.
 	p := filepath.Join(dir, "keys2", "host_key")
-	next, err := hostkey.StartRotation(p, "", nil)
+	next, _, err := hostkey.StartRotation(p, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +449,7 @@ func TestLoadHostKeys(t *testing.T) {
 	if _, err := hostkey.Generate(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hostkey.StartRotation(p, "", nil); err != nil {
+	if _, _, err := hostkey.StartRotation(p, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	ca := newSigner(t)
@@ -528,13 +503,13 @@ func TestLoadHostKeys(t *testing.T) {
 	if _, err := hostkey.GenerateType(ec, hostkey.TypeECDSA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hostkey.StartRotation(p, hostkey.TypeECDSA, nil); err != nil {
+	if _, _, err := hostkey.StartRotation(p, hostkey.TypeECDSA, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := loadHostKeys([]string{p, ec}, hostKeyOptions{}); err == nil || !strings.Contains(err.Error(), "only one would be used") {
 		t.Errorf("a next key of another key's type: %v", err)
 	}
-	if err := hostkey.AbortRotation(p); err != nil {
+	if _, err := hostkey.AbortRotation(p, nil); err != nil {
 		t.Fatal(err)
 	}
 

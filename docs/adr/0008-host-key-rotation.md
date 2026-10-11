@@ -102,14 +102,19 @@ new key becomes `P.next` again and `P.old` becomes `P`; clients keep both,
 since both stay announced. `rotate --abort` deletes `P.next` and its files.
 Until `--retire`, every step can be undone without a client noticing.
 
-Every step can be run again after an interruption: `--finish` and
-`--rollback` complete the certificate and `.pub` moves (a rollback is
-recognized by what it left), `--abort` and `--retire` delete the key last,
-and `--retire` first completes an interrupted `--finish`. A certificate
-moves to `P` only if it certifies the new key. `--finish` and `--rollback`
-refuse a certificate the server would refuse, and `--finish` a next key
-that belongs neither to root nor to `P`'s owner; `rotate` deletes leftover
-files of an earlier next key.
+Every step decides by what the key files hold, never by which other files
+exist, and can be run again after an interruption. The key files are
+linked and renamed so that `P` always exists; a half-done `--finish` or
+`--rollback` (one of `P.next`, `P.old` holding `P`'s key) is completed by
+running it again, and `--retire` and `--abort` refuse to run in between.
+Then every step puts each `.pub` file and certificate with the key it
+belongs to (a certificate with the key it certifies) and removes those of
+keys that are gone, so an interrupted step never leaves a certificate that
+a later one takes for another key's. `--finish` refuses a next key of
+another owner (as root it first gives it `P`'s owner, since gosftpd must
+read it), of the type of another host key, or with a certificate the
+server would refuse; `--rollback` only warns about a bad certificate, since
+it is the way back.
 
 **Several servers under one name.** A client takes the announcement as the
 complete key set of the host name and removes every other key. Servers

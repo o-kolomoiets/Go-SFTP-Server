@@ -89,8 +89,11 @@ Incompatible changes are prefixed with **BREAKING:**.
 - Host keys are read again on reload (they were restart-only): new
   connections use the new keys, open ones keep theirs. A reload never
   generates a key, and a host key that cannot be used keeps the running
-  keys instead of failing the reload. Configuration management that edits
-  `server.host_keys` changes the server's identity at the next reload.
+  keys instead of failing the reload. A host key, next or previous key or
+  host certificate inside a mount fails the reload, as every file gosftpd
+  trusts does (also the running keys, when they stay). Configuration
+  management that edits `server.host_keys` changes the server's identity at
+  the next reload.
 - **BREAKING:** two host keys of one type are refused (only one of them was
   used), and `host_key_auto_generate` no longer creates a key next to an
   existing `KEY.next` or `KEY.old`.

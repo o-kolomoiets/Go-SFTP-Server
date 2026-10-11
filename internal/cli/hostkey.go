@@ -267,38 +267,50 @@ P.next.pub, to each of them.`,
 			p := paths[0]
 			w := cmd.OutOrStdout()
 			again := func(step string) string { return "gosftpd hostkey rotate " + step + " --host-key " + commandArg(p) }
-			if abort {
-				if err := hostkey.AbortRotation(p); err != nil {
-					return configError{err}
-				}
-				fmt.Fprintf(w, "deleted the next key %s\nreload gosftpd to stop announcing it\n", hostkey.Next(p))
-				return nil
-			}
 			prepare, err := keyOwner(p)
 			if err != nil {
 				return configError{err}
 			}
-			switch {
-			case retire:
-				if err := hostkey.RetireRotation(p, prepare); err != nil {
+			// The files that a step changed besides the keys, and what
+			// it reports, also when it fails.
+			report := func(changes []string, err error) error {
+				for _, ch := range changes {
+					fmt.Fprintln(w, ch)
+				}
+				if err != nil {
 					return configError{err}
+				}
+				return nil
+			}
+			switch {
+			case abort:
+				if err := report(hostkey.AbortRotation(p, prepare)); err != nil {
+					return err
+				}
+				fmt.Fprintf(w, "deleted the next key %s\nreload gosftpd to stop announcing it\n", hostkey.Next(p))
+				return nil
+			case retire:
+				if err := report(hostkey.RetireRotation(p, prepare)); err != nil {
+					return err
 				}
 				fmt.Fprintf(w, "deleted the previous key %s\nreload gosftpd: OpenSSH clients forget it at their next login\n", hostkey.Old(p))
 				return nil
 			case rollback:
-				completed, err := hostkey.RollbackRotation(p, prepare)
-				if err != nil {
-					return configError{err}
+				// The previous key's certificate becomes P's; a bad one does
+				// not block going back.
+				if old, err := hostkey.Load(hostkey.Old(p)); err == nil {
+					if err := checkCertFile(hostkey.Old(p), old.PublicKey(), p); err != nil {
+						fmt.Fprintf(w, "warning: %v; it will not be served\n", err)
+					}
 				}
-				if completed {
-					fmt.Fprintln(w, "completed an interrupted rollback")
+				if err := report(hostkey.RollbackRotation(p, prepare)); err != nil {
+					return err
 				}
 				fmt.Fprintf(w, "%s is the host key again; the newer key is the next key %s\n", p, hostkey.Next(p))
 				fmt.Fprintln(w, "reload gosftpd: both stay announced")
 				return nil
 			case finish:
-				// gosftpd must be able to read the new key as it reads P.
-				if err := sameOwner(hostkey.Next(p), p); err != nil {
+				if err := checkFinish(p, c, prepare, w); err != nil {
 					return configError{err}
 				}
 				f, err := hostkey.FinishRotation(p, prepare)
@@ -313,13 +325,14 @@ P.next.pub, to each of them.`,
 					return configError{err}
 				}
 			}
-			k, err := hostkey.StartRotation(p, typ, prepare)
+			k, changes, err := hostkey.StartRotation(p, typ, prepare)
 			if err != nil {
 				if errors.Is(err, fs.ErrExist) {
 					err = fmt.Errorf("%s already exists", hostkey.Next(p))
 				}
-				return configError{err}
+				return report(changes, err)
 			}
+			_ = report(changes, nil)
 			printStarted(w, p, k.PublicKey(), c, host, port, again)
 			return nil
 		},
@@ -332,6 +345,64 @@ P.next.pub, to each of them.`,
 	cmd.Flags().BoolVar(&retire, "retire", false, "delete the previous key")
 	cmd.Flags().BoolVar(&abort, "abort", false, "delete the next key")
 	return cmd
+}
+
+// checkFinish checks the next key before it becomes P, as the server will
+// load it: owner, type and certificate. As root it first gives the key P's
+// owner.
+func checkFinish(p string, c *config.Config, prepare func(string) error, w io.Writer) error {
+	next := hostkey.Next(p)
+	key, err := hostkey.Load(next)
+	if err != nil {
+		return nil //nolint:nilerr // FinishRotation reports it, or completes an interrupted finish
+	}
+	if prepare != nil {
+		if err := prepare(next); err != nil {
+			return err
+		}
+	}
+	if err := sameOwner(next, p, false); err != nil {
+		return err
+	}
+	if c != nil {
+		for _, other := range c.Server.HostKeys {
+			if other == p {
+				continue
+			}
+			if k, err := hostPublicKey(other); err == nil && k.Type() == key.PublicKey().Type() {
+				return fmt.Errorf("%s is of type %s, like the host key %s: only one of them would be used", next, k.Type(), other)
+			}
+		}
+	}
+	if err := checkCertFile(next, key.PublicKey(), p); err != nil {
+		if c != nil && !c.Server.HostCertificates {
+			fmt.Fprintf(w, "warning: %v\n", err)
+			return nil
+		}
+		return fmt.Errorf("%w; fix or remove it first", err)
+	}
+	return nil
+}
+
+// checkCertFile checks the certificate of key file f, which holds key, if
+// there is one, as the server will: its owner (root or like's), its mode
+// and its content.
+func checkCertFile(f string, key ssh.PublicKey, like string) error {
+	cf := hostkey.Cert(f)
+	fi, err := os.Stat(cf)
+	if err != nil {
+		return nil //nolint:nilerr // no certificate
+	}
+	if fi.Mode().Perm()&0o022 != 0 && runtime.GOOS != "windows" {
+		return fmt.Errorf("host certificate %s is writable by group or others", cf)
+	}
+	if err := sameOwner(cf, like, true); err != nil {
+		return err
+	}
+	if _, err := hostkey.LoadCertificate(cf, key); err != nil {
+		return fmt.Errorf("host certificate %w", err)
+	}
+	return nil
 }
 
 // typeTaken refuses a new key of a type that another configured host key,
@@ -389,9 +460,16 @@ func commandArg(s string) string {
 }
 
 func printFinished(w io.Writer, p string, f *hostkey.Finished, c *config.Config, again func(string) string) {
-	if f.Age > 0 {
+	for _, ch := range f.Changes {
+		fmt.Fprintln(w, ch)
+	}
+	announced := c == nil || c.Server.AnnounceHostKeys
+	switch {
+	case f.Age > 0 && announced:
 		fmt.Fprintf(w, "the next key replaced %s; it was announced for up to %s\n", p, f.Age.Round(time.Minute))
-	} else {
+	case f.Age > 0:
+		fmt.Fprintf(w, "the next key replaced %s\n", p)
+	default:
 		fmt.Fprintf(w, "completed the rotation of %s\n", p)
 	}
 	fmt.Fprintf(w, "  host key: %s\n", keyLabel(f.New.PublicKey()))
@@ -400,6 +478,12 @@ func printFinished(w io.Writer, p string, f *hostkey.Finished, c *config.Config,
 		fmt.Fprintf(w, "warning: the new key has no certificate (%s); clients that trust only the CA cannot verify it\n", hostkey.Cert(p))
 	}
 	fmt.Fprintln(w, "next steps:")
+	if !announced {
+		fmt.Fprintln(w, "  1. reload gosftpd: the new key is used for key exchange; clients that do not have it see a changed host key")
+		fmt.Fprintf(w, "  2. if something goes wrong: %s, and reload\n", again("--rollback"))
+		fmt.Fprintf(w, "  3. later: %s, and reload\n", again("--retire"))
+		return
+	}
 	fmt.Fprintln(w, "  1. reload gosftpd: the new key is used for key exchange; the previous key stays announced")
 	fmt.Fprintf(w, "  2. if something goes wrong: %s, and reload\n", again("--rollback"))
 	fmt.Fprintf(w, "  3. later: %s, and reload; OpenSSH clients then forget the previous key\n", again("--retire"))

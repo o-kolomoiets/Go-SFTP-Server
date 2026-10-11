@@ -494,13 +494,16 @@ each step:
    clients keep it and `rotate --rollback` can return to it.
 3. `rotate --retire` deletes `KEY.old`; after the reload clients forget it.
 
-`rotate --abort` deletes a `KEY.next` that is no longer wanted. `KEY` always
-exists; a step that was interrupted is completed by running it again.
-`--finish` and `--rollback` refuse a key or certificate that the server would
-not use (a certificate of another key, a key of another owner).
+`rotate --abort` deletes a `KEY.next` that is no longer wanted. `KEY`
+always exists, and a step that was interrupted is completed by running it
+again. Each step puts the `.pub` files and certificates with the keys they
+belong to, and removes those of keys that are gone. `--finish` refuses a
+next key of another owner (as root, it gives the key the owner of `KEY`), of
+the type of another host key, or with a certificate the server would refuse
+(with `--config` and `host_certificates` off, only a warning).
 
 OpenSSH 8.5 and later update `known_hosts` by default only when
-`UserKnownHostsFile` is the default one (with another file, set
+`UserKnownHostsFile` is the default one and `VerifyHostKeyDNS` is off (else, set
 `UpdateHostKeys yes`; new keys go to the first file). It never updates a key
 found through a `GlobalKnownHostsFile` or `KnownHostsCommand`, nor
 for a host verified by a certificate or with a `@cert-authority` or

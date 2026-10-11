@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -87,14 +88,14 @@ func TestRotation(t *testing.T) {
 
 	var prepared []string
 	prepare := func(f string) error { prepared = append(prepared, f); return nil }
-	next, err := StartRotation(p, "", prepare)
+	next, _, err := StartRotation(p, "", prepare)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next.PublicKey().Type() != ssh.KeyAlgoED25519 || len(prepared) != 2 {
 		t.Errorf("next key %s, prepared %v; want ed25519, key and .pub", next.PublicKey().Type(), prepared)
 	}
-	if _, err := StartRotation(p, "", nil); err == nil || !strings.Contains(err.Error(), "in progress") {
+	if _, _, err := StartRotation(p, "", nil); err == nil || !strings.Contains(err.Error(), "in progress") {
 		t.Errorf("second StartRotation() = %v", err)
 	}
 	writeCert(t, ca, Next(p))
@@ -106,239 +107,265 @@ func TestRotation(t *testing.T) {
 	if fp(f.New) != fp(next) || fp(f.Old) != fp(first) || !f.Certified || f.Age <= 0 {
 		t.Errorf("Finished = %+v", f)
 	}
-	if fp(mustLoad(t, p)) != fp(next) || fp(mustLoad(t, Old(p))) != fp(first) || exists(Next(p)) {
-		t.Error("keys not rotated")
+	consistent(t, p, next)
+	consistent(t, Old(p), first)
+	if anyExists(Next(p), Next(p)+".pub", Cert(Next(p))) {
+		t.Error("files of P.next are left")
 	}
-	if pubFile(t, p) != fp(next) || pubFile(t, Old(p)) != fp(first) || exists(Next(p)+".pub") {
-		t.Error("public key files not rotated")
-	}
-	if certKeyFP(t, Cert(p)) != fp(next) || certKeyFP(t, Cert(Old(p))) != fp(first) || exists(Cert(Next(p))) {
-		t.Error("certificates not rotated")
-	}
-	if _, err := StartRotation(p, "", nil); err == nil || !strings.Contains(err.Error(), "retire") {
+	if _, _, err := StartRotation(p, "", nil); err == nil || !strings.Contains(err.Error(), "retire") {
 		t.Errorf("StartRotation() before retiring = %v", err)
 	}
 
-	if completed, err := RollbackRotation(p, nil); err != nil || completed {
-		t.Fatalf("RollbackRotation() = %v, %v", completed, err)
+	if _, err := RollbackRotation(p, nil); err != nil {
+		t.Fatal(err)
 	}
-	if fp(mustLoad(t, p)) != fp(first) || fp(mustLoad(t, Next(p))) != fp(next) || exists(Old(p)) {
-		t.Error("rollback did not swap the keys back")
-	}
-	if pubFile(t, p) != fp(first) || pubFile(t, Next(p)) != fp(next) || certKeyFP(t, Cert(p)) != fp(first) || certKeyFP(t, Cert(Next(p))) != fp(next) {
-		t.Error("rollback did not swap the files back")
+	consistent(t, p, first)
+	consistent(t, Next(p), next)
+	if anyExists(Old(p), Old(p)+".pub", Cert(Old(p))) {
+		t.Error("files of P.old are left")
 	}
 
 	if _, err := FinishRotation(p, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := RetireRotation(p, nil); err != nil {
+	if _, err := RetireRotation(p, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{Old(p), Old(p) + ".pub", Cert(Old(p))} {
-		if exists(f) {
-			t.Errorf("%s still exists", f)
-		}
+	consistent(t, p, next)
+	if anyExists(Old(p), Old(p)+".pub", Cert(Old(p))) {
+		t.Error("files of P.old are left")
 	}
-	if err := RetireRotation(p, nil); err == nil {
+	if _, err := RetireRotation(p, nil); err == nil {
 		t.Error("RetireRotation() without P.old succeeded")
 	}
 
 	// Another rotation, to another type, aborted.
-	if k, err := StartRotation(p, TypeECDSA, nil); err != nil || k.PublicKey().Type() != ssh.KeyAlgoECDSA256 {
+	if k, _, err := StartRotation(p, TypeECDSA, nil); err != nil || k.PublicKey().Type() != ssh.KeyAlgoECDSA256 {
 		t.Fatalf("StartRotation(ecdsa) = %v", err)
 	}
-	if err := AbortRotation(p); err != nil {
+	if _, err := AbortRotation(p, nil); err != nil {
 		t.Fatal(err)
 	}
-	if exists(Next(p)) || exists(Next(p)+".pub") {
+	if anyExists(Next(p), Next(p)+".pub") {
 		t.Error("abort left P.next")
 	}
-	if err := AbortRotation(p); err == nil {
+	if _, err := AbortRotation(p, nil); err == nil {
 		t.Error("AbortRotation() without P.next succeeded")
 	}
-	if fp(mustLoad(t, p)) != fp(next) {
-		t.Error("abort changed P")
+	consistent(t, p, next)
+}
+
+// consistent checks that key file f holds key, with its public key file and
+// certificate.
+func consistent(t *testing.T, f string, key ssh.Signer) {
+	t.Helper()
+	if fp(mustLoad(t, f)) != fp(key) || pubFile(t, f) != fp(key) || certKeyFP(t, Cert(f)) != fp(key) {
+		t.Errorf("%s, its .pub or its certificate is not %s", f, fp(key))
 	}
 }
 
-// An interrupted finish (P.old made, P.next not yet renamed, or renamed
-// without the certificates and public keys) is completed by running it
-// again; P exists throughout.
-func TestFinishRotationInterrupted(t *testing.T) {
-	t.Parallel()
+func anyExists(paths ...string) bool { return slices.ContainsFunc(paths, exists) }
 
-	p := filepath.Join(t.TempDir(), DefaultFile)
-	first, err := Generate(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	next, err := StartRotation(p, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Interrupted after the link.
-	if err := os.Link(p, Old(p)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := FinishRotation(p, nil); err != nil {
-		t.Fatalf("FinishRotation() after an interrupted one: %v", err)
-	}
-	if fp(mustLoad(t, p)) != fp(next) || fp(mustLoad(t, Old(p))) != fp(first) {
-		t.Error("keys not rotated")
-	}
-
-	// Interrupted after the rename: the .pub files are stale.
-	if err := os.WriteFile(p+".pub", ssh.MarshalAuthorizedKey(first.PublicKey()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f, err := FinishRotation(p, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.Age != 0 || pubFile(t, p) != fp(next) {
-		t.Errorf("completion: age %v, P.pub %s", f.Age, pubFile(t, p))
-	}
-
-	// P.old that holds another key is not replaced.
-	q := filepath.Join(t.TempDir(), DefaultFile)
-	if _, err := Generate(q); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := StartRotation(q, "", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Generate(Old(q)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := FinishRotation(q, nil); err == nil || !strings.Contains(err.Error(), "another key") {
-		t.Errorf("FinishRotation() over a foreign P.old = %v", err)
-	}
-}
-
-// An interrupted rollback, abort or retire is completed by running it
-// again, and leaves no certificate that a later step would take for
-// another key's.
-func TestRotationStepsInterrupted(t *testing.T) {
+// Every step, interrupted between its file operations, is completed by
+// running it again; the other steps then neither lose a certificate nor
+// take a half-done step for something else.
+func TestRotationInterrupted(t *testing.T) {
 	t.Parallel()
 
 	ca := mustSigner(t)
-	setup := func(t *testing.T) (p string, first, next ssh.Signer) {
+	// rotating returns P (key A, certified) with P.next (key B, certified).
+	rotating := func(t *testing.T) (p string, a, b ssh.Signer) {
 		t.Helper()
 		p = filepath.Join(t.TempDir(), DefaultFile)
-		first, err := Generate(p)
+		a, err := Generate(p)
 		if err != nil {
 			t.Fatal(err)
 		}
 		writeCert(t, ca, p)
-		if next, err = StartRotation(p, "", nil); err != nil {
+		if b, _, err = StartRotation(p, "", nil); err != nil {
 			t.Fatal(err)
 		}
 		writeCert(t, ca, Next(p))
-		return p, first, next
+		return p, a, b
 	}
-	consistent := func(t *testing.T, p string, cur, other ssh.Signer, otherFile string) {
+	link := func(t *testing.T, from, to string) {
 		t.Helper()
-		if fp(mustLoad(t, p)) != fp(cur) || pubFile(t, p) != fp(cur) || certKeyFP(t, Cert(p)) != fp(cur) {
-			t.Errorf("%s, its .pub or its certificate is not %s", p, fp(cur))
+		if err := os.Link(from, to); err != nil {
+			t.Fatal(err)
 		}
-		if fp(mustLoad(t, otherFile)) != fp(other) || pubFile(t, otherFile) != fp(other) || certKeyFP(t, Cert(otherFile)) != fp(other) {
-			t.Errorf("%s, its .pub or its certificate is not %s", otherFile, fp(other))
+	}
+	rename := func(t *testing.T, from, to string) {
+		t.Helper()
+		if err := os.Rename(from, to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := func(t *testing.T, err error, want string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want %q", err, want)
 		}
 	}
 
-	t.Run("rollback after its rename", func(t *testing.T) {
+	t.Run("finish after its link", func(t *testing.T) {
 		t.Parallel()
-		p, first, next := setup(t)
+		p, a, b := rotating(t)
+		link(t, p, Old(p))
+		_, err := RetireRotation(p, nil)
+		refused(t, err, "run rotate --finish again")
+		_, err = AbortRotation(p, nil)
+		refused(t, err, "run rotate --finish again")
 		if _, err := FinishRotation(p, nil); err != nil {
 			t.Fatal(err)
 		}
-		// The rollback stopped once P.old had replaced P.
-		if err := os.Link(p, Next(p)); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Rename(Old(p), p); err != nil {
-			t.Fatal(err)
-		}
-		completed, err := RollbackRotation(p, nil)
-		if err != nil || !completed {
-			t.Fatalf("RollbackRotation() again = %v, %v", completed, err)
-		}
-		consistent(t, p, first, next, Next(p))
-		if anyExists(Old(p)+".pub", Cert(Old(p))) {
-			t.Error("files of P.old are left")
-		}
-		// During an ordinary rotation there is nothing to roll back.
-		if _, err := RollbackRotation(p, nil); err == nil {
-			t.Error("RollbackRotation() before a finish succeeded")
-		}
+		consistent(t, p, b)
+		consistent(t, Old(p), a)
 	})
 
-	t.Run("abort without its key", func(t *testing.T) {
+	// After its rename, before the files follow the keys: P is B, P.old A.
+	finishRenamed := func(t *testing.T) (p string, a, b ssh.Signer) {
+		t.Helper()
+		p, a, b = rotating(t)
+		link(t, p, Old(p))
+		rename(t, Next(p), p)
+		return p, a, b
+	}
+	t.Run("finish after its rename", func(t *testing.T) {
 		t.Parallel()
-		p, first, _ := setup(t)
-		if err := os.Remove(Next(p)); err != nil {
-			t.Fatal(err)
-		}
-		if err := AbortRotation(p); err != nil {
-			t.Fatalf("AbortRotation() of the files left: %v", err)
-		}
-		if anyExists(Next(p)+".pub", Cert(Next(p))) {
-			t.Error("files of P.next are left")
-		}
-		// A stale certificate of an earlier next key never moves to P.
-		writeCert(t, ca, p)
-		data, err := os.ReadFile(Cert(p))
-		if err != nil {
-			t.Fatal(err)
-		}
-		next, err := StartRotation(p, "", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(Cert(Next(p)), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := FinishRotation(p, nil); err == nil || !strings.Contains(err.Error(), "another key") {
-			t.Errorf("FinishRotation() with a foreign next certificate = %v", err)
-		}
-		if err := os.Remove(Cert(Next(p))); err != nil {
-			t.Fatal(err)
-		}
+		p, a, b := finishRenamed(t)
 		f, err := FinishRotation(p, nil)
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || f.Age != 0 || !f.Certified || len(f.Changes) == 0 {
+			t.Fatalf("FinishRotation() again = %+v, %v", f, err)
 		}
-		if f.Certified || exists(Cert(p)) || fp(f.New) != fp(next) || fp(f.Old) != fp(first) {
-			t.Errorf("Finished = %+v; P-cert.pub exists: %v", f, exists(Cert(p)))
-		}
+		consistent(t, p, b)
+		consistent(t, Old(p), a)
 	})
-
+	t.Run("abort after an interrupted finish", func(t *testing.T) {
+		t.Parallel()
+		p, a, b := finishRenamed(t)
+		_, err := AbortRotation(p, nil)
+		refused(t, err, "no rotation is in progress")
+		consistent(t, p, b) // B's certificate is kept, with B
+		consistent(t, Old(p), a)
+	})
 	t.Run("retire after an interrupted finish", func(t *testing.T) {
 		t.Parallel()
-		p, _, next := setup(t)
-		// The finish stopped after its rename.
-		if err := os.Link(p, Old(p)); err != nil {
+		p, _, b := finishRenamed(t)
+		if _, err := RetireRotation(p, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := RetireRotation(p, nil); err == nil || !strings.Contains(err.Error(), "interrupted") {
-			t.Errorf("RetireRotation() between the link and the rename = %v", err)
-		}
-		if err := AbortRotation(p); err == nil || !strings.Contains(err.Error(), "interrupted") {
-			t.Errorf("AbortRotation() between the link and the rename = %v", err)
-		}
-		if err := os.Rename(Next(p), p); err != nil {
-			t.Fatal(err)
-		}
-		if err := RetireRotation(p, nil); err != nil {
-			t.Fatal(err)
-		}
-		if fp(mustLoad(t, p)) != fp(next) || pubFile(t, p) != fp(next) || certKeyFP(t, Cert(p)) != fp(next) {
-			t.Error("retire did not complete the finish")
-		}
+		consistent(t, p, b)
 		if anyExists(Old(p), Old(p)+".pub", Cert(Old(p)), Next(p)+".pub", Cert(Next(p))) {
 			t.Error("files left after retire")
 		}
+	})
+
+	// A rollback after its link: P is B, P.next a link to it, P.old A.
+	t.Run("rollback after its link", func(t *testing.T) {
+		t.Parallel()
+		p, a, b := rotating(t)
+		if _, err := FinishRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
+		link(t, p, Next(p))
+		_, err := RetireRotation(p, nil)
+		refused(t, err, "run rotate --rollback again")
+		_, err = AbortRotation(p, nil)
+		refused(t, err, "run rotate --rollback again")
+		if _, err := RollbackRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
+		consistent(t, p, a)
+		consistent(t, Next(p), b)
+	})
+
+	// After its rename, before the files follow the keys: P is A, P.next B.
+	rollbackRenamed := func(t *testing.T) (p string, a, b ssh.Signer) {
+		t.Helper()
+		p, a, b = rotating(t)
+		if _, err := FinishRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
+		link(t, p, Next(p))
+		rename(t, Old(p), p)
+		return p, a, b
+	}
+	t.Run("rollback after its rename", func(t *testing.T) {
+		t.Parallel()
+		p, a, b := rollbackRenamed(t)
+		changes, err := RollbackRotation(p, nil)
+		refused(t, err, "no previous key")
+		if len(changes) == 0 {
+			t.Error("no files brought in line")
+		}
+		consistent(t, p, a)
+		consistent(t, Next(p), b)
+		if anyExists(Old(p)+".pub", Cert(Old(p))) {
+			t.Error("files of P.old are left")
+		}
+	})
+	t.Run("retire after an interrupted rollback", func(t *testing.T) {
+		t.Parallel()
+		p, a, b := rollbackRenamed(t)
+		_, err := RetireRotation(p, nil)
+		refused(t, err, "no previous key")
+		consistent(t, p, a) // A's certificate is kept, with A
+		consistent(t, Next(p), b)
+	})
+	t.Run("abort after an interrupted rollback", func(t *testing.T) {
+		t.Parallel()
+		p, a, _ := rollbackRenamed(t)
+		if _, err := AbortRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
+		consistent(t, p, a)
+		if anyExists(Next(p), Next(p)+".pub", Cert(Next(p)), Old(p)+".pub", Cert(Old(p))) {
+			t.Error("files left after abort")
+		}
+	})
+
+	// A previous key not retired yet, and a next key copied from another
+	// server: nothing is half done, so retire and abort work, and keep the
+	// other key's files.
+	t.Run("previous and copied next key", func(t *testing.T) {
+		t.Parallel()
+		p, a, b := rotating(t)
+		if _, err := Generate(Old(p)); err != nil {
+			t.Fatal(err)
+		}
+		writeCert(t, ca, Old(p))
+		_, err := FinishRotation(p, nil)
+		refused(t, err, "holds another key; retire it first")
+		_, err = RollbackRotation(p, nil)
+		refused(t, err, "holds another key; abort that rotation first")
+		if _, err := RetireRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
+		consistent(t, p, a)
+		consistent(t, Next(p), b)
+		if _, err := Generate(Old(p)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := AbortRotation(p, nil); err != nil {
+			t.Fatal(err)
+		}
+		consistent(t, p, a)
+	})
+
+	// Files of a previous key that is gone are not taken for a rollback.
+	t.Run("stale files of a previous key", func(t *testing.T) {
+		t.Parallel()
+		p, a, b := rotating(t)
+		if err := os.WriteFile(Old(p)+".pub", ssh.MarshalAuthorizedKey(b.PublicKey()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RollbackRotation(p, nil)
+		refused(t, err, "no previous key")
+		if exists(Old(p) + ".pub") {
+			t.Error("the stale file is left")
+		}
+		consistent(t, p, a)
+		consistent(t, Next(p), b)
 	})
 }
 
@@ -350,7 +377,7 @@ func TestRotationRefusals(t *testing.T) {
 	if _, err := FinishRotation(p, nil); err == nil {
 		t.Error("FinishRotation() without keys succeeded")
 	}
-	if _, err := StartRotation(p, "", nil); err == nil {
+	if _, _, err := StartRotation(p, "", nil); err == nil {
 		t.Error("StartRotation() without P succeeded")
 	}
 	if _, err := RollbackRotation(p, nil); err == nil || !strings.Contains(err.Error(), "no previous key") {
@@ -359,7 +386,7 @@ func TestRotationRefusals(t *testing.T) {
 	if _, err := Generate(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := StartRotation(p, "dsa", nil); err == nil {
+	if _, _, err := StartRotation(p, "dsa", nil); err == nil {
 		t.Error("StartRotation(dsa) succeeded")
 	}
 	// P.next with P's key.
