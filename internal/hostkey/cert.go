@@ -48,7 +48,7 @@ func ParseCertificate(data []byte, key ssh.PublicKey) (*ssh.Certificate, error) 
 	case !bytes.Equal(cert.Key.Marshal(), key.Marshal()):
 		return nil, fmt.Errorf("it certifies another key (%s), not %s", Fingerprint(cert.Key), Fingerprint(key))
 	case len(cert.ValidPrincipals) == 0:
-		return nil, errors.New("it has no principals, which OpenSSH refuses (sign with -n NAMES)")
+		return nil, errors.New("it has no principals, which current OpenSSH refuses (sign with -n NAMES)")
 	case slices.Contains(cert.ValidPrincipals, ""):
 		return nil, errors.New("it has an empty principal")
 	case len(cert.CriticalOptions) > 0:

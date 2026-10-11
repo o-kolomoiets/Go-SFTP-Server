@@ -133,6 +133,17 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	for _, k := range restart {
 		r.log.WarnContext(ctx, "this setting changes only at restart; the running value stays", "key", k)
 	}
+	// Revocation does not wait for host key files (ADR 0008): with a host
+	// key that cannot be used, the running host keys stay, and the file
+	// checks below cover those.
+	hostKeys, warns, err := loadHostKeys(c.Server.HostKeys, hostKeyOptions{certs: c.Server.HostCertificates, lenient: true})
+	warn(warns)
+	if err != nil {
+		r.log.WarnContext(ctx, "host keys cannot be used; the running host keys stay", "err", err)
+		hostKeys = r.hostKeys
+		c.Server.HostKeys = hostKeys.paths()
+		c.Server.HostCertificates = r.c.Server.HostCertificates
+	}
 	warns, unavailable, err := c.CheckFSReload(r.liveMounts())
 	warn(warns)
 	if err != nil {
@@ -142,14 +153,6 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	warn(warns)
 	if err != nil {
 		return nil, 0, reloadConfig, err
-	}
-	// Revocation does not wait for host key files (ADR 0008): with a host
-	// key that cannot be used, the running host keys stay.
-	hostKeys, warns, err := loadHostKeys(c.Server.HostKeys, hostKeyOptions{certs: c.Server.HostCertificates, lenient: true})
-	warn(warns)
-	if err != nil {
-		r.log.WarnContext(ctx, "host keys cannot be used; the running host keys stay", "err", err)
-		hostKeys = r.hostKeys
 	}
 	level, err := parseLevel(c.Log.Level)
 	if err != nil {

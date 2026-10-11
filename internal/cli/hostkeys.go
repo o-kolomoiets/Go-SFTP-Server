@@ -43,6 +43,9 @@ type hostKeys []hostKey
 type hostKeyOptions struct {
 	generate bool // create a missing key (at start, with host_key_auto_generate)
 	certs    bool // read certificates (server.host_certificates)
+	// certsIfPresent reads the certificate files that exist, of previous
+	// keys too, without warning about missing ones (hostkey show).
+	certsIfPresent bool
 	// lenient leaves out next and previous keys and certificates that
 	// cannot be used, with a warning (reload).
 	lenient bool
@@ -90,16 +93,20 @@ func loadHostKeys(paths []string, o hostKeyOptions) (hostKeys, []string, error) 
 			}
 			*f.dst = kf
 		}
-		if o.certs {
-			for _, kf := range []*hostKeyFile{&hk.cur, hk.next} {
-				if kf == nil {
+		if o.certs || o.certsIfPresent {
+			files := []*hostKeyFile{&hk.cur, hk.next}
+			if o.certsIfPresent {
+				files = append(files, hk.old)
+			}
+			for _, kf := range files {
+				if kf == nil || !o.certs && !exists(hostkey.Cert(kf.path)) {
 					continue
 				}
 				warn, err := kf.loadCert(kf == &hk.cur)
 				if err != nil {
 					problem(err)
 				}
-				if warn != "" {
+				if warn != "" && kf != hk.old {
 					warns = append(warns, warn)
 				}
 			}
@@ -176,7 +183,8 @@ func (kf *hostKeyFile) loadCert(current bool) (warning string, err error) {
 
 // check refuses two current keys of one type, of which x/crypto would use
 // one, and a key given twice, which makes OpenSSH abandon an update. A
-// next or previous key given twice is a problem and is left out.
+// next or previous key given twice, and a next key of a type that another
+// host key or its next key has, are problems and are left out.
 func (ks hostKeys) check(problem func(error)) error {
 	types := map[string]string{}
 	seen := map[string]string{}
@@ -207,7 +215,35 @@ func (ks hostKeys) check(problem func(error)) error {
 			seen[blob] = (*f).path
 		}
 	}
+	// After rotate --finish, a next key is a current key.
+	nextTypes := map[string]string{}
+	for i := range ks {
+		n := ks[i].next
+		if n == nil {
+			continue
+		}
+		t := n.pub.Type()
+		other, taken := nextTypes[t]
+		if prev, ok := types[t]; ok && prev != ks[i].cur.path {
+			other, taken = prev, true
+		}
+		if taken {
+			problem(fmt.Errorf("next key %s is of type %s, like %s: after rotate --finish only one would be used", n.path, t, other))
+			ks[i].next = nil
+			continue
+		}
+		nextTypes[t] = n.path
+	}
 	return errors.Join(errs...)
+}
+
+// paths returns the files of the current keys.
+func (ks hostKeys) paths() []string {
+	ps := make([]string, len(ks))
+	for i, k := range ks {
+		ps[i] = k.cur.path
+	}
+	return ps
 }
 
 // apply sets the host keys of a server configuration.

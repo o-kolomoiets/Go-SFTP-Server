@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -60,6 +61,11 @@ func StartRotation(p, typ string, prepare func(string) error) (ssh.Signer, error
 			return nil, fmt.Errorf("%s is a %s key, which gosftpd does not generate; choose a type with --type", p, cur.PublicKey().Type())
 		}
 	}
+	// Files of an earlier next key that is gone: its certificate would
+	// otherwise be taken for the new key's.
+	if err := removeAll(Next(p)+".pub", Cert(Next(p))); err != nil {
+		return nil, err
+	}
 	return GenerateWith(Next(p), typ, prepare)
 }
 
@@ -94,6 +100,9 @@ func FinishRotation(p string, prepare func(string) error) (*Finished, error) {
 	}
 	if sameKey(cur, next) {
 		return nil, fmt.Errorf("%s holds the same key as %s", Next(p), p)
+	}
+	if err := checkCert(Next(p), next); err != nil {
+		return nil, err
 	}
 	fi, err := os.Stat(Next(p))
 	if err != nil {
@@ -142,55 +151,122 @@ func completeFinish(p string, prepare func(string) error) (*Finished, error) {
 }
 
 // RollbackRotation undoes FinishRotation: the new key becomes P.next again
-// and P.old becomes P. Both stay announced, so clients keep both.
-func RollbackRotation(p string, prepare func(string) error) error {
+// and P.old becomes P. Both stay announced, so clients keep both. Run
+// again, it completes an interrupted rollback; completed reports that.
+func RollbackRotation(p string, prepare func(string) error) (completed bool, err error) {
 	old, err := Load(Old(p))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("%s does not exist: there is no previous key to return to", Old(p))
+	if errors.Is(err, fs.ErrNotExist) {
+		if interruptedRollback(p) {
+			return true, completeRollback(p, prepare)
 		}
-		return err
+		return false, fmt.Errorf("%s does not exist: there is no previous key to return to", Old(p))
 	}
+	if err != nil {
+		return false, err
+	}
+	cur, err := Load(p)
+	if err != nil {
+		return false, err
+	}
+	if next, err := Load(Next(p)); err == nil && !sameKey(next, cur) || err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("%s exists: abort that rotation first (rotate --abort)", Next(p))
+	}
+	if err := checkCert(Old(p), old); err != nil {
+		return false, err
+	}
+	if err := keep(p, Next(p), cur, prepare); err != nil {
+		return false, err
+	}
+	if err := os.Rename(Old(p), p); err != nil {
+		return false, err
+	}
+	if err := SyncDir(filepath.Dir(p)); err != nil {
+		return false, err
+	}
+	return false, completeRollback(p, prepare)
+}
+
+// interruptedRollback reports whether a rollback stopped after P.old
+// replaced P: P.next exists, and P.old's files, or P's that describe
+// P.next, are left.
+func interruptedRollback(p string) bool {
+	next, err := Load(Next(p))
+	if err != nil {
+		return false
+	}
+	cur, err := Load(p)
+	if err != nil {
+		return false
+	}
+	pub, err := readPublic(p + ".pub")
+	return exists(Old(p)+".pub") || exists(Cert(Old(p))) || certifies(Cert(p), next.PublicKey()) ||
+		err == nil && !bytes.Equal(pub.Marshal(), cur.PublicKey().Marshal())
+}
+
+// completeRollback moves the certificates and rewrites the public key
+// files after P.old replaced P.
+func completeRollback(p string, prepare func(string) error) error {
 	cur, err := Load(p)
 	if err != nil {
 		return err
 	}
-	if exists(Next(p)) && !sameFile(p, Next(p)) {
-		return fmt.Errorf("%s exists: abort that rotation first (rotate --abort)", Next(p))
-	}
-	if err := keep(p, Next(p), cur, prepare); err != nil {
+	next, err := Load(Next(p))
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(Old(p), p); err != nil {
+	if _, err := moveCerts(p, Old(p), Next(p), cur.PublicKey(), next.PublicKey(), prepare); err != nil {
 		return err
 	}
-	if err := SyncDir(filepath.Dir(p)); err != nil {
-		return err
-	}
-	if _, err := moveCerts(p, Old(p), Next(p), old.PublicKey(), cur.PublicKey(), prepare); err != nil {
-		return err
-	}
-	if err := writePublic(prepare, p, old, Next(p), cur); err != nil {
+	if err := writePublic(prepare, p, cur, Next(p), next); err != nil {
 		return err
 	}
 	return removeAll(Old(p) + ".pub")
 }
 
 // RetireRotation deletes P.old and its files: after a reload the old key
-// is no longer announced, and OpenSSH clients remove it.
-func RetireRotation(p string) error {
-	if !exists(Old(p)) {
+// is no longer announced, and OpenSSH clients remove it. It first
+// completes an interrupted finish, whose files P.old is needed for.
+func RetireRotation(p string, prepare func(string) error) error {
+	files := []string{Old(p) + ".pub", Cert(Old(p)), Old(p)}
+	switch {
+	case exists(Old(p)) && exists(Next(p)):
+		return fmt.Errorf("both %s and %s exist: a --finish or --rollback was interrupted; run it again first", Next(p), Old(p))
+	case exists(Old(p)):
+		// An unreadable P.old is retired all the same.
+		if _, err := Load(Old(p)); err == nil {
+			if _, err := completeFinish(p, prepare); err != nil {
+				return err
+			}
+		}
+	case !anyExists(files...):
 		return fmt.Errorf("%s does not exist: there is no previous key to retire", Old(p))
 	}
-	return removeAll(Old(p), Old(p)+".pub", Cert(Old(p)))
+	return removeAll(files...)
 }
 
-// AbortRotation deletes P.next and its files.
+// AbortRotation deletes P.next and its files, the key last, so that an
+// interrupted abort can be run again.
 func AbortRotation(p string) error {
-	if !exists(Next(p)) {
+	files := []string{Next(p) + ".pub", Cert(Next(p)), Next(p)}
+	if exists(Next(p)) && exists(Old(p)) {
+		return fmt.Errorf("both %s and %s exist: a --finish or --rollback was interrupted; run it again first", Next(p), Old(p))
+	}
+	if !anyExists(files...) {
 		return fmt.Errorf("%s does not exist: no rotation is in progress", Next(p))
 	}
-	return removeAll(Next(p), Next(p)+".pub", Cert(Next(p)))
+	return removeAll(files...)
+}
+
+// checkCert checks the certificate of key file f, which holds key, if it
+// has one: a certificate the server would refuse must not move to P.
+func checkCert(f string, key ssh.Signer) error {
+	if !exists(Cert(f)) {
+		return nil
+	}
+	if _, err := LoadCertificate(Cert(f), key.PublicKey()); err != nil {
+		return fmt.Errorf("host certificate %w; fix or remove it first", err)
+	}
+	return nil
 }
 
 // keep makes dst a link to (or copy of) the key file p, which holds key,
@@ -223,16 +299,21 @@ func moveCerts(p, from, to string, key, prev ssh.PublicKey, prepare func(string)
 			return false, err
 		}
 	}
-	if exists(Cert(from)) {
+	// A certificate is moved to P only if it certifies P's new key.
+	if certifies(Cert(from), key) {
 		if err := os.Rename(Cert(from), Cert(p)); err != nil {
 			return false, err
 		}
-	} else if exists(Cert(p)) && !certifies(Cert(p), key) {
+	}
+	if err := removeAll(Cert(from)); err != nil {
+		return false, err
+	}
+	if exists(Cert(p)) && !certifies(Cert(p), key) {
 		if err := os.Remove(Cert(p)); err != nil {
 			return false, err
 		}
 	}
-	return exists(Cert(p)), SyncDir(filepath.Dir(p))
+	return certifies(Cert(p), key), SyncDir(filepath.Dir(p))
 }
 
 // keepFile makes dst a link to, or a copy of, src.
@@ -278,15 +359,21 @@ func removeAll(paths ...string) error {
 	return nil
 }
 
+func anyExists(paths ...string) bool { return slices.ContainsFunc(paths, exists) }
+
+// readPublic reads a public key file.
+func readPublic(path string) (ssh.PublicKey, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return nil, err
+	}
+	key, _, _, _, err := ssh.ParseAuthorizedKey(data)
+	return key, err
+}
+
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
-}
-
-func sameFile(a, b string) bool {
-	fa, err1 := os.Stat(a)
-	fb, err2 := os.Stat(b)
-	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
 }
 
 func sameKey(a, b ssh.Signer) bool {

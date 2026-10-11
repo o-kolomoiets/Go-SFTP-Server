@@ -32,9 +32,11 @@ type LiveMount struct {
 	ReadOnly   bool
 }
 
-// CheckFSReload is CheckFS for a configuration reload. Host keys and
-// authorized_keys files are not checked here: on reload a broken one must
-// not block the rest (ADR 0005, ADR 0008), so their readers check them. A mount that fails its checks is
+// CheckFSReload is CheckFS for a configuration reload. The contents and
+// permissions of host keys and authorized_keys files are not checked here:
+// on reload a broken one must not block the rest (ADR 0005, ADR 0008), so
+// their readers check them. Where they lie is checked, as for every trusted
+// file. A mount that fails its checks is
 // a warning and is returned in unavailable, so that one mount (a disk that
 // is not mounted, say) does not block the rest of the reload; its users
 // find it unavailable. Trusted files are also checked against live: the

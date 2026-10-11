@@ -326,18 +326,39 @@ func TestHostKeyProofRSAAlgorithm(t *testing.T) {
 		c.AnnouncedKeys = []ssh.Signer{next}
 		c.AnnounceHostKeys = true
 	}})
-	for _, algo := range []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512} {
-		t.Run(algo, func(t *testing.T) {
+	// With a host certificate, the -cert-v01 form is negotiated; OpenSSH
+	// verifies the proofs with its plain algorithm.
+	ca := signer(t)
+	certAt := time.Now()
+	ec := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) {
+		c.HostKeys = []ssh.Signer{hk}
+		c.HostCertificates = []ssh.Signer{hostCert(t, ca, hk, certAt.Add(-time.Hour), certAt.Add(time.Hour))}
+		c.AnnouncedKeys = []ssh.Signer{next}
+		c.AnnounceHostKeys = true
+	}})
+	for _, tc := range []struct {
+		e          *env
+		kex, proof string
+	}{
+		{e, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA256},
+		{e, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA512},
+		{ec, ssh.CertAlgoRSASHA256v01, ssh.KeyAlgoRSASHA256},
+		{ec, ssh.CertAlgoRSASHA512v01, ssh.KeyAlgoRSASHA512},
+	} {
+		t.Run(tc.kex, func(t *testing.T) {
 			t.Parallel()
-			c := e.dialHostKeys(t, openSSHVersion, func(cfg *ssh.ClientConfig) { cfg.HostKeyAlgorithms = []string{algo} })
+			c := tc.e.dialHostKeys(t, openSSHVersion, func(cfg *ssh.ClientConfig) { cfg.HostKeyAlgorithms = []string{tc.kex} })
+			if _, isCert := c.kex.all()[0].(*ssh.Certificate); isCert != strings.Contains(tc.kex, "-cert-") {
+				t.Fatalf("key exchange with %T, want %s", c.kex.all()[0], tc.kex)
+			}
 			c.announced(t)
 			ok, resp := c.prove(t, blobs(hk, next)...)
 			if !ok {
 				t.Fatal("proof refused")
 			}
 			for _, f := range c.verifyProof(t, resp, hk.PublicKey(), next.PublicKey()) {
-				if f != algo {
-					t.Errorf("proof format = %s, want %s", f, algo)
+				if f != tc.proof {
+					t.Errorf("proof format = %s, want %s", f, tc.proof)
 				}
 			}
 		})

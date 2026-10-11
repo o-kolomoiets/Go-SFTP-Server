@@ -102,6 +102,15 @@ new key becomes `P.next` again and `P.old` becomes `P`; clients keep both,
 since both stay announced. `rotate --abort` deletes `P.next` and its files.
 Until `--retire`, every step can be undone without a client noticing.
 
+Every step can be run again after an interruption: `--finish` and
+`--rollback` complete the certificate and `.pub` moves (a rollback is
+recognized by what it left), `--abort` and `--retire` delete the key last,
+and `--retire` first completes an interrupted `--finish`. A certificate
+moves to `P` only if it certifies the new key. `--finish` and `--rollback`
+refuse a certificate the server would refuse, and `--finish` a next key
+that belongs neither to root nor to `P`'s owner; `rotate` deletes leftover
+files of an earlier next key.
+
 **Several servers under one name.** A client takes the announcement as the
 complete key set of the host name and removes every other key. Servers
 behind one name must announce the same keys: create `P.next` once and copy
@@ -135,8 +144,11 @@ Revocation must not depend on host key files (ADR 0005). On reload:
 - the rest of the reload applies either way. At start and in `config
   validate --check-fs` these are errors.
 
-`CheckFS` adds `P.next` and `P.old` (secrets) and the certificates (trusted
-files) to the mount checks, also on reload. A change of the host key set is
+The location is another matter: `CheckFS` adds `P.next` and `P.old`
+(secrets) and the certificates (trusted files) to the mount checks, also on
+reload, and a key file inside a mount fails the reload, as every trusted
+file does (ADR 0005). When the running host keys stay, the check covers
+them, not the files the new configuration names. A change of the host key set is
 logged at info level with the fingerprints. With `--host-key`, a
 `server.host_keys` in the file that differs is reported as having no effect.
 
@@ -173,10 +185,10 @@ cut off at the cutover.
 
 ## Consequences
 
-- OpenSSH updates `known_hosts` only from 8.5 (earlier with
-  `UpdateHostKeys yes`), and skips the update when: the client uses another
-  `UserKnownHostsFile`, `GlobalKnownHostsFile` or `KnownHostsCommand`
-  matched the key, or `VerifyHostKeyDNS` is on; the host was verified by a
+- OpenSSH updates `known_hosts` by default only from 8.5, and only with the
+  default `UserKnownHostsFile` and without `VerifyHostKeyDNS` (otherwise
+  with `UpdateHostKeys yes`), and skips the update when:
+  `GlobalKnownHostsFile` or `KnownHostsCommand` matched the key; the host was verified by a
   certificate or has a `@cert-authority` or `@revoked` line, a wildcard or a
   long host list; an announced key is known under another name or address
   (a `known_hosts` line must use exactly the name and port clients connect

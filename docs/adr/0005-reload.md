@@ -123,7 +123,8 @@ finding). Only a pipe (the one of `--authorized-keys <(...)`), which can be
 read once, keeps the keys read from it before. With `--dir`, a missing
 directory is unavailable on reload, as a mount is. Host keys are read again
 on reload since ADR 0008, and one that cannot be used keeps the running host
-keys instead of failing the reload.
+keys instead of failing the reload; the trusted-file check then covers the
+host keys in use, not those of the edited file.
 
 **Restart-only settings** keep their running value; a change is logged as a
 warning and listed in `restart_required`: `server.listen`,

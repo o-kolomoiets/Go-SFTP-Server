@@ -475,8 +475,8 @@ keys to OpenSSH clients (`hostkeys-00@openssh.com`, once per connection).
 OpenSSH 8.5 and later then add keys they do not know to `known_hosts`, after
 asking gosftpd to prove that it holds them, and remove keys of the host that
 were not announced (`UpdateHostKeys`). Each proof is audited as
-`conn.hostkeys_proved`. Other clients ignore it; `announce_host_keys = false`
-turns it off.
+`conn.hostkeys_proved`. It is sent only to OpenSSH clients;
+`announce_host_keys = false` turns it off.
 
 ### Rotation
 
@@ -494,11 +494,15 @@ each step:
    clients keep it and `rotate --rollback` can return to it.
 3. `rotate --retire` deletes `KEY.old`; after the reload clients forget it.
 
-`rotate --abort` deletes a `KEY.next` that is no longer wanted. Every step
-is safe to run again after an interruption; `KEY` always exists.
+`rotate --abort` deletes a `KEY.next` that is no longer wanted. `KEY` always
+exists; a step that was interrupted is completed by running it again.
+`--finish` and `--rollback` refuse a key or certificate that the server would
+not use (a certificate of another key, a key of another owner).
 
-OpenSSH updates `known_hosts` only in its default file (not with another
-`UserKnownHostsFile`, a `GlobalKnownHostsFile` or `KnownHostsCommand`), not
+OpenSSH 8.5 and later update `known_hosts` by default only when
+`UserKnownHostsFile` is the default one (with another file, set
+`UpdateHostKeys yes`; new keys go to the first file). It never updates a key
+found through a `GlobalKnownHostsFile` or `KnownHostsCommand`, nor
 for a host verified by a certificate or with a `@cert-authority` or
 `@revoked` line, and not when an announced key is also known under another
 name or address: a `known_hosts` line must use exactly the name and port
@@ -580,8 +584,10 @@ command-line flags and environment, and checks it like `config validate
   they re-key. A reload never generates a key. If a host key cannot be used
   (missing, unreadable, unsafe, two of one type), the running host keys stay,
   with a warning; a next or previous key or a certificate that cannot be
-  used is left out, with a warning. A change of the host keys is logged with
-  the fingerprints.
+  used is left out, with a warning. A key or certificate file inside a mount
+  fails the reload, as every file gosftpd trusts does (for the running keys
+  too, when they stay). A change of the host keys is logged with the
+  fingerprints.
 - **Restart only:** `server.listen`, `server.host_key_auto_generate`,
   `server.crypto_policy`, `log.format`, `audit.events` and
   `audit.on_error`. A change is logged as a warning and listed in the
@@ -642,7 +648,7 @@ is given: run it as a dedicated user.
 | `gosftpd user hash-password [--stdin]` | Asks for a password twice (or reads one line with `--stdin`) and prints its argon2id hash. |
 | `gosftpd user list` | Lists users with access, key count, certificate principals for trusted CAs, password, expiry and status (`off` when `auth.methods` leaves the method out). |
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |
-| `gosftpd hostkey show [--config FILE] [--known-hosts HOST:PORT]` | Prints the fingerprint, public key and `known_hosts` line of the host key (`--host-key`, `--state-dir`) or, with `--config`, of every configured one, with next and previous keys and certificates. |
+| `gosftpd hostkey show [--config FILE] [--known-hosts HOST:PORT]` | Prints the fingerprint, public key and `known_hosts` line of the host key (`--host-key`, `--state-dir`) or, with `--config`, of every configured one; then its next and previous keys and the certificate files that exist. The first lines describe the current key. |
 | `gosftpd hostkey rotate [--type T] \| --finish \| --rollback \| --retire \| --abort` | Rotates a host key in steps, see [Rotation](#rotation). Selects the key like `show`; with `--config`, `--host-key` picks one of several. |
 
 Exit codes: 0 success, 1 runtime error, 2 invalid usage or configuration.

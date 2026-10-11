@@ -50,3 +50,19 @@ func keyOwner(like string) (func(string) error, error) {
 		return nil
 	}, nil
 }
+
+// sameOwner refuses a key file f that belongs to neither root nor the owner
+// of like: gosftpd, which reads like, may not be able to read f.
+func sameOwner(f, like string) error {
+	fi, ferr := os.Stat(f)
+	li, err := os.Stat(like)
+	if ferr != nil || err != nil {
+		return nil //nolint:nilerr // a missing file is reported by the step itself
+	}
+	st, ok1 := fi.Sys().(*syscall.Stat_t)
+	lt, ok2 := li.Sys().(*syscall.Stat_t)
+	if !ok1 || !ok2 || st.Uid == 0 || st.Uid == lt.Uid {
+		return nil
+	}
+	return fmt.Errorf("%s belongs to uid %d, %s to uid %d: give it the owner of %s (chown --reference=%s %s)", f, st.Uid, like, lt.Uid, like, like, f)
+}

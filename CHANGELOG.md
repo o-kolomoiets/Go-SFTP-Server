@@ -80,7 +80,9 @@ Incompatible changes are prefixed with **BREAKING:**.
   [Host certificates](docs/configuration.md#host-certificates).
 - `hostkey show --config` shows every configured host key with its next and
   previous keys and certificates; the start banner and `user add --write`
-  show the next key.
+  show the next key. During a rotation, or with a certificate, `hostkey
+  show` prints more lines after those of the current key: a script that
+  takes its last line should take the third.
 
 ### Changed
 

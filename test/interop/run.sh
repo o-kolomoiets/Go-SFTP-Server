@@ -133,6 +133,7 @@ grep -q '"event":"server.stop"' "$WORK/rename/audit.jsonl" && pass "audit has se
 
 # --- on_conflict=overwrite: scp over a longer file must not keep its tail --
 start_server overwrite overwrite
+OVERWRITE_PORT=$PORT
 scp -q -P "$PORT" "${OPTS[@]}" "$WORK/local/short.txt" alice@127.0.0.1:a.txt && pass "scp overwrite exits 0" || fail "scp overwrite"
 cmp -s "$WORK/local/short.txt" "$WORK/overwrite/share/a.txt" &&
 	pass "scp overwrite gives an identical file" || fail "scp overwrite left stale bytes: $(od -c "$WORK/overwrite/share/a.txt" | head -3)"
@@ -536,7 +537,7 @@ hup || fail "reload with the text revocation list"
 H="$WORK/hk"
 mkdir -p "$H/data" "$H/state"
 HPORT=$((20000 + RANDOM % 20000))
-[ "$HPORT" != "$PORT" ] || HPORT=$((HPORT + 1))
+while [ "$HPORT" = "$PORT" ] || [ "$HPORT" = "$OVERWRITE_PORT" ]; do HPORT=$((HPORT + 1)); done
 ssh-keygen -q -t ed25519 -N '' -f "$H/state/ed25519"
 ssh-keygen -q -t rsa -b 3072 -N '' -f "$H/state/rsa"
 cat >"$H/gosftpd.toml" <<TOML
@@ -560,6 +561,7 @@ for _ in $(seq 100); do
 	if (exec 3<>"/dev/tcp/127.0.0.1/$HPORT") 2>/dev/null; then break; fi
 	sleep 0.1
 done
+kill -0 "$HK_PID" 2>/dev/null || fail "host key server did not start: $(cat "$H/server.log")"
 hk_hup() { # hk_hup: SIGHUP the host key server and wait for its server.reload event
 	local n
 	n=$(grep -c '"event":"server.reload"' "$H/audit.jsonl" || true)
@@ -573,12 +575,13 @@ hk_hup() { # hk_hup: SIGHUP the host key server and wait for its server.reload e
 fp() { ssh-keygen -lf "$1" | awk '{print $2}'; }
 # knows FILE KEY.pub: the known_hosts file FILE has KEY for the server.
 knows() { ssh-keygen -l -F "[127.0.0.1]:$HPORT" -f "$1" 2>/dev/null | grep -q "$(fp "$2")"; }
-# hk_sftp KNOWN_HOSTS [OPTIONS...]: an sftp session that keeps known_hosts up to date.
+# hk_sftp KNOWN_HOSTS [OPTIONS...]: an sftp session that keeps known_hosts up
+# to date, unless OPTIONS say otherwise (ssh takes the first value given).
 hk_sftp() {
 	local kh=$1
 	shift
-	sftp -P "$HPORT" -o "UserKnownHostsFile=$kh" -o StrictHostKeyChecking=yes -o UpdateHostKeys=yes \
-		-o IdentitiesOnly=yes -o BatchMode=yes -i "$WORK/id_admin" "$@" -b "$C/pwd.batch" admin@127.0.0.1
+	sftp -P "$HPORT" "$@" -o "UserKnownHostsFile=$kh" -o StrictHostKeyChecking=yes -o UpdateHostKeys=yes \
+		-o IdentitiesOnly=yes -o BatchMode=yes -i "$WORK/id_admin" -b "$C/pwd.batch" admin@127.0.0.1
 }
 known_line() { echo "[127.0.0.1]:$HPORT $(cut -d' ' -f1,2 "$1")"; }
 known_line "$H/state/ed25519.pub" >"$H/kh_ed"
@@ -596,8 +599,11 @@ cp "$H/state/ed25519.pub" "$H/old_ed25519.pub"
 "$WORK/gosftpd" hostkey rotate --finish --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/finish.out" ||
 	fail "hostkey rotate --finish: $(cat "$H/finish.out")"
 hk_hup || fail "reload after --finish"
-hk_sftp "$H/kh_ed" -o HostKeyAlgorithms=ssh-ed25519 >"$H/sftp2.out" 2>&1 &&
-	pass "host keys: after --finish the new key is accepted without a prompt" || fail "host keys: after --finish: $(cat "$H/sftp2.out")"
+known_line "$H/state/ed25519.pub" >"$H/kh_new"
+hk_sftp "$H/kh_new" -o UpdateHostKeys=no -o HostKeyAlgorithms=ssh-ed25519 >"$H/sftp2.out" 2>&1 &&
+	pass "host keys: after --finish the server uses the new key" || fail "host keys: after --finish: $(cat "$H/sftp2.out")"
+hk_sftp "$H/kh_ed" -o HostKeyAlgorithms=ssh-ed25519 >"$H/sftp2b.out" 2>&1 &&
+	pass "host keys: a client that learned the key connects without a prompt" || fail "host keys: after --finish: $(cat "$H/sftp2b.out")"
 knows "$H/kh_ed" "$H/old_ed25519.pub" && pass "host keys: the previous key stays until --retire" || fail "host keys: the previous key was dropped early"
 "$WORK/gosftpd" hostkey rotate --retire --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >/dev/null || fail "hostkey rotate --retire"
 hk_hup || fail "reload after --retire"

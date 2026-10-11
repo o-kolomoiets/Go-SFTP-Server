@@ -262,11 +262,15 @@ path = "`+filepath.ToSlash(filepath.Join(dir, "m"))+`"
 
 	// A rotation to another type, then aborted.
 	code, out, errOut := execute(t, "hostkey", "rotate", "--config", path, "--host-key", ed, "--type", "ecdsa")
-	if code != exitOK || !strings.Contains(out, "ECDSA-SHA2-NISTP256 SHA256:") || !strings.Contains(out, "--finish --host-key "+ed) {
+	if code != exitOK || !strings.Contains(out, "ECDSA-SHA2-NISTP256 SHA256:") || !strings.Contains(out, "--finish --host-key "+commandArg(ed)) {
 		t.Fatalf("rotate --type ecdsa: exit %d\n%s%s", code, out, errOut)
 	}
 	if code, _, errOut := execute(t, "hostkey", "rotate", "--host-key", ed); code != exitUsage || !strings.Contains(errOut, "in progress") {
 		t.Errorf("second rotate: exit %d, %s", code, errOut)
+	}
+	// The RSA key cannot become ECDSA too: the next key has that type.
+	if code, _, errOut := execute(t, "hostkey", "rotate", "--config", path, "--host-key", rsa, "--type", "ecdsa"); code != exitUsage || !strings.Contains(errOut, "already of type ecdsa") {
+		t.Errorf("a second rotation to ecdsa: exit %d, %s", code, errOut)
 	}
 	// config validate --check-fs reads the next key too.
 	if code, _, errOut := execute(t, "config", "validate", "--check-fs", "--config", path); code != exitOK {
@@ -285,6 +289,177 @@ path = "`+filepath.ToSlash(filepath.Join(dir, "m"))+`"
 	}
 	if exists(hostkey.Next(ed)) {
 		t.Error("P.next survived --abort")
+	}
+}
+
+// The printed commands survive any path, and say what to do when the
+// announcement is off.
+func TestHostkeyRotateOutput(t *testing.T) {
+	isolate(t)
+	dir := filepath.Join(t.TempDir(), "a%sb")
+	key := filepath.Join(dir, "key")
+	if _, err := hostkey.Generate(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "m"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "gosftpd.toml")
+	writeFile(t, path, `config_version = 1
+[server]
+host_keys = ["key"]
+announce_host_keys = false
+[mounts.m]
+path = "`+filepath.ToSlash(filepath.Join(dir, "m"))+`"
+`)
+	code, out, errOut := execute(t, "hostkey", "rotate", "--config", path)
+	if code != exitOK || strings.Contains(out, "%!") || !strings.Contains(out, "--finish --host-key "+commandArg(key)) {
+		t.Fatalf("rotate: exit %d\n%s%s", code, out, errOut)
+	}
+	if !strings.Contains(out, "announce_host_keys is off") || strings.Contains(out, "conn.hostkeys_proved") {
+		t.Errorf("rotate with the announcement off:\n%s", out)
+	}
+	code, out, errOut = execute(t, "hostkey", "rotate", "--finish", "--config", path)
+	if code != exitOK || strings.Contains(out, "%!") || !strings.Contains(out, "--retire --host-key "+commandArg(key)) {
+		t.Errorf("rotate --finish: exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+// A next key that does not belong to the owner of the host key (or root) is
+// not made the host key: gosftpd might not read it.
+func TestHostkeyRotateFinishOwner(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() != 0 {
+		t.Skip("needs root to give a file another owner")
+	}
+	isolate(t)
+	key := filepath.Join(t.TempDir(), "key")
+	if _, err := hostkey.Generate(key); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := execute(t, "hostkey", "rotate", "--host-key", key); code != exitOK {
+		t.Fatalf("rotate: %s", errOut)
+	}
+	if err := os.Chown(hostkey.Next(key), 4242, 4242); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := execute(t, "hostkey", "rotate", "--finish", "--host-key", key); code != exitUsage || !strings.Contains(errOut, "belongs to uid 4242") {
+		t.Errorf("finish with a foreign next key: exit %d, %s", code, errOut)
+	}
+	if exists(hostkey.Old(key)) {
+		t.Error("the refused finish changed files")
+	}
+}
+
+// A reload keeps the running host keys when the new ones cannot be used,
+// and then checks those against new mounts; it uses changed paths; it
+// leaves out a broken next certificate but keeps announcing the next key.
+func TestServeReloadHostKeyFiles(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	for _, d := range []string{"data", "keys1", "keys2"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alice := newSigner(t)
+	path := filepath.Join(dir, "gosftpd.toml")
+	conf := func(keys, extra string) string {
+		return `config_version = 1
+[server]
+listen = ["127.0.0.1:0"]
+host_keys = ["` + keys + `"]
+host_key_auto_generate = true
+host_certificates = true
+[mounts.data]
+path = "` + filepath.ToSlash(filepath.Join(dir, "data")) + `"
+[users.alice]
+authorized_keys = ["` + authorizedKey(alice) + `"]
+access = { data = "full" }
+` + extra
+	}
+	writeFile(t, path, conf("keys1/host_key", ""))
+	ts := startServe(t, "--config", path)
+	first, err := hostkey.Load(filepath.Join(dir, "keys1", "host_key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The new key does not exist and a new mount covers the running one:
+	// the reload is refused rather than serve the key in use.
+	writeFile(t, path, conf("keys2/host_key", `[mounts.keys]
+path = "`+filepath.ToSlash(filepath.Join(dir, "keys1"))+`"
+read_only = true
+`))
+	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "error" {
+		t.Errorf("server.reload with a mount over the running key = %v", ev)
+	}
+	if !strings.Contains(ts.stderr.String(), "covers the host key") {
+		t.Errorf("the refusal does not name the host key:\n%s", ts.stderr.String())
+	}
+
+	// A changed path is used.
+	second, err := hostkey.Generate(filepath.Join(dir, "keys2", "host_key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, conf("keys2/host_key", ""))
+	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
+		t.Fatalf("server.reload = %v", ev)
+	}
+	if used, _ := ts.hostKeyOf(t, "alice", alice, ssh.KeyAlgoED25519); !sameKeys(used, second.PublicKey()) || sameKeys(used, first.PublicKey()) {
+		t.Errorf("after a changed path: used %s", ssh.FingerprintSHA256(used))
+	}
+
+	// A broken certificate of the next key is left out; the key is still
+	// announced.
+	p := filepath.Join(dir, "keys2", "host_key")
+	next, err := hostkey.StartRotation(p, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, hostkey.Cert(hostkey.Next(p)), "not a certificate")
+	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
+		t.Fatalf("server.reload with a broken next certificate = %v", ev)
+	}
+	if !strings.Contains(ts.stderr.String(), "left out") {
+		t.Errorf("no warning about the broken certificate:\n%s", ts.stderr.String())
+	}
+	if _, announced := ts.hostKeyOf(t, "alice", alice); !announces(announced, next.PublicKey()) {
+		t.Error("the next key is not announced")
+	}
+	if code := ts.stop(t); code != exitOK {
+		t.Errorf("exit code %d", code)
+	}
+}
+
+// A reload says when --host-key hides server.host_keys of the file.
+func TestServeReloadHostKeyFlag(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	flagKey := filepath.Join(dir, "flag_key")
+	if _, err := hostkey.Generate(flagKey); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "gosftpd.toml")
+	writeFile(t, path, `config_version = 1
+[server]
+listen = ["127.0.0.1:0"]
+host_keys = ["file_key"]
+[mounts.data]
+path = "`+filepath.ToSlash(filepath.Join(dir, "data"))+`"
+[users.alice]
+authorized_keys = ["`+authorizedKey(newSigner(t))+`"]
+access = { data = "full" }
+`)
+	ts := startServe(t, "--config", path, "--host-key", flagKey)
+	if ev := ts.reload(t, ts.stdout.String); ev["result"] != "ok" {
+		t.Errorf("server.reload = %v", ev)
+	}
+	if !strings.Contains(ts.stderr.String(), "server.host_keys in "+path+" has no effect: --host-key overrides it") {
+		t.Errorf("no warning about the hidden setting:\n%s", ts.stderr.String())
 	}
 }
 
@@ -343,6 +518,24 @@ func TestLoadHostKeys(t *testing.T) {
 	keys, _, err = loadHostKeys([]string{p}, hostKeyOptions{certs: true, lenient: true})
 	if err != nil || keys[0].cur.served != nil {
 		t.Errorf("reload with a foreign certificate: served %v, %v", keys[0].cur.served, err)
+	}
+
+	// A next key of the type of another host key.
+	if err := os.Remove(hostkey.Next(p)); err != nil {
+		t.Fatal(err)
+	}
+	ec := filepath.Join(dir, "ecdsa")
+	if _, err := hostkey.GenerateType(ec, hostkey.TypeECDSA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hostkey.StartRotation(p, hostkey.TypeECDSA, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadHostKeys([]string{p, ec}, hostKeyOptions{}); err == nil || !strings.Contains(err.Error(), "only one would be used") {
+		t.Errorf("a next key of another key's type: %v", err)
+	}
+	if err := hostkey.AbortRotation(p); err != nil {
+		t.Fatal(err)
 	}
 
 	// Two host keys of one type; a missing host key.
@@ -410,6 +603,29 @@ func TestWatchHostCerts(t *testing.T) {
 	if buf.String() != "" {
 		t.Errorf("a valid certificate is logged: %q", buf.String())
 	}
+
+	// A certificate that expires while the watcher runs is reported then,
+	// as an error.
+	short := &ssh.Certificate{
+		Key:             key.PublicKey(),
+		CertType:        ssh.HostCert,
+		ValidPrincipals: []string{"h"},
+		ValidAfter:      uint64(time.Now().Add(-10 * time.Second).Unix()),
+		ValidBefore:     uint64(time.Now().Add(2 * time.Second).Unix()),
+	}
+	if err := short.SignCert(rand.Reader, ca); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	done = make(chan struct{})
+	log = slog.New(slog.NewTextHandler(buf, nil))
+	go func() {
+		watchHostCerts(ctx, func() []hostCert { return []hostCert{{"s-cert.pub", short}} }, nil, log, 10*time.Millisecond)
+		close(done)
+	}()
+	waitFor(t, func() bool { return strings.Contains(buf.String(), "level=ERROR msg=\"host certificate expired") })
+	cancel()
+	<-done
 }
 
 func waitFor(t *testing.T, cond func() bool) {
