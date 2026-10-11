@@ -1,6 +1,6 @@
 # ADR 0010: Hooks (exec and webhook)
 
-- **Status:** draft 3, 2026-10-11; amends ADR 0005 (state that outlives
+- **Status:** accepted, 2026-10-11; amends ADR 0005 (state that outlives
   snapshots), the audit schema (additive) and vfs's owned-file rule
 - **Context:** ROADMAP M4 (M4-07) asks for `[[hooks]]`: filters `on`,
   `mounts`, `glob`; `exec` (argv without a shell, `GOSFTPD_*` environment,
@@ -13,7 +13,9 @@
   connections (design principle 2). Three reviews of draft 1 (operations,
   security, integration with the code) confirmed 29 findings; three
   reviews of draft 2 (coverage of those, implementability, new risks)
-  confirmed 36 more. Every finding was checked by a second reviewer.
+  confirmed 36 more; three reviews of draft 3 (coverage, the upload state
+  machine, a final pass) confirmed 25 more. Every finding was checked by a
+  second reviewer.
 
 ## Decision
 
@@ -38,8 +40,9 @@ concurrency = 1                       # deliveries at a time, 1 to 16
 # queue: events waiting, 1 to 10 000; default 1000, or 10 000 with a delay
 ```
 
-A hook has exactly one of `exec` and `webhook`. Hooks are reloadable (see
-Reload).
+A hook has exactly one of `exec` and `webhook`. A relative `secret_file`
+is resolved against the directory of the configuration file, as host keys
+and `authorized_keys` files are. Hooks are reloadable (see Reload).
 
 - `on`: `fs.upload`, `fs.download`, `fs.rename`, `fs.remove`, `fs.mkdir`,
   `fs.rmdir`, `fs.setstat`. A hook fires only for an event with
@@ -47,29 +50,58 @@ Reload).
   `fs.download` with result ok means the client closed its handle, not that
   it read the whole file (a cancelled transfer closes normally): a hook
   that removes or moves a downloaded file first compares `bytes` with the
-  file's size.
+  file's size. `fs.setstat` fires hooks only when vfs changed the times of
+  the file that `path` names: a SETSTAT that sets neither size nor times
+  (OpenSSH `chmod`, which sftpd answers ok for any path), one that
+  `setstat_mode = "ignore"` drops, and one applied through a stat redirect
+  or to an open upload's temporary file are audited as before and fire
+  none.
 - **`fs.upload` means "a file arrived".** WinSCP (files over 100 KiB) and
   rclone upload to a temporary name (`NAME.filepart`, `NAME.XXXX.partial`)
   and then rename it, often from another connection. vfs already keeps,
   for an hour (`OwnTTL`), the files each user created, so that the `upload`
   preset can finish such renames. It now also keeps whether the file's
   last upload was closed with result ok. The first rename of such a file
-  after that close, while no upload of it is open, gets `"uploaded":true`
-  in the audit log and clears the flag (a setstat by the owner keeps it); a
-  later rename of the same file is a plain `fs.rename`. An aborted or
-  refused upload, or one still being written, keeps the rename permission
-  but not the mark.
-  - A resume (APPEND, or WRITE without CREAT and TRUNC) of a file that is
-    the user's when the resume opens keeps it the user's: its close records
-    the file again, as a new upload's does. A resumed `.filepart` can then
-    be renamed under `upload` (refused today, a vfs bug since M3), and the
-    rename is marked if the resume closed ok.
+  after that close gets `"uploaded":true` in the audit log and clears the
+  flag (a setstat by the owner keeps it); a later rename of the same file
+  is a plain `fs.rename`. An aborted or refused upload keeps the rename
+  permission but not the mark. The flag is set only by a close, so a file
+  an upload has open is never marked.
+  - As for downloads, result ok means only that the client closed its
+    handle: WinSCP's Cancel and sftp's Ctrl-C close normally, so the closed
+    file may be partial. An upload that opens therefore clears the flag of
+    the user's file at the requested name and at the name its bytes go to,
+    also when the conflict policy, `atomic_uploads` or a stat redirect
+    sends the bytes elsewhere: a client that uploads to a name again has
+    given up what is there.
+  - An upload that writes an existing file in place keeps it the user's if
+    it was the user's when the upload opened: a resume (APPEND, or WRITE
+    without CREAT and TRUNC), or an overwrite under
+    `on_conflict = "overwrite"` without `atomic_uploads`, which is what
+    WinSCP's resume (WRITE|CREAT) gets there. vfs compares the opened
+    file's identity with the user's entry on the open file, not by path
+    before opening, and before a TRUNC changes it. Its close records the
+    file again, as a new upload's does, but never removes it (only a file
+    the upload created is removed when it is aborted empty). A resumed
+    `.filepart` can then be renamed under `upload` (refused before, a vfs
+    bug since M3), and the rename is marked if the resume closed ok.
+  - A resume that wrote no byte changed nothing: it fires no hook and does
+    not set the flag. A resume of a file that is not the user's when it
+    opens (another user's file, or the user's own after `OwnTTL` or a
+    restart) is audited as before but fires no hook: append-only resume
+    needs only `write`, so otherwise any user of a shared mount could make
+    hooks act on another user's file under their own name.
+  - An upload that opened an existing file with WRITE|CREAT and neither
+    TRUNC nor APPEND (ROADMAP §6.2 row 3: WinSCP's resume, OpenSSH scp in
+    place) and that the conflict policy or `atomic_uploads` sent to a new
+    file sets no flag: for WinSCP's resume that file starts with zero
+    bytes.
   - Hooks with `fs.upload` in `on` fire for a marked rename too. The
     `fs.upload` of the temporary name fires as well; `exclude` (or `glob`)
     leaves it out, so the hooks above fire once per temp-file upload for
-    OpenSSH, WinSCP and rclone alike. A hook whose filters accept the name
-    a file was uploaded to (a plain `put`) sees the file again, once, if
-    its uploader renames it.
+    OpenSSH, WinSCP and rclone alike (Guarantees lists the exceptions). A
+    hook whose filters accept the name a file was uploaded to (a plain
+    `put`) sees the file again, once, if its uploader renames it.
 - `mounts`: mount names, compared as mount names are (case-insensitively);
   a name that is not configured is an error.
 - `glob` and `exclude`: lists of `path.Match` patterns, matched against the
@@ -117,25 +149,42 @@ says so.
 
 sftpd first asks the dispatcher whether any hook wants the event
 (`Wants(event, uploaded, mount, name)`, nil-safe and allocation-free) and
-renders the line only then. Out of band, for exec only, it passes the host
-path of the file and its identity, both returned by vfs with the operation
-(see exec), and the connection's `conn_id`, which `server` passes to
-`sftpd.New`.
+renders the line only then. `Notify(*hooks.Event)`, nil-safe too, takes
+the rendered line together with the event name, `uploaded`, the mount,
+user, `path`, `final_path` and `target_path`, and for exec the host path of
+the file and its identity, both returned by vfs with the operation (see
+exec), and the connection's `conn_id`, which `server` passes to sftpd. The
+dispatcher never parses the line. `Notify` matches the event against the
+current hook set and each matching hook queues it; workers match it again
+before the first attempt or run (see Reload); drop warnings and the
+shutdown log use user, mount and `final_path` or `path`.
 
 ### exec
 
-- `argv[0]` must be absolute, exist and be executable. Nothing from a
-  client is ever an argument.
+- `argv[0]` must be absolute, exist and be executable: on Unix a regular
+  file with an execute bit; on Windows, which has no execute bits (Go
+  reports 0666 or 0444 for every file), a file whose extension is in
+  `PATHEXT` (`.exe`, `.com`, `.bat`, `.cmd`). Nothing from a client is ever
+  an argument.
 - **Trusted files.** Every absolute argv element that is not an existing
   directory (argv[0], a script given to an interpreter such as
   `["/bin/sh", "/opt/hooks/archive.sh"]`, a file that does not exist yet)
   is checked for location like a trusted file: not inside any mount, also
   the mounts of live generations on reload. If it exists and is a regular
-  file, it must also be owned by root or gosftpd's user and not writable by
-  group or others; devices such as `/dev/null` are not checked further.
-  Elements other than argv[0] may be missing and need not be executable.
-  `["/bin/sh", "<mount>/x.sh"]` is refused whether or not `x.sh` exists;
-  `["/usr/bin/find", "<mount>"]` is accepted.
+  file after following symlinks (`os.Stat`, as for every trusted file, so
+  `/bin/sh` is checked at its target), it must also be owned by root or
+  gosftpd's user and not writable by group or others; devices such as
+  `/dev/null` are not checked further. Elements other than argv[0] may be
+  missing and need not be executable. `["/bin/sh", "<mount>/x.sh"]` is
+  refused whether or not `x.sh` exists; `["/usr/bin/find", "<mount>"]` is
+  accepted. On Windows argv files get only the location check, as other
+  trusted files do.
+- **Checked at each run.** A hook's files run as they are at each run, and
+  a new script can be deployed under the same path without a reload. Just
+  before each run, the runner repeats the owner and mode check of argv[0]
+  and of every other argv element that exists and is a regular file; if
+  one fails, the process is not started, and the run is counted as
+  `failed` and logged at warn with the file and the reason.
 - **Environment:** gosftpd's `PATH` without empty or relative elements,
   plus `GOSFTPD_EVENT`, `GOSFTPD_USER`, `GOSFTPD_MOUNT`, `GOSFTPD_PATH`,
   `GOSFTPD_FINAL_PATH` (uploads and renames), `GOSFTPD_TARGET_PATH`
@@ -145,35 +194,40 @@ path of the file and its identity, both returned by vfs with the operation
 - **`GOSFTPD_HOST_PATH`** is the host path of `final_path` for `fs.upload`
   and `fs.rename`, of `path` otherwise: the mount root's host path (for a
   home mount, the user's directory) joined with the relative name.
-- **Identity check.** For every event except `fs.remove` and `fs.rmdir`,
-  vfs returns the file's identity with the operation, taken through the
-  mount's `os.Root` and without permission checks: `Stat` of the open file
-  before an upload or download handle is closed, the `Lstat` that `Move`
-  makes before renaming (the inode survives the rename), an `Lstat` of the
-  directory `Mkdir` made or of the file a setstat changed; never
-  `Session.Lstat`, which needs `list` and follows stat redirects. Just
-  before starting the process, the runner `Lstat`s the host path and
-  requires `os.SameFile` with that identity and the same file type. If the
-  file is gone, has another type (a symlink swapped in by a local user) or
-  is another file (a mount repointed under an old connection, a later
-  upload under `version`), the run is skipped, logged at info as "file
-  changed before the hook ran" and counted as `skipped`. A file deleted
-  and created again under the same name can get the same inode number
-  (ext4 reuses it at once), so a regular file that replaced the upload
-  passes; the change time is not compared, because clients set times and
-  rename within the delay. Nothing closes the race after the check: a hook
-  must not follow symlinks (`mv -T`, `cp -P`), must not run as root, and
-  must treat a missing file as normal. Hooks on the same event run
-  independently and in no defined order; when one moves or deletes the
-  file, the others skip it, so chain such steps in one hook.
+- **Identity check.** For every event except `fs.remove` and `fs.rmdir`, vfs
+  returns the file's identity with the operation, taken through the mount's
+  `os.Root` and without permission checks: `Stat` of the open file before an
+  upload handle is closed, an `Lstat` of the downloaded file before its
+  handle is closed, the `Lstat` that `Move` makes before renaming (the inode
+  survives the rename), an `Lstat` of the directory `Mkdir` made or of the
+  file whose times a setstat changed; never `Session.Lstat`, which needs
+  `list` and follows stat redirects. An event for which vfs has no identity
+  (a file gone before vfs could `Lstat` it) is skipped, never run unchecked.
+  Just before starting the process, the runner `Lstat`s the host path and
+  requires that the identity is a regular file or a directory, `os.SameFile`
+  with it and the same file type. If the identity is something else (a
+  client with `rename` can rename a symlink a local user made), or the file
+  is gone, has another type (a symlink swapped in by a local user) or is
+  another file (a mount repointed under an old connection, a later upload
+  under `version`), the run is skipped, logged at info as "file changed
+  before the hook ran" and counted as `skipped`. A file deleted and created
+  again under the same name can get the same inode number (ext4 reuses it at
+  once), so a regular file that replaced the upload passes; the change time
+  is not compared, because clients set times and rename within the delay.
+  Nothing closes the race after the check: a hook must not follow symlinks
+  (`mv -T`, `cp -P`), must not run as root, and must treat a missing file as
+  normal. Hooks on the same event run independently and in no defined order;
+  when one moves or deletes the file, the others skip it, so chain such
+  steps in one hook.
 - **Working directory** `/` (on Windows `%SystemRoot%`). stdin is the event
   line.
 - **Lifetime.** On Unix the process gets its own process group. When the
   `timeout` (default 30 s, at most 1 h) runs out, at shutdown, and also
   when the leader exits, the whole group is killed with SIGKILL. A process
-  that calls `setsid` leaves the group, so a hook must not do that;
-  `WaitDelay` is 2 s, so pipes held by such a process cannot block a
-  worker. To start long work, hand it to another service, for example a
+  that calls `setsid` leaves the group, so a hook must not do that; the
+  hook gets pipes of its own and gosftpd stops reading them 2 s after the
+  leader exits (`WaitDelay`), so pipes held by such a process cannot block
+  a worker. To start long work, hand it to another service, for example a
   job file in a spool directory that a systemd `.path` unit watches
   (`systemd-run` would need a polkit rule that lets gosftpd's user start
   units as root: do not add one). The result is the leader's exit status;
@@ -213,9 +267,14 @@ path of the file and its identity, both returned by vfs with the operation
   receiver's duties: verify over the raw body, compare in constant time,
   refuse timestamps more than 5 minutes off, remember delivery IDs for
   that window plus the retry span. Rotation: add the new secret to the
-  receiver; write the new `secret_file`; run `gosftpd config validate
-  --check-fs`; reload and check that `gosftpd_hooks_not_updated` is 0;
-  only then remove the old secret from the receiver.
+  receiver; write the new `secret_file` (0600 owned by gosftpd's user, or
+  0640 root:gosftpd); run `sudo -u gosftpd gosftpd config validate
+  --check-fs`, as gosftpd's user, so that the owner rule and the read are
+  the service's (run as root, the check refuses a file owned by gosftpd and
+  passes a root-owned 0600 file that gosftpd cannot read); reload; check
+  that `gosftpd_hooks_not_updated` is 0 or, without the admin listener,
+  that the reload logged no warning for the hook; only then remove the old
+  secret from the receiver.
 - `url`: `https`, or `http` with a warning unless the host is loopback. User
   info in the URL is refused.
 - **No token in logs.** The URL path or query may hold a token (Slack,
@@ -246,23 +305,29 @@ path of the file and its identity, both returned by vfs with the operation
   blocks an SFTP request: when either bound is reached, the new event is
   dropped. A warning at most once a minute gives the count per user and
   the hook's `delay` and `queue`.
-- `concurrency` workers (default 1). A worker keeps its event through every
-  attempt and its `delay`, so with one worker the events of a hook run in
-  order, and queued plus in-flight events are at most `queue +
+- `concurrency` workers (default 1). A worker keeps its event through its
+  `delay` and every attempt, so with one worker the events of a hook run
+  in order, and queued plus held events are at most `queue +
   concurrency`. One failing webhook event holds a worker for about 3
   minutes (up to about 13 with `Retry-After` and attempt timeouts).
 - **Guarantees.** Webhook: at least once while gosftpd runs, so duplicates
   are possible; receivers deduplicate on `X-Gosftpd-Delivery`. Exec: at most
   once. Any event can be lost: a full queue, exhausted retries, a permanent
-  status, a skipped run, a removed hook, shutdown, a crash. The queue lives
+  status, a skipped run, a removed hook, shutdown, a crash. A
+  temporary-name upload fires no hook when its rename is not marked: the
+  rename or a resume comes more than `OwnTTL` (1 h) after the user last
+  changed the file, or after a restart (the owned-file registry lives in
+  memory; under `upload` such a rename is refused), another user renames
+  the file, or one of the cases in the `fs.upload` bullet. The queue lives
   in memory. The audit log stays the complete record; a receiver that must
   not miss a file reconciles against it or the directory, and a hook that
   moves or deletes files is paired with a periodic sweep.
 - **Shutdown.** Hooks keep delivering during the SFTP drain. When it ends,
   pending delays are skipped (no client can race any more), and hooks get
   what is left of `server.shutdown_timeout`, at least 5 s. Then running
-  processes are killed and their workers return within `WaitDelay` (2 s);
-  what is still queued or waiting for a retry is counted as `dropped` and
+  processes are killed (their workers return within `WaitDelay`, 2 s) and
+  webhook attempts in progress are cancelled; those events, and what is
+  still queued or waiting for a retry, are counted as `dropped` and
   logged, each at warn with the hook name, user, mount and `final_path`
   (or `path`), so it can be replayed. A restart can drop up to rate ×
   `delay` events of a delayed hook. A stop takes at most
@@ -286,22 +351,32 @@ rotating a secret must reach connections that stay open for days.
 - Reload step 3 calls `Update([]Spec)`, which cannot fail and swaps the
   hook set atomically. `Wants` and `Notify` always use the current set, for
   old and new connections alike. Per hook name:
-  - kept: its queue and workers stay. A pending event is delivered only if
-    it still matches the new `on`, `mounts`, `glob` and `exclude` (the
-    others are counted as `dropped`, with one warning), and it uses the new
-    url, secret, argv, timeout and delay. `queue` and `concurrency` are
-    resized; events above a smaller queue are dropped;
-  - removed: it takes no more events, an in-flight delivery finishes, its
-    queued events are dropped with one warning;
+  - kept: its queue and workers stay. When an event's delay ends, just
+    before its first attempt or run, the worker matches it against the
+    hook's current `on`, `mounts`, `glob` and `exclude`; an event that no
+    longer matches is counted as `dropped`. This covers events still
+    queued (`Update` filters those at once, with one warning), the event a
+    worker holds during its delay and a `Notify` that raced `Update`. Each
+    attempt or run uses the url, secret, argv and timeout current when it
+    starts; the delay is the new one, counted from when the event was
+    queued. A smaller `queue` (also when the default falls from 10 000 to
+    1000 because `delay` was removed) refuses new events until the queue is
+    below it and drops none that wait; a smaller `concurrency` lets the
+    surplus workers finish their event and exit;
+  - removed: it takes no more events. A webhook attempt or an exec process
+    already running finishes. Every other event of the hook, queued or held
+    by a worker for its delay or a retry, is dropped (queued ones with one
+    warning), so a removed exec hook starts no process after the reload;
   - renamed, or changed between `exec` and `webhook`: a removal and an
     addition (pending events of a webhook carry no host path or identity).
 - Queues are never closed under a sender. A `Notify` for a hook that a
   concurrent `Update` removed, or one after `Close`, drops the event,
   counts it and never panics; a kept hook's events are not affected.
 - New row in ADR 0005's "State that outlives snapshots": *Hooks: one
-  dispatcher; the hook set is replaced in place; pending events of a kept
-  hook are filtered again and use its new spec, those of a removed hook are
-  dropped.*
+  dispatcher; the hook set is replaced in place; events of a kept hook,
+  queued or held by a worker, are filtered again before their first
+  attempt or run, and every attempt uses the spec current when it starts;
+  those of a removed hook are dropped.*
 - **Checks.** `Validate` checks what needs no file system: names unique and
   non-empty, `on` and `mounts` values known, patterns valid, exactly one of
   `exec` and `webhook`, argv[0] absolute, the URL scheme and no user info,
@@ -310,16 +385,15 @@ rotating a secret must reach connections that stay open for days.
   live generations): a location error fails start and reload, as for any
   trusted file. Content and permission problems (argv[0] missing or not
   executable; `secret_file` missing, not printable ASCII, under 32 bytes;
-  a bad owner or mode of `secret_file` or of an existing argv file) fail at
-  start. On reload the reload succeeds, with a warning in the operational
+  a bad owner or mode of `secret_file` or of an argv element that exists
+  and is a regular file) fail at start. On reload the reload succeeds, with a warning in the operational
   log (a broken hook file must not block revoking a user; `server.reload`
   gets no new field):
   - a `secret_file` problem keeps the running secret, which is held in
     memory (as host keys keep theirs, ADR 0008);
   - an argv problem leaves the hook out, so a running hook of that name is
     removed as above: its files run as they are at each run, so an
-    untrusted one must not run (as an untrusted `authorized_keys` file
-    gives no keys, ADR 0005);
+    untrusted one must not run (the per-run check above refuses it too);
   - a new hook with either problem is left out;
   - the gauge `gosftpd_hooks_not_updated` counts the hooks the last reload
     kept at their running secret or left out (alert when above 0, as for
@@ -342,9 +416,10 @@ rotating a secret must reach connections that stay open for days.
   info, successes at debug.
 - Metrics (ADR 0009), counted once per event per hook at its final
   outcome: `gosftpd_hook_deliveries_total{type, result}` with `type`
-  `exec` or `webhook` and `result` `ok`, `failed`, `skipped` (exec: the
-  identity check) or `dropped` (a full queue, a removed hook or one whose
-  filters no longer match, shutdown); `gosftpd_hook_retries_total`
+  `exec` or `webhook` and `result` `ok`, `failed` (also an exec run whose
+  files failed the per-run check), `skipped` (exec: the identity check) or
+  `dropped` (a full queue, a removed hook or one whose filters no longer
+  match, shutdown); `gosftpd_hook_retries_total`
   (webhook attempts after the first); `gosftpd_hook_queue_length`, queued
   plus in-flight events of all hooks; `gosftpd_hooks_not_updated` (see
   Reload). Hook names are not labels.
@@ -359,11 +434,15 @@ rotating a secret must reach connections that stay open for days.
 - Events other than file events (`auth.*`, `conn.*`, `server.*`).
 - Custom headers, mutual TLS, a per-hook CA file, a persistent queue, a
   Windows job object.
-- Under `on_conflict = "rename"`, renaming a fixed temporary name after a
-  retried upload moves the earlier, partial file, not the retry's copy (vfs
-  since M3). With this ADR that rename is not marked (the partial upload
-  was aborted), so no hook fires on the partial file; vfs fixes the move
-  separately (TASKS).
+- Under `on_conflict = "rename"` and with `atomic_uploads`, a retried
+  upload to a fixed temporary name goes to `NAME (1).ext`, and so does
+  WinSCP's resume (a conflict by ROADMAP §6.2 row 3); the client's rename
+  then moves the earlier, partial file (vfs since M3). Under `version`,
+  and with `atomic_uploads`, WinSCP's resume publishes a `.filepart` whose
+  first bytes are zero. The retry's open cleared the earlier file's flag
+  and the resume sets none, so these renames are not marked and no hook
+  fires on the partial or corrupt file; vfs fixes the moves and WinSCP's
+  resume separately (TASKS).
 
 ### Code
 
@@ -377,31 +456,53 @@ and `Close` at shutdown. `audit.Logger.Render(event, attrs...)` formats an
 event as the audit output would, with the logger's context, whatever
 `audit.events` says. sftpd calls `Wants` and then `Notify` after each
 audited file event with result ok. vfs returns, with each operation, the
-mount name, the host path and the identity (`vfs.Moved` gets `Uploaded`,
-`Mount`, `HostPath` and `Info`; uploads, downloads, mkdir and setstat get
-the same through their handles or results).
+mount name, the host path and the identity in a `vfs.Where` (`vfs.Moved`
+gets `Uploaded` and a `Where`; uploads get the same through their
+handles; `Session.SetstatAt` returns a `Where` only when it changed the
+times of the named file itself, and sftpd notifies hooks only then;
+for downloads, mkdir, remove and rmdir sftpd calls `Session.Locate`, an
+`Lstat` through the mount's `os.Root` right after the operation, before a
+download's handle is closed). vfs sets the flag exactly when the close's `fs.upload` has result
+ok: `WriteHandle` records a write refused by the append-only guard as it
+records one refused by `max_file_size`, and the flag is set only after
+`f.Close` succeeds. sftpd derives `result` from the same handle state, so
+the audit result and the mark cannot disagree. The upload handle also
+tells sftpd whether the upload is news for hooks (`Fresh`: not an empty
+resume, not a resume of a file that is not the user's).
 
 Tests: `internal/hooks` has goleak in `TestMain` and a coverage floor in
 test/coverage.sh; the signature test vector is a golden test; backoff and
 `Retry-After` run under synctest with a fake transport; exec tests cover a
-background child, a `setsid` grandchild, 1 MiB of output and the timeout
-(Linux and macOS); the URL-token test above; a reload that narrows `mounts`
-while delayed events are pending delivers none of the removed mount's
-events. vfs tests: an aborted `.filepart` upload with bytes written, a
-retry and the client's rename give no mark; a reput after an interrupted
-upload and the rename, as an `upload` user, succeed and give one mark; an
-upload to `x.filepart` and 100 renames back and forth give one mark. An
-in-process test in `internal/cli` uploads with a real SSH client to an
-`httptest` receiver that recomputes the signature over the raw body, for
-`on_conflict = "rename"` (final_path differs from path), atomic uploads and
-a `.filepart` upload plus rename (exactly one delivery), and checks that
-the webhook of a flattened single-mount user carries `"mount":"inbox"` and
-`final_path` `/report.pdf`. The interop test adds a python3 receiver for
-OpenSSH sftp and rclone (one delivery per file, with the final name) and a
-`/bin/sh` hook from docs/hooks.md that receives the names `*`, `a b`, a
-name with a newline, `-rf`, `$(touch pwned)` and a backtick name: each run
-acts on exactly the uploaded file, nothing else moves, and no `pwned`
-appears.
+background child, a grandchild that calls `setsid` (skipped where
+setsid(1) is missing, as on macOS), 1 MiB of output, the timeout, a
+left-over group member, hostile names and a program made group-writable
+after start (not started, counted as failed); the URL-token test above; a
+reload that narrows `mounts` while delayed events are pending, one of them
+held by the worker in its delay, delivers none of the removed mount's
+events; a hook removed while a worker holds an event in its delay
+delivers nothing; a retry after a reload that rotated the secret is signed
+with the new one; at shutdown a receiver that never answers does not
+delay `Close` beyond the hooks' share. vfs tests: an aborted or cancelled
+`.filepart` upload, a retry or a WinSCP-style resume under every conflict
+policy with and without `atomic_uploads`, and the client's rename: a mark
+only where the rename moves the complete file; under `overwrite` a resume
+or a retry of the user's own file in place, then the rename: one mark; an
+upload to `x.filepart` and 100 renames back and forth give one mark; empty
+resumes between renames give none; a resume of another user's file is not
+news for hooks; a resume with a write refused by the append-only guard,
+then the rename: no mark. An in-process test in `internal/cli` uploads
+with a real SSH client to an `httptest` receiver that recomputes the
+signature over the raw body, for `on_conflict = "rename"` (final_path
+differs from path), atomic uploads and a `.filepart` upload plus rename
+(exactly one delivery), and checks that the webhook of a flattened
+single-mount user carries `"mount":"inbox"` and `final_path`
+`/report.pdf`; another reloads an exec hook in and out with a connection
+open. The interop test adds a python3 receiver for OpenSSH sftp and rclone
+(one delivery per file, with the final name) and a `/bin/sh` hook from
+docs/hooks.md that receives, uploaded with paramiko (OpenSSH sftp cannot
+send a newline in a name), the names `*`, `a b`, a name with a newline,
+`-rf`, `$(touch pwned)` and a backtick name: each run acts on exactly the
+uploaded file, nothing else moves, and no `pwned` appears.
 
 ## Consequences
 
@@ -416,7 +517,10 @@ appears.
   Under Landlock an exec hook cannot run in v0.4 (see Reload).
 - docs/hooks.md shows safe scripts: always `"$VAR"`, `--` before derived
   names, no `eval` or strings built for `sh -c`, and on Windows
-  `"%GOSFTPD_HOST_PATH%"` or PowerShell's `$env:GOSFTPD_HOST_PATH`.
+  `"%GOSFTPD_HOST_PATH%"` in cmd, or in PowerShell
+  `-LiteralPath $env:GOSFTPD_HOST_PATH` (never `-Path` or a positional
+  path: they treat `[` and `]`, which Windows names may contain, as
+  wildcards).
 - The host path is a name the script resolves outside `os.Root`; the
   identity check narrows but cannot close the window, and it does not tell
   a regular file created again under the same name from the uploaded one.
