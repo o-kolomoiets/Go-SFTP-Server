@@ -170,13 +170,34 @@ func (l *Logger) Healthy() bool {
 	if !l.sink.probeDue() {
 		return false
 	}
-	l.sink.failed.Store(false)
-	l.l.Log(context.Background(), slog.LevelInfo, "audit", "schema", Schema, "event", "server.audit_recovered")
-	ok := !l.sink.failed.Load()
-	if ok {
-		l.fallback.Info("audit log recovered")
+	return l.probe()
+}
+
+// Recover retries a failing audit log now, in either mode, and reports
+// whether it works. It is for a loop that runs while no client connects:
+// a fail-open log is otherwise cleared only by the next event, and the
+// probes of Healthy are spaced from the last one.
+func (l *Logger) Recover() bool {
+	if !l.sink.failed.Load() {
+		return true
 	}
-	return ok
+	l.sink.mu.Lock()
+	l.sink.lastProbe = time.Now()
+	l.sink.mu.Unlock()
+	return l.probe()
+}
+
+// probe writes server.audit_recovered and, once it is written, clears the
+// failure; until then the log stays failing, also for readers in between.
+func (l *Logger) probe() bool {
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "audit", 0)
+	r.AddAttrs(slog.Int("schema", Schema), slog.String("event", "server.audit_recovered"))
+	if err := l.l.Handler().Handle(context.Background(), r); err != nil {
+		return false
+	}
+	l.sink.failed.Store(false)
+	l.fallback.Info("audit log recovered")
+	return true
 }
 
 // Available reports, without writing, whether the audit log lets the

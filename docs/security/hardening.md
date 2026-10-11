@@ -129,7 +129,14 @@ HTTP without authentication ([metrics.md](../metrics.md)).
 - Keep it on `127.0.0.1` and scrape from the host, or on a private network
   that only Prometheus reaches; in Docker publish it as
   `-p 127.0.0.1:9090:9090`. Never expose it to the internet.
-- Behind a reverse proxy with authentication, keep gosftpd on loopback.
+- On loopback, gosftpd answers 421 to a foreign `Host` header (DNS
+  rebinding). In Docker it binds `0.0.0.0` inside the container, so that
+  check is off: a browser on the Docker host is not protected.
+- Behind a reverse proxy with authentication, keep gosftpd on loopback, and
+  make the proxy send a loopback `Host` (see
+  [metrics.md](../metrics.md#security)).
+- Whoever reaches the listener can hold its 64 connections: use `gosftpd
+  healthcheck` (SSH) for liveness, not `/healthz`.
 - Release binaries do not contain pprof. A binary built with `-tags pprof`
   should run with `pprof = false` and turn it on only while profiling.
 - For a container health check, `gosftpd healthcheck` needs no admin

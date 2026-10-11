@@ -5,16 +5,21 @@ package cli
 import (
 	"context"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/pkg/sftp"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 )
 
@@ -177,5 +182,158 @@ listen = "192.0.2.1:9090"
 	code, _, stderr := execute(t, "serve", "--allow-root", "--config", path)
 	if code != exitFailure || !strings.Contains(stderr, "metrics.listen") {
 		t.Errorf("exit %d: %s", code, stderr)
+	}
+}
+
+// metric returns the value of one series from the admin listener.
+func metric(t *testing.T, admin, series string) (float64, bool) {
+	t.Helper()
+	_, text := get(t, admin+"/metrics")
+	for line := range strings.Lines(text) {
+		name, v, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if ok && name == series {
+			f, err := strconv.ParseFloat(v, 64)
+			return f, err == nil
+		}
+	}
+	return 0, false
+}
+
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting until %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestServeAdminAuditAndMounts: while the audit log fails (fail-closed),
+// /readyz says audit_unavailable and the gauge is 1; both recover without
+// any client; a mount a reload leaves out shows in metrics.
+func TestServeAdminAuditAndMounts(t *testing.T) {
+	isolate(t)
+	old := auditProbeInterval
+	auditProbeInterval = 50 * time.Millisecond
+	t.Cleanup(func() { auditProbeInterval = old })
+	dir := t.TempDir()
+	for _, d := range []string{"data", "extra"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(dir, "gosftpd.toml")
+	writeFile(t, path, `config_version = 1
+[server]
+listen = ["127.0.0.1:0"]
+host_keys = ["state/host_key"]
+host_key_auto_generate = true
+[mounts.data]
+path = "`+filepath.ToSlash(filepath.Join(dir, "data"))+`"
+[mounts.extra]
+path = "`+filepath.ToSlash(filepath.Join(dir, "extra"))+`"
+[users.alice]
+authorized_keys = ["`+authorizedKey(newSigner(t))+`"]
+access = { data = "full", extra = "full" }
+[metrics]
+listen = "127.0.0.1:0"
+`)
+	ts := startServe(t, "--config", path)
+	m := regexp.MustCompile(`metrics: http://(127\.0\.0\.1:\d+)/metrics`).FindStringSubmatch(ts.stderr.String())
+	if m == nil {
+		t.Fatalf("no metrics address in the banner:\n%s", ts.stderr.String())
+	}
+	admin := "http://" + m[1]
+	if v, ok := metric(t, admin, "gosftpd_mounts_unavailable"); !ok || v != 0 {
+		t.Errorf("mounts_unavailable at start = %v, %v", v, ok)
+	}
+
+	// A reload leaves out the missing mount; its server.reload event fails
+	// to be written.
+	if err := os.Remove(filepath.Join(dir, "extra")); err != nil {
+		t.Fatal(err)
+	}
+	ts.stdout.setFail(true)
+	ts.hup <- syscall.SIGHUP
+	waitUntil(t, "/readyz says audit_unavailable", func() bool {
+		code, body := get(t, admin+"/readyz")
+		return code == 503 && body == "audit_unavailable\n"
+	})
+	for series, want := range map[string]float64{
+		"gosftpd_audit_log_failing":  1,
+		"gosftpd_mounts_unavailable": 1,
+	} {
+		if v, ok := metric(t, admin, series); !ok || v != want {
+			t.Errorf("%s = %v, %v; want %v", series, v, ok, want)
+		}
+	}
+	if v, _ := metric(t, admin, "gosftpd_audit_write_errors_total"); v < 1 {
+		t.Errorf("audit_write_errors_total = %v", v)
+	}
+	if _, ok := silentProbe(t, ts.addr); ok {
+		t.Error("a connection was admitted while the audit log fails")
+	}
+
+	// The output works again: the server recovers with no client.
+	ts.stdout.setFail(false)
+	waitUntil(t, "/readyz says ready", func() bool {
+		code, _ := get(t, admin+"/readyz")
+		return code == 200
+	})
+	if v, _ := metric(t, admin, "gosftpd_audit_log_failing"); v != 0 {
+		t.Errorf("audit_log_failing after recovery = %v", v)
+	}
+	if v, _ := metric(t, admin, `gosftpd_connections_refused_total{reason="audit_unavailable"}`); v < 1 {
+		t.Errorf("refusals for the audit log = %v", v)
+	}
+	if len(events(t, ts.stdout.String(), "server.audit_recovered")) == 0 {
+		t.Error("no server.audit_recovered event")
+	}
+}
+
+// silentProbe connects without speaking SSH and reports whether the server
+// sent its banner (admitted) or closed the connection.
+func silentProbe(t *testing.T, addr string) (string, bool) {
+	t.Helper()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	b := make([]byte, 64)
+	n, _ := c.Read(b)
+	return string(b[:n]), strings.HasPrefix(string(b[:n]), "SSH-2.0-")
+}
+
+// recoverAudit clears a failure in either mode with no other writes
+// (review finding: a fail-open log stayed failing on a quiet server).
+func TestRecoverAudit(t *testing.T) {
+	t.Parallel()
+
+	for _, failOpen := range []bool{false, true} {
+		var out lockedBuffer
+		al, err := audit.NewWithOptions(&out, slog.New(slog.DiscardHandler), audit.Options{FailOpen: failOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.setFail(true)
+		al.Event("server.start")
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); recoverAudit(ctx, al, 10*time.Millisecond) }()
+		time.Sleep(50 * time.Millisecond)
+		if !al.Failing() || al.WriteErrors() < 3 {
+			t.Errorf("fail-open %v: while failing: failing %v, %d write errors (want a probe per tick)", failOpen, al.Failing(), al.WriteErrors())
+		}
+		out.setFail(false)
+		waitUntil(t, "the audit log recovers", func() bool { return !al.Failing() })
+		cancel()
+		<-done
+		if !strings.Contains(out.String(), "server.audit_recovered") {
+			t.Errorf("fail-open %v: no server.audit_recovered", failOpen)
+		}
 	}
 }

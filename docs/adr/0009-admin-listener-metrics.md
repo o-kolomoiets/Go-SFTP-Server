@@ -24,7 +24,7 @@ pprof = false      # /debug/pprof; only in binaries built with -tags pprof
 
 `metrics.listen` is restart-only, like `server.listen`; it is bound at
 start with the SSH listeners, and failing to bind fails the start. The
-banner prints `metrics: http://ADDR` and `server.start` gets `metrics_listen`.
+banner prints `metrics: http://ADDR/metrics` and `server.start` gets `metrics_listen`.
 `metrics.pprof` is reloadable (a flag the handlers check), so a running
 process can be profiled without a restart.
 
@@ -50,15 +50,19 @@ it as `-p 127.0.0.1:9090:9090`.
 A separate `http.Server`: `ReadHeaderTimeout` 5 s, `ReadTimeout` 10 s,
 `WriteTimeout` 30 s (net/http/pprof extends its own deadline for profiles),
 `IdleTimeout` 60 s, `MaxHeaderBytes` 8 KiB, at most 64 open connections
-(further ones wait in the backlog). Routes use method patterns, so other
+(further ones wait in the backlog; closing the listener ends that wait, so
+`Shutdown` keeps its deadline). Routes use method patterns, so other
 methods get 405 with `Allow: GET, HEAD`; unknown paths 404. `/metrics` and
 pprof share a limit of 4 concurrent requests (pprof alone 2), answered at
 once with 503 and `Retry-After: 1` when full; `/healthz` and `/readyz` are
-never limited. pprof's `seconds` is capped at 60 (400 above), `cmdline` is
+exempt from these request limits, not from the 64 connections. pprof's `seconds` is capped at 60 (400 above), `cmdline` is
 not served (it holds host paths), every pprof request is logged at info
 level, and turning pprof on logs a warning. When `listen` is a loopback
 address, a request whose `Host` is not a loopback IP or `localhost` gets
-421, so that a web page cannot reach it through DNS rebinding.
+421, so that a web page cannot reach it through DNS rebinding. The check
+depends on the address gosftpd binds: in Docker (`0.0.0.0` inside the
+container, published on the host's loopback) it is off, and a reverse proxy
+in front of a loopback listener must send a loopback `Host`.
 
 The admin server starts before the SSH listeners accept and stops last:
 after the drain, `Shutdown` with a 1 s deadline, then `Close`. A `Serve`
@@ -66,8 +70,10 @@ error after start is logged and does not stop the SSH server.
 
 ### Endpoints
 
-- `/healthz`: 200 `ok` while the process serves HTTP. This is the liveness
-  check (Kubernetes `livenessProbe`, Docker `HEALTHCHECK --url`).
+- `/healthz`: 200 `ok` while the process serves HTTP. Whoever reaches the
+  listener can hold its 64 connections, so liveness checks use the SSH
+  check of `gosftpd healthcheck` (Kubernetes `livenessProbe` with `exec`,
+  Docker `HEALTHCHECK`), and `/readyz` serves readiness.
 - `/readyz`: 200 `ready`, or 503 with one fixed token:
   - `starting`: before the SSH listeners accept (the moment of `READY=1`);
   - `stopping`: from SIGTERM on (the SSH listeners close at once, so this
@@ -87,11 +93,14 @@ error after start is logged and does not stop the SSH server.
 
 **Audit recovery.** `internal/audit` gains `Available() bool` and
 `Failing() bool`, which read the sink's state without writing, and
-`WriteErrors() uint64`. `/readyz` reads `Available`. Recovery used to depend
-on traffic (`Healthy()` probes only when called); a background goroutine in
-`serve` now calls `Healthy()` every 5 s while the log fails, so the server
-recovers, and `/readyz` returns to 200, without connections, as ROADMAP
-§6.4 and docs/audit-log.md already say.
+`WriteErrors() uint64`, and `Recover()`, which probes at once in either
+mode and clears the failure only once its write succeeded. `/readyz` reads
+`Available`. Recovery used to depend on traffic (`Healthy()` probes only
+when called, and a fail-open log only cleared with the next event); a
+background goroutine in `serve` now calls `Recover()` every 5 s while the
+log fails, so the server recovers, `/readyz` returns to 200 and
+`gosftpd_audit_log_failing` to 0, without connections, as ROADMAP §6.4 and
+docs/audit-log.md already say.
 
 ### Exposition
 

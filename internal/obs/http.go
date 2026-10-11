@@ -232,7 +232,7 @@ func loopbackHost(host string) bool {
 // time, further ones wait in the listen backlog. It returns nil after
 // Shutdown.
 func (a *Admin) Serve(ln net.Listener) error {
-	err := a.srv.Serve(&limitListener{Listener: ln, sem: make(chan struct{}, adminMaxConns)})
+	err := a.srv.Serve(newLimitListener(ln, adminMaxConns))
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -250,20 +250,36 @@ func (a *Admin) Shutdown(ctx context.Context) {
 }
 
 // limitListener accepts a connection only while fewer than cap(sem) are
-// open.
+// open. Close ends a wait for a free slot: http.Server.Shutdown waits for
+// Accept to return before it looks at its deadline.
 type limitListener struct {
 	net.Listener
-	sem chan struct{}
+	sem       chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newLimitListener(ln net.Listener, n int) *limitListener {
+	return &limitListener{Listener: ln, sem: make(chan struct{}, n), done: make(chan struct{})}
 }
 
 func (l *limitListener) Accept() (net.Conn, error) {
-	l.sem <- struct{}{}
+	select {
+	case l.sem <- struct{}{}:
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
 	c, err := l.Listener.Accept()
 	if err != nil {
 		<-l.sem
 		return nil, err
 	}
 	return &limitConn{Conn: c, release: sync.OnceFunc(func() { <-l.sem })}, nil
+}
+
+func (l *limitListener) Close() error {
+	l.closeOnce.Do(func() { close(l.done) })
+	return l.Listener.Close()
 }
 
 type limitConn struct {

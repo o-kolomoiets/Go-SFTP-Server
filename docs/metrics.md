@@ -21,14 +21,24 @@ of the server; pprof shows process internals. Keep it on loopback or a
 private network, or put it behind a proxy that authenticates. `config
 validate` and `serve` warn when it is not on loopback.
 
+- When gosftpd binds a loopback address, a request whose `Host` header is
+  not a loopback address or `localhost` gets 421, so that a web page cannot
+  reach the listener through DNS rebinding. A reverse proxy in front of it
+  must therefore send a loopback `Host` upstream: nginx and Apache do by
+  default; Caddy needs `header_up Host {upstream_hostport}`, Traefik
+  `passHostHeader: false`, HAProxy `http-request set-header Host
+  127.0.0.1:9090`.
 - In Docker, the listener must bind `0.0.0.0` inside the container; publish
-  it on the host's loopback only: `-p 127.0.0.1:9090:9090`.
-- On a loopback address, a request whose `Host` header is not a loopback
-  address or `localhost` gets 421, so that a web page cannot reach the
-  listener through DNS rebinding.
+  it on the host's loopback only: `-p 127.0.0.1:9090:9090`. The `Host` check
+  is then off, since gosftpd does not bind loopback itself: a web page in a
+  browser on the Docker host can read `/metrics` through DNS rebinding.
+  Never turn pprof on there.
 - Requests are limited: headers 8 KiB and 5 s, at most 64 open connections,
   at most 4 concurrent `/metrics` and pprof requests (503 with
-  `Retry-After: 1` beyond that). `/healthz` and `/readyz` are never limited.
+  `Retry-After: 1` beyond that). `/healthz` and `/readyz` are exempt from
+  the request limits but share the 64 connections: whoever can reach the
+  listener can hold all of them and make HTTP health checks time out. Use
+  the SSH check of `gosftpd healthcheck` for liveness.
 - Methods other than GET and HEAD get 405; unknown paths 404.
 
 Scrapes and health checks do not appear in the audit log.
@@ -37,7 +47,7 @@ Scrapes and health checks do not appear in the audit log.
 
 | Path | Answer |
 |---|---|
-| `/healthz` | 200 `ok` while the process serves HTTP: the liveness check. |
+| `/healthz` | 200 `ok` while the process serves HTTP. |
 | `/readyz` | 200 `ready`, or 503 with one word: `starting` (before the SSH listeners accept), `stopping` (from SIGTERM on), `audit_unavailable` (with `audit.on_error = "fail-closed"`, while the audit log cannot be written and new connections are refused). |
 | `/metrics` | The Prometheus text format 0.0.4, whatever the `Accept` header asks for. |
 | `/debug/pprof/` | Go profiles, with `pprof = true` in a binary built with `-tags pprof`. |
@@ -48,8 +58,9 @@ neither a restart nor taking the server out of rotation fixes those, and
 they show in the metrics. Never use `/readyz` for liveness: a full audit disk
 would turn into a restart loop.
 
-While the audit log fails, gosftpd retries it every 5 seconds, so it
-recovers, and `/readyz` turns ready again, without waiting for a client.
+While the audit log fails, gosftpd retries it every 5 seconds, in either
+`on_error` mode, so it recovers, `/readyz` turns ready again and
+`gosftpd_audit_log_failing` returns to 0 without waiting for a client.
 
 ## Metrics
 
@@ -143,7 +154,7 @@ containers:
       - containerPort: 2022
       - containerPort: 9090
     livenessProbe:
-      httpGet: { path: /healthz, port: 9090 }
+      exec: { command: ["/usr/bin/gosftpd", "healthcheck"] }
     readinessProbe:
       httpGet: { path: /readyz, port: 9090 }
     lifecycle:
@@ -152,9 +163,12 @@ containers:
 terminationGracePeriodSeconds: 45 # at least preStop + shutdown_timeout + 5 s
 ```
 
-The kubelet connects to the pod's address, so the listener must listen on
-it (`listen = "0.0.0.0:9090"`); keep port 9090 out of the Service and
-restrict it with a NetworkPolicy.
+The liveness probe checks the SSH listener, which the admin listener's
+connection limit cannot block; a failed readiness probe takes the pod out
+of the Service without restarting it. The kubelet connects to the pod's
+address, so the admin listener must listen on it (`listen =
+"0.0.0.0:9090"`); keep port 9090 out of the Service and restrict it with a
+NetworkPolicy.
 
 At SIGTERM gosftpd closes its SSH listeners and lets transfers finish for up
 to `server.shutdown_timeout`; `/readyz` says `stopping`, but a load balancer

@@ -313,3 +313,36 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// Recover probes at once in either mode; a fail-open log is cleared
+// without an event (review finding: its gauge stayed failing).
+func TestRecover(t *testing.T) {
+	t.Parallel()
+
+	for _, failOpen := range []bool{false, true} {
+		var buf buffer
+		l, err := NewWithOptions(&buf, slog.New(slog.DiscardHandler), Options{FailOpen: failOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !l.Recover() || len(buf.lines()) != 0 {
+			t.Fatalf("fail-open %v: Recover wrote while the log works", failOpen)
+		}
+		buf.setFail(true)
+		l.Event("fs.upload", slog.String("path", "/x"))
+		if l.Recover() || !l.Failing() {
+			t.Errorf("fail-open %v: Recover succeeded while writes fail", failOpen)
+		}
+		buf.setFail(false)
+		// At once, though a probe just ran.
+		if !l.Recover() || l.Failing() || !l.Available() {
+			t.Errorf("fail-open %v: Recover did not clear the failure", failOpen)
+		}
+		if lines := buf.lines(); len(lines) != 1 || lines[0]["event"] != "server.audit_recovered" {
+			t.Errorf("fail-open %v: lines %v", failOpen, lines)
+		}
+		if l.WriteErrors() != 2 {
+			t.Errorf("fail-open %v: WriteErrors() = %d, want 2", failOpen, l.WriteErrors())
+		}
+	}
+}

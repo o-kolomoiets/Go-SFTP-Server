@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -472,16 +473,27 @@ func TestServeFlagsNeedDir(t *testing.T) {
 	}
 }
 
-// lockedBuffer is a bytes.Buffer safe for concurrent use.
+// lockedBuffer is a bytes.Buffer safe for concurrent use; writes can be
+// made to fail.
 type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu   sync.Mutex
+	b    bytes.Buffer
+	fail bool
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.fail {
+		return 0, syscall.ENOSPC
+	}
 	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) setFail(v bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.fail = v
 }
 
 func (b *lockedBuffer) String() string {

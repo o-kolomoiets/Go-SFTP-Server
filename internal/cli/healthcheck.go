@@ -163,16 +163,24 @@ func checkSSH(ctx context.Context, addr string, timeout time.Duration, ready boo
 	var (
 		d    net.Dialer
 		conn net.Conn
-		err  error
+		errs []error
 	)
-	for _, target := range targets {
-		if conn, err = d.DialContext(ctx, "tcp", target); err == nil {
-			addr = target
+	for i, target := range targets {
+		// A dial that hangs leaves half the time to the next address.
+		dctx, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok && i < len(targets)-1 {
+			dctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Until(deadline)/2))
+		}
+		c, err := d.DialContext(dctx, "tcp", target)
+		cancel()
+		if err == nil {
+			conn, addr = c, target
 			break
 		}
+		errs = append(errs, err)
 	}
-	if err != nil {
-		return unhealthy("%s", err)
+	if conn == nil {
+		return unhealthy("%s", errors.Join(errs...)) // every address tried
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {

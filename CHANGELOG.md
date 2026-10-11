@@ -101,7 +101,7 @@ Incompatible changes are prefixed with **BREAKING:**.
 ### Changed
 
 - A failing audit log is retried every 5 seconds also while no client
-  connects, so the server recovers on its own.
+  connects, in either `on_error` mode, so the server recovers on its own.
 - Host keys are read again on reload (they were restart-only): new
   connections use the new keys, open ones keep theirs. A reload never
   generates a key, and a host key that cannot be used keeps the running

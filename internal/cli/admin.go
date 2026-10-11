@@ -66,12 +66,14 @@ func (a *adminListener) stop(ctx context.Context) {
 	<-a.done
 }
 
-// auditProbeInterval is how often recoverAudit checks the audit log.
-const auditProbeInterval = 5 * time.Second
+// auditProbeInterval is how often recoverAudit checks the audit log (a
+// variable for tests).
+var auditProbeInterval = 5 * time.Second
 
 // recoverAudit retries a failing audit log every interval until ctx is
-// done, so that the server recovers, and /readyz turns ready again,
-// without waiting for a connection to probe it.
+// done, so that the server recovers, /readyz turns ready again and
+// gosftpd_audit_log_failing returns to 0, also in fail-open mode, without
+// waiting for a client.
 func recoverAudit(ctx context.Context, al *audit.Logger, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -81,8 +83,8 @@ func recoverAudit(ctx context.Context, al *audit.Logger, every time.Duration) {
 			return
 		case <-t.C:
 		}
-		if !al.Available() {
-			al.Healthy()
+		if al.Failing() {
+			al.Recover()
 		}
 	}
 }

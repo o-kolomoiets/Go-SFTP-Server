@@ -101,6 +101,17 @@ func TestHealthcheckAddress(t *testing.T) {
 			t.Errorf("--address %s: %s", a, stderr)
 		}
 	}
+	// Nothing listens: the line names every address tried.
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, free, _ := net.SplitHostPort(ln.Addr().String())
+	ln.Close()
+	if code, _, stderr := healthcheck(t, "--address", ":"+free, "--timeout", "2s"); code != exitFailure ||
+		!strings.Contains(stderr, "127.0.0.1:"+free) || !strings.Contains(stderr, "[::1]:"+free) {
+		t.Errorf("wildcard, nothing listening: exit %d: %q", code, stderr)
+	}
 	// Precedence: --address, $GOSFTPD_LISTEN, server.listen, :2022.
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "gosftpd.toml")
@@ -170,18 +181,22 @@ func TestHealthcheckURL(t *testing.T) {
 // Every usage error exits with 1: Docker reserves 2 for HEALTHCHECK.
 func TestHealthcheckUsage(t *testing.T) {
 	isolate(t)
-	for _, args := range [][]string{
-		{"--bogus"},
-		{"extra"},
-		{"--timeout", "0s"},
-		{"--timeout", "soon"},
-		{"--url", "http://127.0.0.1:1/readyz", "--ready"},
-		{"--url", "http://127.0.0.1:1/readyz", "--address", "127.0.0.1:22"},
-		{"--url", "ftp://example/"},
-		{"--url", "/readyz"},
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--bogus"}, "unknown flag"},
+		{[]string{"extra"}, "unexpected argument"},
+		{[]string{"--timeout", "0s"}, "--timeout must be between"},
+		{[]string{"--timeout", "soon"}, "invalid argument"},
+		{[]string{"--url", "http://127.0.0.1:1/readyz", "--ready"}, "cannot be used with"},
+		{[]string{"--url", "http://127.0.0.1:1/readyz", "--address", "127.0.0.1:22"}, "cannot be used with"},
+		{[]string{"--url", "ftp://example/"}, "want an http:// or https:// URL"},
+		{[]string{"--url", "/readyz"}, "want an http:// or https:// URL"},
 	} {
-		if code, _, stderr := healthcheck(t, args...); code != exitFailure || stderr == "" || strings.HasPrefix(stderr, "Error:") {
-			t.Errorf("%q: exit %d: %q", args, code, stderr)
+		// A usage error, not an unhealthy result of a check that ran.
+		if code, _, stderr := healthcheck(t, tt.args...); code != exitFailure || !strings.Contains(stderr, tt.want) || strings.HasPrefix(stderr, "unhealthy") {
+			t.Errorf("%q: exit %d: %q, want %q", tt.args, code, stderr, tt.want)
 		}
 	}
 	if code, stdout, _ := healthcheck(t, "--help"); code != exitOK || !strings.Contains(stdout, "Docker reserves 2") {

@@ -665,7 +665,7 @@ is given: run it as a dedicated user.
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |
 | `gosftpd hostkey show [--config FILE] [--known-hosts HOST:PORT]` | Prints the fingerprint, public key and `known_hosts` line of the host key (`--host-key`, `--state-dir`) or, with `--config`, of every configured one; then its next and previous keys and the certificate files that exist. The first lines describe the current key. |
 | `gosftpd hostkey rotate [--type T] \| --finish \| --rollback \| --retire \| --abort` | Rotates a host key in steps, see [Rotation](#rotation). Selects the key like `show`; with `--config`, `--host-key` picks one of several. |
-| `gosftpd healthcheck [--address HOST:PORT \| --url URL] [--ready] [--timeout 5s]` | Checks that the server answers, for container health checks; see [metrics.md](metrics.md#gosftpd-healthcheck). |
+| `gosftpd healthcheck [--config FILE] [--address HOST:PORT \| --url URL] [--ready] [--timeout 5s]` | Checks that the server answers, for container health checks; see [metrics.md](metrics.md#gosftpd-healthcheck). |
 
 Exit codes: 0 success, 1 runtime error, 2 invalid usage or configuration.
 `gosftpd healthcheck` exits with 0 or 1 only: Docker reserves 2.

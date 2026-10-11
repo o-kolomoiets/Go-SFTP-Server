@@ -165,7 +165,7 @@ func TestLimitListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln := &limitListener{Listener: inner, sem: make(chan struct{}, 2)}
+	ln := newLimitListener(inner, 2)
 	defer ln.Close()
 	var d net.Dialer
 	for range 3 {
@@ -252,4 +252,62 @@ func TestAdminServe(t *testing.T) {
 		t.Errorf("Shutdown took %v", d)
 	}
 	client.CloseIdleConnections()
+}
+
+// With every connection slot taken by idle keep-alive connections, Shutdown
+// still returns after its second: Accept waiting for a slot ends when the
+// listener closes (review finding: SIGTERM stalled for the idle timeout).
+func TestAdminShutdownWithAllSlotsTaken(t *testing.T) {
+	t.Parallel()
+
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewAdmin(AdminOptions{Metrics: NewMetrics("dev"), Health: NewHealth(nil)})
+	served := make(chan error, 1)
+	go func() { served <- a.Serve(ln) }()
+	var d net.Dialer
+	conns := make([]net.Conn, 0, adminMaxConns)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	buf := make([]byte, 512)
+	for range adminMaxConns {
+		c, err := d.DialContext(t.Context(), "tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+		if _, err := c.Write([]byte("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if n, err := c.Read(buf); err != nil || !strings.HasPrefix(string(buf[:n]), "HTTP/1.1 200") {
+			t.Fatalf("GET /healthz: %q, %v", buf[:n], err)
+		}
+	}
+	// One more waits in the backlog; Accept waits for a slot.
+	extra, err := d.DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	a.Shutdown(context.Background())
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve() = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after Shutdown")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("Shutdown took %v with every slot taken", d)
+	}
 }

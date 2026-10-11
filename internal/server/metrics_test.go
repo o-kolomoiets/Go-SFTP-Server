@@ -206,3 +206,60 @@ func TestRefusedAuditMetrics(t *testing.T) {
 		return v >= 1
 	}, func() string { return "no refusal counted" })
 }
+
+// An upload refused by max_file_size counts once, as denied, when it is
+// closed; the refused write itself is not an operation (review finding).
+func TestRefusedWriteCountsOnce(t *testing.T) {
+	t.Parallel()
+
+	m := obs.NewMetrics("test")
+	e := startWith(t, startOpts{
+		policy: vfs.ConflictRename, tweak: func(c *Config) { c.Metrics = m },
+		mount: func(o *vfs.MountOptions) { o.MaxFileSize = 4 },
+	})
+	sc := e.sftp(t)
+	f, err := sc.Create("/big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, werr := f.Write([]byte("0123456789"))
+	cerr := f.Close()
+	if werr == nil && cerr == nil {
+		t.Fatal("an upload over max_file_size succeeded")
+	}
+	waitMetrics(t, m, map[string]float64{`gosftpd_transfer_duration_seconds_count{direction="upload"}`: 1})
+	waitMetrics(t, m, map[string]float64{
+		`gosftpd_sftp_operations_total{op="upload",result="denied"}`: 1,
+		`gosftpd_sftp_operations_total{op="upload",result="ok"}`:     0,
+	})
+}
+
+// An atomic upload whose name another client took meanwhile is rejected
+// when it is closed under on_conflict = "reject" (review finding).
+func TestAtomicUploadRejectedAtClose(t *testing.T) {
+	t.Parallel()
+
+	m := obs.NewMetrics("test")
+	e := startWith(t, startOpts{
+		policy: vfs.ConflictReject, tweak: func(c *Config) { c.Metrics = m },
+		mount: func(o *vfs.MountOptions) { o.AtomicUploads = true },
+	})
+	sc := e.sftp(t)
+	f, err := sc.Create("/late.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("mine")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.share, "late.txt"), []byte("theirs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err == nil {
+		t.Fatal("the atomic upload replaced a file under reject")
+	}
+	waitMetrics(t, m, map[string]float64{
+		`gosftpd_conflicts_total{conflict="rejected",op="upload"}`:   1,
+		`gosftpd_sftp_operations_total{op="upload",result="denied"}`: 1,
+	})
+}

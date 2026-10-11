@@ -956,7 +956,7 @@ gosftpd user list | disable NAME | remove NAME
 gosftpd user hash-password [--stdin]                    # the password is never passed as an argument
 gosftpd hostkey show [--known-hosts HOST:PORT] | generate [--type ed25519|ecdsa|rsa] [--out PATH]
                 | rotate [--type ed25519|ecdsa|rsa]
-gosftpd healthcheck [--address HOST:PORT | --url URL] [--ready]
+gosftpd healthcheck [--config PATH] [--address HOST:PORT | --url URL] [--ready] [--timeout 5s]
                                                         # without --url: TCP to server.listen, waits for "SSH-2.0-"; with --url: GET, 2xx; exit 0 or 1
 gosftpd version [--json]
 gosftpd completion bash|zsh|fish|powershell

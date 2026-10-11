@@ -80,7 +80,8 @@ connects, and then writes `server.audit_recovered`. Meanwhile `/readyz` on
 the admin listener answers 503 `audit_unavailable`, and the metric
 `gosftpd_audit_log_failing` is 1. Transfers already running finish, and their events
 go to stderr. With `on_error = "fail-open"` gosftpd keeps serving and writes
-every event that could not be stored to stderr.
+every event that could not be stored to stderr; it retries every 5 seconds
+too, so that `gosftpd_audit_log_failing` returns to 0 on a quiet server.
 
 ## Rotation
 
