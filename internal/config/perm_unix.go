@@ -40,3 +40,18 @@ func sameDevice(a, b fs.FileInfo) (same, known bool) {
 	}
 	return sa.Dev == sb.Dev, true
 }
+
+// checkSecretMode refuses a secret that group may write or others may
+// access: 0400, 0440, 0600 and 0640 pass.
+func checkSecretMode(path string, fi fs.FileInfo) error {
+	if err := checkOwner(path, fi); err != nil {
+		return err
+	}
+	if perm := fi.Mode().Perm(); perm&0o027 != 0 {
+		return fmt.Errorf("%s: group may write or others may access it (mode %04o); fix with: chmod 0600 %s", path, perm, path)
+	}
+	return nil
+}
+
+// executable reports whether the file has an execute bit.
+func executable(fi fs.FileInfo) bool { return fi.Mode().Perm()&0o111 != 0 }

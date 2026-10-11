@@ -42,6 +42,9 @@ trusted.
   `-tags pprof`, `/debug/pprof` (whoever can reach it → process).
 - Configuration, host keys, `authorized_keys` files, CLI flags and
   environment (administrator → process).
+- Hooks (`[[hooks]]`, ADR 0010): exec hooks receive client-chosen names in
+  their environment and stdin (session → a program gosftpd starts);
+  webhooks send audit events to a receiver (process → network).
 - The process and the operating system; CI and the release artifacts.
 
 ## Threats and controls
@@ -74,6 +77,13 @@ trusted.
 | Denial of service | Crashing the process through a library race (N3) | `sftpd.Gate` | see above |
 | Denial of service | Exhausting the process through the admin listener (N1) | Header size and time limits, at most 64 connections (Shutdown is not held up by them) and 4 concurrent scrapes or profiles (503 beyond), profiles of at most 60 s; its failure does not stop the SFTP server, unless an HTTP liveness probe on `/healthz` turns held connections into restarts: liveness uses the SSH check of `gosftpd healthcheck` | obs tests |
 | Elevation of privilege | Shell, exec, forwarding, PTY | Only the `sftp` subsystem is accepted | server tests, interop |
+| Elevation of privilege | A client's file name run as a command or option by an exec hook (N3) | argv without a shell, never an argument from a client; names only in `GOSFTPD_*` and stdin; docs/hooks.md shows quoting and `--` | hooks tests with hostile names, cli test, interop with a `/bin/sh` hook |
+| Elevation of privilege | Running a hook program a client or a local user can change (N3, N4) | argv files refused inside any mount; owner root or gosftpd's user and not writable by group or others, checked at start, on reload and before each run | config and hooks tests |
+| Tampering | An exec hook acting on another file than the event's: a symlink or another file swapped in before it runs (N4), a symlink renamed by a client | The file's identity is recorded with the operation and checked (`os.SameFile`, same type, a regular file or directory) just before the run; the race after the check is a documented limit | hooks and vfs tests |
+| Spoofing | A forged or replayed webhook delivery (N2) | HMAC-SHA256 over delivery ID, timestamp and body; receivers refuse old timestamps and repeated IDs (docs/hooks.md); TLS with the system roots, no redirects | golden test vector, cli test with a verifying receiver |
+| Spoofing | Making hooks act on another user's file as one's own upload (N3) | A resume of a file that is not the user's, or one that wrote nothing, fires no hook; the rename mark needs the user's own upload closed ok | vfs tests |
+| Information disclosure | A webhook token in the URL leaking into logs | Failures log `scheme://host` and the unwrapped cause, never the URL; response bodies are not logged | hooks test with a token URL |
+| Denial of service | Flooding hooks with events, or a hook that hangs (N3) | A bounded queue per hook (events and 64 MiB), enqueueing never blocks a request; exec timeout kills the process group; webhook attempt timeouts and at most 5 attempts; shutdown bounded | hooks tests under synctest |
 | Elevation of privilege | A confinement bug while running as root | `serve` refuses root without `--allow-root` | cli tests |
 | Supply chain (N5) | Compromised dependency or action | Minimal dependencies, `govulncheck`, CodeQL, actions pinned by commit SHA, Dependabot, OpenSSF Scorecard; checksums for releases | CI |
 
@@ -97,4 +107,8 @@ trusted.
 - The admin listener has no authentication or TLS; who can reach it can
   read the metrics, and with pprof on, profile the process (see
   [hardening.md](hardening.md#admin-listener)).
+- An exec hook resolves the host path itself, outside `os.Root`: after the
+  identity check a local user who can write the directory can still swap
+  the file (see [../hooks.md](../hooks.md#exec)). Hook events can be lost
+  (a full queue, shutdown, a crash); the audit log is the record.
 - Release artifacts are not signed yet (planned for v0.5).

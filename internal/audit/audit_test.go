@@ -346,3 +346,28 @@ func TestRecover(t *testing.T) {
 		}
 	}
 }
+
+// Render formats an event like the output, with the context, also for a
+// category that is not recorded.
+func TestRender(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	l, err := NewWithOptions(&out, slog.New(slog.DiscardHandler), Options{Categories: []string{CategoryConn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l = l.With("conn_id", "c1", slog.String("user", "alice"))
+	l.Event("fs.upload", slog.String("path", "/a"))
+	if out.Len() != 0 {
+		t.Fatalf("a disabled category was written: %s", out.String())
+	}
+	got := string(l.Render("fs.upload", slog.String("path", "/a"), slog.String("result", "ok")))
+	for _, want := range []string{`"msg":"audit"`, `"conn_id":"c1"`, `"user":"alice"`, `"schema":1`, `"event":"fs.upload"`, `"path":"/a"`, `"result":"ok"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Render = %s, missing %s", got, want)
+		}
+	}
+	if !strings.HasSuffix(got, "}\n") {
+		t.Errorf("Render does not end the line: %q", got)
+	}
+}

@@ -119,11 +119,12 @@ func (h *WriteHandle) closeTemp(aborted bool) error {
 		}
 		return err
 	}
-	s.moveCreated(v, tmp, h.rel, true)
+	s.moveCreated(v, tmp, h.rel, true, false)
 	// The handle proves the upload created the file, even if its entry
 	// was evicted while the upload was open.
 	if st, err := v.root.Lstat(h.rel); err == nil {
-		s.closedCreated(h, st)
+		s.closedCreated(h, st, !h.noMark)
+		h.info = st
 	}
 	if h.rel != h.target && v.opts().StatRedirect {
 		s.setRedirect(v, h.target, h.rel)

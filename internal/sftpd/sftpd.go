@@ -19,6 +19,7 @@ import (
 	"github.com/pkg/sftp"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
+	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
@@ -62,6 +63,8 @@ type Handler struct {
 	metrics    *obs.Metrics
 	maxHandles int32
 	open       atomic.Int32
+	hooks      *hooks.Dispatcher
+	connID     string
 }
 
 // New returns a handler for the session; m may be nil. maxHandles <= 0
@@ -106,7 +109,7 @@ func (h *Handler) refuse(op, path string, err error) (string, error) {
 	result, st := toStatus(err)
 	h.log.Debug("sftp request failed", "op", op, "path", path, "err", err)
 	if result == "denied" {
-		h.audit.Event("fs.denied", slog.String("op", op), slog.String("path", path), slog.String("reason", st.Error()), slog.String("result", "denied"))
+		h.event("fs.denied", path, slog.String("op", op), slog.String("path", path), slog.String("reason", st.Error()), slog.String("result", "denied"))
 	}
 	return result, st
 }
@@ -158,27 +161,39 @@ func (h *Handler) Filecmd(r *sftp.Request) error {
 	}
 	var err error
 	attrs := []slog.Attr{slog.String("path", r.Filepath)}
+	f := fileEvent{path: r.Filepath}
 	switch r.Method {
 	case "Setstat":
-		err = h.setstat(r)
+		var w vfs.Where
+		w, err = h.setstat(r)
+		// Hooks hear only of times set on the named file itself.
+		f.where, f.skip = func() vfs.Where { return w }, w.HostPath == ""
 	case "Rename":
-		var final string
-		final, err = h.s.Rename(r.Filepath, r.Target, false)
-		attrs = append(attrs, slog.String("target_path", r.Target), slog.String("final_path", final))
+		var m vfs.Moved
+		m, err = h.s.Move(r.Filepath, r.Target, false)
+		attrs = append(attrs, slog.String("target_path", r.Target), slog.String("final_path", m.Final))
+		if m.Uploaded {
+			attrs = append(attrs, slog.Bool("uploaded", true))
+		}
+		f.final, f.target, f.uploaded = m.Final, r.Target, m.Uploaded
+		f.where = func() vfs.Where { return m.Where }
 	case "Mkdir":
 		err = h.s.Mkdir(r.Filepath)
 	case "Rmdir":
 		err = h.s.Rmdir(r.Filepath)
+		f.gone = true
 	case "Remove":
 		err = h.s.Remove(r.Filepath)
+		f.gone = true
 	default:
 		err = errUnsupportedMethod
 	}
 	if err != nil {
 		return h.fail(op, r.Filepath, err)
 	}
-	h.audit.Event(op, append(attrs, slog.String("result", "ok"))...)
+	attrs = h.event(op, r.Filepath, append(attrs, slog.String("result", "ok"))...)
 	h.metrics.Operation(op, "ok")
+	h.notify(op, f, attrs)
 	return nil
 }
 
@@ -198,32 +213,39 @@ func (h *Handler) PosixRename(r *sftp.Request) error {
 	if m.Version != "" {
 		attrs = append(attrs, slog.String("version_path", m.Version))
 	}
-	h.audit.Event("fs.rename", append(attrs, slog.String("result", "ok"))...)
+	if m.Uploaded {
+		attrs = append(attrs, slog.Bool("uploaded", true))
+	}
+	attrs = h.event("fs.rename", r.Filepath, append(attrs, slog.String("result", "ok"))...)
 	h.metrics.Operation("fs.rename", "ok")
 	h.metrics.Conflict("fs.rename", m.Conflict)
+	h.notify("fs.rename", fileEvent{
+		path: r.Filepath, final: m.Final, target: r.Target, uploaded: m.Uploaded,
+		where: func() vfs.Where { return m.Where },
+	}, attrs)
 	return nil
 }
 
-func (h *Handler) setstat(r *sftp.Request) error {
+func (h *Handler) setstat(r *sftp.Request) (vfs.Where, error) {
 	af := r.AttrFlags()
 	if !af.Size && !af.Acmodtime {
-		return nil // permissions and ownership are not settable; ignore quietly
+		return vfs.Where{}, nil // permissions and ownership are not settable; ignore quietly
 	}
 	fa := r.Attributes()
 	if fa == nil {
-		return errBadAttributes
+		return vfs.Where{}, errBadAttributes
 	}
 	var a vfs.Attrs
 	if af.Size {
 		if fa.Size > 1<<62 {
-			return errBadAttributes
+			return vfs.Where{}, errBadAttributes
 		}
 		a.Size, a.HasSize = int64(fa.Size), true
 	}
 	if af.Acmodtime {
 		a.Atime, a.Mtime, a.HasTimes = time.Unix(int64(fa.Atime), 0), time.Unix(int64(fa.Mtime), 0), true
 	}
-	return h.s.Setstat(r.Filepath, a)
+	return h.s.SetstatAt(r.Filepath, a)
 }
 
 // Filelist implements sftp.FileLister.
@@ -238,7 +260,7 @@ func (h *Handler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 			h.release()
 			return nil, h.fail("fs.list", r.Filepath, err)
 		}
-		h.audit.Event("fs.list", slog.String("path", r.Filepath), slog.String("result", "ok"))
+		h.event("fs.list", r.Filepath, slog.String("path", r.Filepath), slog.String("result", "ok"))
 		h.metrics.Operation("fs.list", "ok")
 		return &lister{Lister: l, h: h}, nil
 	case "Stat":
@@ -303,7 +325,7 @@ func (h *Handler) stat(p string, fn func(string) (os.FileInfo, error)) (sftp.Lis
 	if err != nil {
 		return nil, h.fail("fs.stat", p, err)
 	}
-	h.audit.Event("fs.stat", slog.String("path", p), slog.String("result", "ok"))
+	h.event("fs.stat", p, slog.String("path", p), slog.String("result", "ok"))
 	h.metrics.Operation("fs.stat", "ok")
 	return statLister{ownedInfo{fi}}, nil
 }

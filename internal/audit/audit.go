@@ -8,6 +8,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -158,6 +159,19 @@ func (l *Logger) Event(event string, attrs ...slog.Attr) {
 		}
 		l.fallback.Warn("audit event not persisted: audit log unavailable", args...)
 	}
+}
+
+// Render returns an event as the audit output would write it, with the
+// logger's context, whether or not its category is recorded: the line a
+// hook gets (ADR 0010). It ends with a newline.
+func (l *Logger) Render(event string, attrs ...slog.Attr) []byte {
+	var b bytes.Buffer
+	h := slog.New(slog.NewJSONHandler(&b, &slog.HandlerOptions{Level: slog.LevelInfo})).With(l.attrs...).Handler()
+	r := slog.NewRecord(time.Now(), slog.LevelInfo, "audit", 0)
+	r.AddAttrs(slog.Int("schema", Schema), slog.String("event", event))
+	r.AddAttrs(attrs...)
+	_ = h.Handle(context.Background(), r) // a bytes.Buffer does not fail
+	return b.Bytes()
 }
 
 // Healthy reports whether the audit log accepts writes. While it does not,

@@ -41,6 +41,7 @@ type WriteHandle struct {
 	virtual   string // final client path
 	conflict  string
 	reserved  bool        // the file was created by this upload
+	owned     bool        // the file is the user's: reserved, or a resume of the user's upload
 	id        fs.FileInfo // identity of the created file
 	ino       fs.FileInfo // the open file, for the table's writer registry
 	guarded   bool        // append-only resume: bytes below minOffset are immutable
@@ -53,8 +54,14 @@ type WriteHandle struct {
 	key       string // the session's writers map key: the virtual path at open
 	written   atomic.Int64
 	refused   atomic.Bool // a write or truncation past max_file_size
+	immutable atomic.Bool // a write or truncation refused by the append-only guard
+	// noMark: this upload never marks its file as arrived. It opened an
+	// existing file with WRITE|CREAT and neither TRUNC nor APPEND (WinSCP's
+	// resume, which writes from the old size) and went to a new file.
+	noMark    bool
 	closeOnce sync.Once
 	closeErr  error
+	info      fs.FileInfo // the file when it was closed
 }
 
 // Path returns the client path the data is written to; with the rename
@@ -92,6 +99,7 @@ func (h *WriteHandle) StartOffset() (offset int64, ok bool) { return h.minOffset
 // slip past it).
 func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
 	if h.guarded && off < h.minOffset {
+		h.immutable.Store(true)
 		return 0, ErrImmutable
 	}
 	if h.maxSize > 0 && (off < 0 || off > h.maxSize-int64(len(p))) {
@@ -108,6 +116,7 @@ func (h *WriteHandle) WriteAt(p []byte, off int64) (int, error) {
 // allowed).
 func (h *WriteHandle) truncate(size int64) error {
 	if h.guarded && size < h.minOffset {
+		h.immutable.Store(true)
 		return ErrImmutable
 	}
 	if h.maxSize > 0 && size > h.maxSize {
@@ -172,12 +181,44 @@ func (s *Session) openedHandle(v *view, h *WriteHandle) (*WriteHandle, error) {
 
 // reservedHandle returns a handle for a file this upload just created.
 func (s *Session) reservedHandle(v *view, rel string, f *os.File, conflict string) (*WriteHandle, error) {
-	h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true})
+	h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: conflict, reserved: true, owned: true})
 	if err != nil {
 		return nil, err
 	}
 	h.id = h.ino
 	return h, nil
+}
+
+// resumed claims the file of a resume; own makes it the user's.
+func (s *Session) resumed(v *view, h *WriteHandle, own bool) (*WriteHandle, error) {
+	h, err := s.openedHandle(v, h)
+	if err != nil {
+		return nil, err
+	}
+	if own {
+		h.owned, h.id = true, h.ino
+	}
+	return h, nil
+}
+
+// arrived reports whether the upload, being closed, marks its file as
+// arrived: closed by the client with nothing refused and no error. That
+// is all a server can know: a client that cancels closes normally too.
+func (h *WriteHandle) arrived(aborted bool) bool {
+	return !aborted && !h.noMark && !h.refused.Load() && !h.immutable.Load() && h.closeErr == nil
+}
+
+// Fresh reports whether hooks should hear of this upload (ADR 0010): not
+// a resume that wrote nothing, and not a resume of a file that was not the
+// user's when it opened (append-only resume needs only write, so anyone
+// sharing a mount could otherwise fire hooks on another user's file).
+func (h *WriteHandle) Fresh() bool {
+	return !h.guarded || (h.owned && h.written.Load() > 0)
+}
+
+// Located returns the file of a closed upload with its identity, for hooks.
+func (h *WriteHandle) Located() Where {
+	return Where{Mount: h.v.m.name, HostPath: h.v.hostPath(h.rel), Info: h.info}
 }
 
 // Close finishes the upload. When aborted (the connection broke) and no byte
@@ -189,13 +230,18 @@ func (h *WriteHandle) Close(aborted bool) error {
 			return
 		}
 		removed := aborted && h.reserved && h.written.Load() == 0 && h.removeIfUnused()
-		if h.reserved && !removed {
-			if st, err := h.f.Stat(); err == nil {
-				h.s.closedCreated(h, st)
-			}
+		var st fs.FileInfo
+		if !removed {
+			st, _ = h.f.Stat()
+			h.info = st
 		}
 		h.s.t.release(h)
 		h.closeErr = osError(h.f.Close())
+		// A resume that wrote nothing changed nothing: its entry stays as
+		// it was (ADR 0010).
+		if st != nil && h.owned && (h.reserved || h.written.Load() > 0) {
+			h.s.closedCreated(h, st, h.arrived(aborted))
+		}
 		h.s.unregister(h, removed)
 	})
 	return h.closeErr
@@ -242,6 +288,8 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.clearArrived(v, requested)
+	s.clearArrived(v, h.rel)
 	h.maxSize = v.opts().MaxFileSize
 	name := h.rel
 	if h.target != "" {
@@ -290,6 +338,18 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 		return s.openResume(v, rel, fl.Append)
 	}
 
+	h, err := s.openConflict(v, rel, fl)
+	if err == nil && h.target != "" || err == nil && h.conflict == ConflictRenamed {
+		// To a new file: WinSCP's resume (WRITE|CREAT) would write from
+		// the old size into it.
+		h.noMark = fl.Creat && !fl.Trunc && !fl.Append
+	}
+	return h, err
+}
+
+// openConflict opens an upload to an existing file by the conflict policy.
+func (s *Session) openConflict(v *view, rel string, fl OpenFlags) (*WriteHandle, error) {
+	opts := v.opts()
 	switch opts.OnConflict {
 	case ConflictReject:
 		return nil, ErrConflict
@@ -323,7 +383,13 @@ func (s *Session) openWrite(v *view, rel string, fl OpenFlags) (*WriteHandle, er
 			_ = f.Close()
 			return nil, err
 		}
-		h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
+		// Writing the user's own file in place keeps it the user's, as a
+		// resume does; checked on the open file before a truncation.
+		var own bool
+		if cur, err := f.Stat(); err == nil {
+			own = s.ownedFile(v, rel, cur)
+		}
+		h, err := s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, own)
 		if err != nil {
 			return nil, err
 		}
@@ -394,10 +460,14 @@ func (s *Session) openResume(v *view, rel string, appendOnly bool) (*WriteHandle
 		_ = f.Close()
 		return nil, ErrNotRegular
 	}
+	// A resume of the user's own upload keeps the file the user's: its
+	// close records the file again (ADR 0010). Checked on the open file,
+	// not by its name, which another connection could change meanwhile.
+	own := s.ownedFile(v, rel, fi)
 	if plain {
-		return s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten})
+		return s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictOverwritten}, own)
 	}
-	h, err := s.openedHandle(v, &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true})
+	h, err := s.resumed(v, &WriteHandle{rel: rel, f: f, conflict: ConflictNone, guarded: true}, own)
 	if err != nil {
 		return nil, err
 	}

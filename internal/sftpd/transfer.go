@@ -49,6 +49,7 @@ func (r *reader) TransferError(error) {
 func (r *reader) Close() error {
 	var err error
 	r.once.Do(func() {
+		fi, _ := r.f.Stat() // the file read, for hooks
 		err = r.f.Close()
 		r.h.release()
 		r.mu.Lock()
@@ -58,13 +59,20 @@ func (r *reader) Close() error {
 		}
 		r.mu.Unlock()
 		d := time.Since(r.start)
-		r.h.audit.Event("fs.download",
+		attrs := r.h.event("fs.download", r.path,
 			slog.String("path", r.path),
 			slog.Int64("bytes", r.n.Load()),
 			slog.Int64("duration_ms", d.Milliseconds()),
 			slog.String("result", result))
 		r.h.metrics.Operation("fs.download", result)
 		r.h.metrics.TransferClosed(false, d)
+		if result == "ok" {
+			r.h.notify("fs.download", fileEvent{path: r.path, where: func() vfs.Where {
+				w := r.h.s.Locate(r.path)
+				w.Info = fi
+				return w
+			}}, attrs)
+		}
 	})
 	return err
 }
@@ -143,8 +151,11 @@ func (w *writer) Close() error {
 		attrs = append(attrs,
 			slog.Int64("duration_ms", d.Milliseconds()),
 			slog.String("result", result))
-		w.h.audit.Event("fs.upload", attrs...)
+		attrs = w.h.event("fs.upload", w.requested, attrs...)
 		w.h.metrics.Operation("fs.upload", result)
+		if result == "ok" && w.wh.Fresh() { // not an empty resume or one of another user's file
+			w.h.notify("fs.upload", fileEvent{path: w.requested, final: w.wh.Path(), where: w.wh.Located}, attrs)
+		}
 		w.h.metrics.TransferClosed(true, d)
 		w.h.metrics.Conflict("fs.upload", w.wh.Conflict())
 		if errors.Is(err, vfs.ErrConflict) { // an atomic upload under on_conflict = "reject"

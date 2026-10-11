@@ -48,6 +48,7 @@ type Config struct {
 	Audit         Audit             `toml:"audit"`
 	Reload        Reload            `toml:"reload"`
 	Metrics       Metrics           `toml:"metrics"`
+	Hooks         []*Hook           `toml:"hooks"`
 
 	// File is the file the configuration was loaded from, "" when it was
 	// built from command-line flags. Files lists File and every included
@@ -227,6 +228,34 @@ type Metrics struct {
 	Pprof bool `toml:"pprof"`
 }
 
+// Hook is a [[hooks]] table: a program or a webhook run for file events
+// (ADR 0010). Exactly one of Exec and Webhook is set.
+type Hook struct {
+	Name        string       `toml:"name"`
+	On          []string     `toml:"on"`
+	Mounts      []string     `toml:"mounts"`
+	Glob        []string     `toml:"glob"`
+	Exclude     []string     `toml:"exclude"`
+	Delay       Duration     `toml:"delay"`
+	Concurrency int          `toml:"concurrency"`
+	Queue       int          `toml:"queue"`
+	Exec        *HookExec    `toml:"exec"`
+	Webhook     *HookWebhook `toml:"webhook"`
+}
+
+// HookExec runs a program, never through a shell.
+type HookExec struct {
+	Argv    []string `toml:"argv"`
+	Timeout Duration `toml:"timeout"`
+}
+
+// HookWebhook posts the event to a URL, signed with the secret.
+type HookWebhook struct {
+	URL        string   `toml:"url"`
+	SecretFile string   `toml:"secret_file"`
+	Timeout    Duration `toml:"timeout"`
+}
+
 // Audit error modes (decision D20).
 const (
 	AuditFailClosed = "fail-closed"
@@ -310,6 +339,7 @@ type fileConfig struct {
 	Audit         Audit                     `toml:"audit"`
 	Reload        Reload                    `toml:"reload"`
 	Metrics       Metrics                   `toml:"metrics"`
+	Hooks         []*Hook                   `toml:"hooks"`
 }
 
 // includeFile is what an included file may contain.
@@ -357,6 +387,7 @@ func Load(path string) (*Config, error) {
 		Audit:         raw.Audit,
 		Reload:        raw.Reload,
 		Metrics:       raw.Metrics,
+		Hooks:         raw.Hooks,
 		File:          abs,
 		Files:         []string{abs},
 		defined:       map[string]bool{},
@@ -471,8 +502,8 @@ func exactKeys(file string, md toml.MetaData, root reflect.Type) error {
 		t := root
 	walk:
 		for _, part := range k {
-			for t.Kind() == reflect.Pointer {
-				t = t.Elem()
+			for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
+				t = t.Elem() // a slice of tables: [[hooks]]
 			}
 			switch {
 			case t.Kind() == reflect.Map:
@@ -541,6 +572,11 @@ func (c *Config) resolvePaths(dir string) {
 	}
 	c.Auth.TrustedUserCAKeysFile = abs(c.Auth.TrustedUserCAKeysFile)
 	c.Auth.RevokedKeysFile = abs(c.Auth.RevokedKeysFile)
+	for _, h := range c.Hooks {
+		if h != nil && h.Webhook != nil {
+			h.Webhook.SecretFile = abs(h.Webhook.SecretFile)
+		}
+	}
 }
 
 // loadIncludes merges the users of every included file. An include may only

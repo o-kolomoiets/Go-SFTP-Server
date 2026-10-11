@@ -89,6 +89,10 @@ event.
 | `gosftpd_config_last_reload_success_timestamp_seconds` | gauge | | The start, then each successful reload. |
 | `gosftpd_audit_write_errors_total` | counter | | Failed writes to the audit output, recovery probes included. |
 | `gosftpd_audit_log_failing` | gauge | | 1 while writes to the audit output fail (either `on_error`), else 0. |
+| `gosftpd_hook_deliveries_total` | counter | `type` (`exec`, `webhook`), `result` (`ok`, `failed`, `skipped`, `dropped`) | Once per event and hook, at its final outcome ([hooks.md](hooks.md)). `skipped`: an exec hook whose file changed before it ran; `dropped`: a full queue, a hook removed by a reload or no longer matching, shutdown. |
+| `gosftpd_hook_retries_total` | counter | | Webhook attempts after the first. |
+| `gosftpd_hook_queue_length` | gauge | | Hook events queued or being delivered, of all hooks; with a `delay`, normally the rate times the delay. |
+| `gosftpd_hooks_not_updated` | gauge | | Hooks the last reload left out (a program that fails its checks) or kept at their running secret. |
 
 Go runtime and process metrics have the names of the Prometheus Go client,
 so existing dashboards work. None of them stops the world to be read.
@@ -143,6 +147,11 @@ groups:
       - alert: GosftpdMountsUnavailable
         expr: gosftpd_mounts_unavailable > 0
         for: 5m
+      - alert: GosftpdHooksFailing
+        expr: increase(gosftpd_hook_deliveries_total{result=~"failed|dropped"}[15m]) > 0
+      - alert: GosftpdHooksNotUpdated
+        expr: gosftpd_hooks_not_updated > 0
+        for: 5m
 ```
 
 ## Kubernetes
@@ -160,7 +169,7 @@ containers:
     lifecycle:
       preStop:
         sleep: { seconds: 10 }
-terminationGracePeriodSeconds: 45 # at least preStop + shutdown_timeout + 5 s
+terminationGracePeriodSeconds: 50 # at least preStop + shutdown_timeout + 10 s
 ```
 
 The liveness probe checks the SSH listener, which the admin listener's

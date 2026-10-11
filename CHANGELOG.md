@@ -97,6 +97,22 @@ Incompatible changes are prefixed with **BREAKING:**.
   audit log; with `--url` it checks the admin listener. It exits with 0 or
   1 only.
 - `server.start` has `metrics_listen` with an admin listener.
+- Hooks ([ADR 0010](docs/adr/0010-hooks.md), [docs/hooks.md](docs/hooks.md)):
+  `[[hooks]]` run a program (`exec`, argv without a shell, `GOSFTPD_*`
+  variables, the event on stdin) or call a webhook (the audit line, signed
+  with HMAC-SHA256 over the delivery ID, timestamp and body, with retries)
+  when a file event succeeds, filtered by `on`, `mounts`, `glob` and
+  `exclude`, optionally after a `delay`. Asynchronous, with a bounded queue
+  per hook; a reload updates hooks in place, for open connections too. An
+  exec hook runs only if its file is still the one of the event, and its
+  program still belongs to root or gosftpd's user; its process group is
+  killed when it ends or times out. New metrics
+  `gosftpd_hook_deliveries_total`, `gosftpd_hook_retries_total`,
+  `gosftpd_hook_queue_length` and `gosftpd_hooks_not_updated`.
+- Audit: every `fs.*` event on a path in a mount has `mount`; `fs.rename`
+  has `"uploaded":true` for the rename that completes a temp-file upload
+  (WinSCP's `.filepart`, rclone's `.partial`), and `fs.upload` hooks fire
+  for it.
 
 ### Changed
 
@@ -134,6 +150,10 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Fixed
 
+- After an interrupted upload to a temporary name was resumed (OpenSSH
+  `reput`) or retried in place (`on_conflict = "overwrite"`), the client's
+  rename was refused for a user with the `upload` preset: the resumed file
+  was no longer counted as the user's own.
 - `known_hosts` lines for IPv6 addresses (`serve` banner, `hostkey show`,
   `user add --write`) are written as `[addr]:port`, which OpenSSH matches.
 - An `include` whose directory exists but cannot be read is an error

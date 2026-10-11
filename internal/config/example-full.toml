@@ -112,3 +112,23 @@ disconnect_removed_users = false        # true: close connections whose login th
 [metrics]
 listen = ""                             # e.g. "127.0.0.1:9090"; empty: off; restart only
 pprof = false                           # /debug/pprof, only in binaries built with -tags pprof
+
+# Hooks: programs and webhooks for file events (docs/hooks.md). Each
+# [[hooks]] table is one hook with exactly one of exec and webhook.
+# [[hooks]]
+# name = "notify"                       # unique; names the hook in the log
+# on = ["fs.upload"]                    # fs.upload, fs.download, fs.rename, fs.remove, fs.mkdir, fs.rmdir, fs.setstat
+# mounts = ["inbox"]                    # default: every mount
+# glob = ["*.pdf"]                      # base name patterns; default: every file
+# exclude = ["*.filepart", "*.partial"] # leave out WinSCP's and rclone's temporary names
+# delay = "0s"                          # wait before running; "2m" for a hook that moves or deletes files
+# concurrency = 1                       # deliveries at a time, 1 to 16; 1 keeps the order
+# queue = 1000                          # events that may wait; 10000 with a delay
+# webhook = { url = "https://example.internal/hooks/sftp", secret_file = "/etc/gosftpd/hook.secret", timeout = "10s" }
+#
+# [[hooks]]
+# name = "archive"
+# on = ["fs.upload"]
+# exclude = ["*.filepart", "*.partial"]
+# delay = "2m"
+# exec = { argv = ["/usr/local/bin/archive-upload"], timeout = "30s" }  # never through a shell

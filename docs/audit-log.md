@@ -51,11 +51,16 @@ never host paths. Strings from clients are JSON-escaped.
 | `session.end` | session | `duration_ms`, `exit_status` |
 | `fs.upload` | transfer | `path` (requested), `final_path`, `conflict` (`none`, `renamed`, `overwritten`, `versioned`), `version_path` (where the replaced file was kept, with `versioned`), `open_flags`, `bytes`, `start_offset` (resumed uploads), `duration_ms`, `result` |
 | `fs.download` | transfer | `path`, `bytes`, `duration_ms`, `result` |
-| `fs.rename` | modify | `path`, `target_path`, `final_path`, `conflict` (posix-rename: `none`, `renamed`, `overwritten`, `versioned`), `version_path` (with `versioned`), `result` |
+| `fs.rename` | modify | `path`, `target_path`, `final_path`, `conflict` (posix-rename: `none`, `renamed`, `overwritten`, `versioned`), `version_path` (with `versioned`), `uploaded` (`true` for the rename that completes a temp-file upload, see [hooks.md](hooks.md#a-file-arrived)), `result` |
 | `fs.mkdir`, `fs.rmdir`, `fs.remove`, `fs.setstat` | modify | `path`, `result` |
 | `fs.denied` | denied | `reason`, `result`, and `op` and `path`, or `mount` for an unavailable home |
 | `fs.list` | list (opt-in) | `path`, `result` |
 | `fs.stat` | stat (opt-in) | `path`, `result` |
+
+Every `fs.*` event on a path in a mount also has `mount`, the mount's name:
+with `flatten` a user with one mount sees `/report.pdf`, and the mount tells
+inboxes apart. Events on the virtual root of a session with several mounts
+(`fs.list /`) and on paths that name no mount have none.
 
 `result` is `ok`, `denied`, `error` or `aborted` (the connection ended during
 the transfer; an empty file the upload created is removed). An upload with a

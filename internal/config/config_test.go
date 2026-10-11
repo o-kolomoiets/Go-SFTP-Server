@@ -656,7 +656,7 @@ func TestExampleFullCoversEveryKey(t *testing.T) {
 				t.Errorf("example-full.toml does not show %q", tag)
 			}
 			ft := f.Type
-			for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Map {
+			for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Map || ft.Kind() == reflect.Slice {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]() {
@@ -1002,7 +1002,7 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 				continue
 			}
 			ft := f.Type
-			for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Map {
+			for ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Map || ft.Kind() == reflect.Slice {
 				ft = ft.Elem()
 			}
 			table := ft.Kind() == reflect.Struct && ft != reflect.TypeFor[time.Time]()
@@ -1013,9 +1013,13 @@ func TestConfigurationDocCoversEveryKey(t *testing.T) {
 			if f.Type.Kind() == reflect.Map {
 				name += ".NAME" // [mounts.NAME], [users.NAME]
 			}
+			section := name
+			if f.Type.Kind() == reflect.Slice && table {
+				section = "[" + name // [[hooks]]
+			}
 			switch {
-			case table && !strings.Contains(string(doc), "`["+name):
-				t.Errorf("docs/configuration.md has no section for [%s]", name)
+			case table && !strings.Contains(string(doc), "`["+section):
+				t.Errorf("docs/configuration.md has no section for [%s]", section)
 			case !table && !strings.Contains(string(doc), "`"+tag+"`"):
 				t.Errorf("docs/configuration.md does not describe `%s`", tag)
 			}

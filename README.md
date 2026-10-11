@@ -472,7 +472,8 @@ To run it as a service under its own user, see the v0.3.0
 | Reload on `SIGHUP` without dropping connections, `sd_notify` for systemd | | ✓ |
 | OpenSSH user certificates (trusted CAs, `cert-authority`), revoked keys | | ✓ |
 | Host key rotation without the `REMOTE HOST IDENTIFICATION HAS CHANGED` warning (OpenSSH 8.5+ clients), host certificates | | ✓ |
-| Prometheus `/metrics` (18 `gosftpd_*` metrics, no user, path or address in any label), `/healthz`, `/readyz`, `gosftpd healthcheck` | | ✓ |
+| Prometheus `/metrics` (22 `gosftpd_*` metrics, no user, path or address in any label), `/healthz`, `/readyz`, `gosftpd healthcheck` | | ✓ |
+| Hooks: a signed webhook or a program when a file arrives, also for WinSCP and rclone temp-file uploads | | ✓ |
 
 To try `main` today: `init` sets you up, and `user add --write` adds a
 partner and prints the host, port, host key fingerprint and `sftp` command to
@@ -510,7 +511,7 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 - [Security model](docs/security.md), [threat model](docs/security/threat-model.md) and [hardening guide](docs/security/hardening.md)
 - [Audit log](docs/audit-log.md): events, fields and the schema promise
 - [Client compatibility](docs/interop.md): what is tested, per client, and known quirks
-- [Metrics and health checks](docs/metrics.md) (on `main`)
+- [Metrics and health checks](docs/metrics.md) and [hooks](docs/hooks.md) (on `main`)
 - [Design decisions](docs/adr/), the [changelog](CHANGELOG.md) and the [release checklist](docs/release-checklist.md)
 
 ## Roadmap
@@ -518,7 +519,7 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 | Version | Status | What's in it |
 |---|---|---|
 | v0.3.0 | **released** 2026-10-09 | Connection limits and bans, password login, versions, atomic uploads, size limits, fuzzing, ssh-audit in CI |
-| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics. To do: hooks (exec, signed webhooks), PROXY protocol v2, a systemd unit, Landlock |
+| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks). To do: PROXY protocol v2, a systemd unit, Landlock |
 | v0.5 | planned | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
 | v1.0 | planned | Compatibility freeze, benchmarks against OpenSSH, OpenSSF Best Practices badge |
 

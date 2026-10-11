@@ -235,7 +235,7 @@ go-sftp-server/
 ├── Dockerfile  .goreleaser.yaml  .golangci.yml  Makefile  ROADMAP.md  CHANGELOG.md
 ```
 
-Package dependency graph: `cli → config, server, hostkey, version`; `server → auth, sftpd, vfs, audit, config`; `auth → config`; `sftpd → vfs, audit`; `vfs → config`; from M4 also `cli, server, sftpd → obs` (`obs` imports no gosftpd package), `server, sftpd → hooks`, `server → sandbox` and `hooks → config`. There are no cycles; `main()` exists only in `cmd/gosftpd`.
+Package dependency graph: `cli → config, server, hostkey, version`; `server → auth, sftpd, vfs, audit, config`; `auth → config`; `sftpd → vfs, audit`; `vfs → config`; from M4 also `cli, server, sftpd → obs` (`obs` imports no gosftpd package), `cli, server, sftpd → hooks`, `hooks → obs`, `config → hooks` (the list of hook events), `server → sandbox`; `hooks` imports no other gosftpd package (ADR 0010). There are no cycles; `main()` exists only in `cmd/gosftpd`.
 
 ### 4.3 Key signatures
 
@@ -603,17 +603,17 @@ flowchart LR
   - `/metrics`, `/healthz`, `/readyz` (503 until ready and during drain), optionally `/debug/pprof`;
   - metrics from §11.2; labels contain no users or paths.
 - [ ] `gosftpd healthcheck` for `HEALTHCHECK` in the distroless image: without `--url` it opens a TCP connection to `server.listen`, waits for the `SSH-2.0-` line and closes the connection without sending its own (such a probe is not recorded in the audit log, §6.4), so it works even without the admin listener (which is disabled by default); with `--url` it checks a URL of the admin listener (`/healthz` or `/readyz`). Exit codes 0 and 1 only: Docker reserves 2 (ADR 0009).
-- [ ] **Hooks** `[[hooks]]`:
-  - filters `on = ["fs.upload"]`, `mounts = ["inbox"]`, `glob = "*.pdf"`;
-  - `exec`: argv without a shell, env `GOSFTPD_EVENT/PATH/FINAL_PATH/HOST_PATH/USER`, timeout;
-  - `webhook`: POST JSON with the audit event, the `X-Gosftpd-Signature` header (HMAC-SHA256), retry with backoff, a bounded queue;
-  - asynchronous by default.
+- [ ] **Hooks** `[[hooks]]` (ADR 0010, after three design reviews):
+  - filters `on = ["fs.upload"]`, `mounts = ["inbox"]`, `glob`/`exclude` lists; `fs.upload` also fires for the rename that completes a temp-file upload (`"uploaded":true`); a per-hook `delay`;
+  - `exec`: argv without a shell, env `GOSFTPD_EVENT/USER/MOUNT/PATH/FINAL_PATH/TARGET_PATH/HOST_PATH/CONN_ID`, the file's identity checked before each run, a timeout that kills the process group;
+  - `webhook`: POST of the audit line, `X-Gosftpd-Signature` (HMAC-SHA256 over delivery ID, timestamp and body), retries with backoff, at least once while running;
+  - asynchronous, with a bounded queue per hook; one process-wide dispatcher that a reload updates in place.
 - [ ] PROXY protocol v2 (`go-proxyproto` v0.15.0), opt-in `server.trusted_proxies = [CIDR]`; a PROXY header from any other address drops the connection.
 - [ ] `packaging/systemd/gosftpd.service` (§9.4), `packaging/gosftpd.sysusers` and `packaging/gosftpd.tmpfiles`.
 - [ ] Optional on Linux: Landlock (`go-landlock` v0.10.1) after the listeners are bound, `landlock.V5.BestEffort().RestrictPaths(landlock.RWDirs(rw...), landlock.RODirs(ro...), landlock.ROFiles(cfg...))`:
   - the restrictions are irreversible: new mounts on SIGHUP require a restart;
-  - the RO list includes `/etc/gosftpd` (including `users.d`), `/etc/ssl/certs`, `/etc/pki` (on RHEL the CA bundle lives there, and Landlock rules are bound to the inode after symlink resolution), `/etc/resolv.conf`, `/etc/hosts`, `/usr/share/zoneinfo`, `/proc/self` (the process collector in `/metrics`), as well as the exec hook directories and `/bin/sh` if a hook needs it (`RODirs` also grants execute permission);
-  - the RW list includes all mounts, `/var/lib/gosftpd`, the audit log directory (`/var/log/gosftpd`) and `landlock.RWFiles("/dev/null")`: `os/exec` opens `/dev/null` for a hook's stdin and stdout if they are not set;
+  - the RO list includes `/etc/gosftpd` (including `users.d`), `/etc/ssl/certs`, `/etc/pki` (on RHEL the CA bundle lives there, and Landlock rules are bound to the inode after symlink resolution), `/etc/resolv.conf`, `/etc/hosts`, `/usr/share/zoneinfo`, `/proc/self` (the process collector in `/metrics`); while exec hooks are configured, Landlock is not applied (`landlock: not applied: exec hooks configured`): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock is reported in `restart_required`. Webhooks need nothing more: the TLS roots are loaded at start, before the ruleset;
+  - the RW list includes all mounts, `/var/lib/gosftpd` and the audit log directory (`/var/log/gosftpd`);
   - at startup, `landlock: ABI vN applied` or `landlock: not available` is written to the log;
   - under systemd, the unit allows the `landlock_*` syscalls: they are not part of `@system-service`, and the `@sandbox` group does not exist before systemd 254 (§9.4).
 - [ ] Documents `docs/operations.md` (reload, shutdown and interrupted uploads, log rotation, backups, upgrades, a stale `os.Root` after remounting), `docs/metrics.md` and `docs/recipes/` (retention via `systemd-tmpfiles` or hooks, volume encryption).
@@ -621,7 +621,7 @@ flowchart LR
 **Definition of Done**
 - Add a user, send `kill -HUP`, and the user logs in without a restart, while a concurrent 1 GiB upload completes. An invalid config on HUP keeps the old one in place and increments `gosftpd_config_reloads_total{result="error"}`.
 - A certificate with the correct principal lets the user in. An expired or revoked certificate, one with someone else's principal, or one from an untrusted CA does not.
-- A webhook on `fs.upload` arrives with `final_path` and a valid signature. A file name `$(rm -rf x)` in an exec hook executes nothing.
+- A webhook on `fs.upload` arrives with `final_path` and `mount` (also for a flattened single-mount user) and a signature that a receiver verifies independently; a WinSCP- or rclone-style temp-file upload gives exactly one delivery, with the final name. An exec hook given the names `*`, `a b`, a newline, `-rf`, `$(touch pwned)` and a backtick name acts on exactly the uploaded file, and nothing else runs or moves.
 - After `mount` of a new disk onto a mount's directory and SIGHUP, new files land on the new disk.
 - `systemd-analyze security gosftpd.service` gives ≤ 2.0. The check is done specifically under `gosftpd.service`: the log shows `landlock: ABI vN applied`, and an `os.Open("/etc/passwd")` call added to a test build gets `EACCES`.
 
@@ -931,10 +931,13 @@ on_error = "fail-closed"                # fail-closed | fail-open (D20)
 listen = ""
 pprof = false
 
-# [[hooks]]                             # M4
+# [[hooks]]                             # M4 (ADR 0010)
+# name = "notify"
 # on = ["fs.upload"]
 # mounts = ["inbox"]
-# glob = "*.pdf"
+# glob = ["*.pdf"]
+# exclude = ["*.filepart", "*.partial"]
+# delay = "0s"
 # exec = { argv = ["/usr/local/bin/on-upload"], timeout = "30s" }   # a single hook has either exec or webhook
 # webhook = { url = "https://example.internal/hooks/sftp", secret_file = "/etc/gosftpd/hook.secret", timeout = "10s" }
 ```
@@ -1150,7 +1153,7 @@ The currently pinned `x/crypto v0.0.0-20211215153901` is affected by **23** advi
 | `server.handshake_timeout` | 30s | x/crypto has no handshake timeout (protection against slowloris) |
 | `server.idle_timeout` | 15m | Abandoned sessions |
 | `server.keepalive_interval` | 30s, 3 misses | Dead TCP connections |
-| `server.shutdown_timeout` | 30s | Must be less than `TimeoutStopSec` in systemd and `stop_grace_period` in Docker |
+| `server.shutdown_timeout` | 30s | Must be less than `TimeoutStopSec` in systemd and `stop_grace_period` in Docker; with hooks at least 10 s less (hooks get up to 5 s more, ADR 0010) |
 | `limits.max_connections` | 256 | FDs and memory |
 | `limits.max_connections_per_ip` | 16 | A single source cannot take everything. Check during implementation with rclone (`--transfers`, `--checkers`) |
 | `limits.max_preauth_connections` | 64 | Counterpart of `MaxStartups` |
@@ -1263,7 +1266,7 @@ Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run on
 | v0.2.0 | ≥ 60% | ≥ 80% | ≥ 70% |
 | v1.0.0 | ≥ 80% | ≥ 90% | ≥ 90% |
 
-Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge.
+Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd` and `hooks` (M4, ADR 0010) ≥ 85%, `internal/auth` ≥ 90%.
 
 ### 8.6 Benchmarks
 
@@ -1411,6 +1414,7 @@ ReadWritePaths=-/srv/sftp
 UMask=0027
 Restart=on-failure
 TimeoutStopSec=45
+KillMode=mixed
 LimitNOFILE=131072
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -1544,7 +1548,8 @@ Metrics are prefixed with `gosftpd_`; labels take values from fixed sets and con
 - `gosftpd_bans_active`, `gosftpd_bans_total`;
 - `gosftpd_mounts_unavailable`;
 - `gosftpd_config_reloads_total{result}`, `gosftpd_config_last_reload_successful`, `gosftpd_config_last_reload_success_timestamp_seconds`;
-- `gosftpd_audit_write_errors_total`, `gosftpd_audit_log_failing` (§6.4, D20).
+- `gosftpd_audit_write_errors_total`, `gosftpd_audit_log_failing` (§6.4, D20);
+- `gosftpd_hook_deliveries_total{type,result}`, `gosftpd_hook_retries_total`, `gosftpd_hook_queue_length`, `gosftpd_hooks_not_updated` (ADR 0010).
 
 Go runtime and process metrics with the names of the Prometheus Go client are added to these, read without stopping the world.
 

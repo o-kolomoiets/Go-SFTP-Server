@@ -36,6 +36,10 @@ var wantFamilies = map[string]string{
 	"gosftpd_config_last_reload_success_timestamp_seconds": "gauge",
 	"gosftpd_audit_write_errors_total":                     "counter",
 	"gosftpd_audit_log_failing":                            "gauge",
+	"gosftpd_hook_deliveries_total":                        "counter",
+	"gosftpd_hook_retries_total":                           "counter",
+	"gosftpd_hook_queue_length":                            "gauge",
+	"gosftpd_hooks_not_updated":                            "gauge",
 	"go_info":                                              "gauge",
 	"go_goroutines":                                        "gauge",
 	"go_threads":                                           "gauge",
@@ -51,6 +55,7 @@ func newTestMetrics() *Metrics {
 		BansActive:       func() int { return 2 },
 		AuditWriteErrors: func() uint64 { return 5 },
 		AuditFailing:     func() bool { return true },
+		HookQueueLength:  func() int { return 7 },
 	})
 	return m
 }
@@ -90,6 +95,7 @@ func TestMetricsFamilies(t *testing.T) {
 		"gosftpd_transfer_duration_seconds": len(Directions) * (len(TransferBuckets) + 3),
 		"gosftpd_conflicts_total":           len(ConflictOps) * len(Conflicts),
 		"gosftpd_config_reloads_total":      2,
+		"gosftpd_hook_deliveries_total":     len(HookKinds) * len(HookResults),
 	} {
 		if got := len(fams[name].samples); got != n {
 			t.Errorf("%s has %d lines, want %d", name, got, n)
@@ -104,7 +110,7 @@ func TestMetricsFamilies(t *testing.T) {
 	if build.labels["version"] != "v1.2.3" || build.labels["goversion"] != runtime.Version() || build.value != 1 {
 		t.Errorf("build_info: %v", build)
 	}
-	for name, want := range map[string]float64{"gosftpd_bans_active": 2, "gosftpd_audit_write_errors_total": 5, "gosftpd_audit_log_failing": 1, "gosftpd_config_last_reload_successful": 1} {
+	for name, want := range map[string]float64{"gosftpd_bans_active": 2, "gosftpd_audit_write_errors_total": 5, "gosftpd_audit_log_failing": 1, "gosftpd_config_last_reload_successful": 1, "gosftpd_hook_queue_length": 7} {
 		if got := fams[name].samples[0].value; got != want {
 			t.Errorf("%s = %v, want %v", name, got, want)
 		}
@@ -241,6 +247,9 @@ func TestNilMetrics(t *testing.T) {
 	m.Banned()
 	m.Reloaded(true, time.Now())
 	m.SetMountsUnavailable(1)
+	m.HookDelivery("exec", "ok")
+	m.HookRetry()
+	m.SetHooksNotUpdated(1)
 }
 
 // Without sources the values owned elsewhere are left out, not 0.
@@ -248,7 +257,7 @@ func TestMetricsWithoutSources(t *testing.T) {
 	t.Parallel()
 
 	fams := scrape(t, NewMetrics("dev"))
-	for _, name := range []string{"gosftpd_bans_active", "gosftpd_audit_write_errors_total", "gosftpd_audit_log_failing"} {
+	for _, name := range []string{"gosftpd_bans_active", "gosftpd_audit_write_errors_total", "gosftpd_audit_log_failing", "gosftpd_hook_queue_length"} {
 		if fams[name] != nil {
 			t.Errorf("%s written without a source", name)
 		}

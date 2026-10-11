@@ -20,6 +20,8 @@ described in [configuration.md](../configuration.md).
 - [ ] The audit log goes to a file or journald that you keep and watch.
 - [ ] The admin listener, if on, is on loopback or a private network, and
       `pprof` is off.
+- [ ] Hooks, if any: webhooks use `https` and receivers verify signatures;
+      exec hook scripts quote every name ([hooks.md](../hooks.md)).
 - [ ] You follow releases and security advisories of the repository.
 
 ## Run as a dedicated user

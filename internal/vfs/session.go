@@ -472,45 +472,62 @@ type Attrs struct {
 // setstat_mode and need the setstat permission, except on files this
 // session created: uploaders set the mtime of what they just wrote.
 func (s *Session) Setstat(vp string, a Attrs) error {
+	_, err := s.SetstatAt(vp, a)
+	return err
+}
+
+// SetstatAt is Setstat that also returns, for hooks, the file whose times
+// it set: only when it set them on the file vp names itself, not through a
+// stat redirect or on an upload's temporary file (ADR 0010). Otherwise the
+// Where is empty.
+func (s *Session) SetstatAt(vp string, a Attrs) (Where, error) {
 	v, rel, err := s.writable(s.redirected(vp))
 	if err != nil {
-		return err
+		return Where{}, err
 	}
+	_, named, _ := s.resolve(vp)
 	h := s.openWriter(s.virtual(v, rel))
 	if h != nil && h.target != "" {
 		rel = h.rel // an upload through a temporary file: set its attributes
 	}
 	if a.HasSize {
 		if h == nil || a.Size < 0 {
-			return ErrDenied
+			return Where{}, ErrDenied
 		}
 		if err := h.truncate(a.Size); err != nil {
-			return err
+			return Where{}, err
 		}
 	}
 	if !a.HasTimes {
-		return nil
+		return Where{}, nil
 	}
 	switch v.opts().SetstatMode {
 	case SetstatIgnore:
-		return nil
+		return Where{}, nil
 	case SetstatDeny:
-		return ErrDenied
+		return Where{}, ErrDenied
 	case SetstatTimes:
 	}
 	// An uploader may set the times of its own uploads, while it may
 	// still upload: a reload may have taken the write permission away.
 	own := v.perm.Has(PermWrite) && s.isCreated(v, rel)
 	if !v.perm.Has(PermSetstat) && !own {
-		return ErrDenied
+		return Where{}, ErrDenied
 	}
 	if err := v.root.Chtimes(rel, a.Atime, a.Mtime); err != nil {
-		return osError(err)
+		return Where{}, osError(err)
 	}
 	if own {
 		s.refreshCreated(v, rel)
 	}
-	return nil
+	if rel != named || h != nil {
+		return Where{}, nil
+	}
+	w := Where{Mount: v.m.name, HostPath: v.hostPath(rel)}
+	if fi, err := v.root.Lstat(rel); err == nil {
+		w.Info = fi
+	}
+	return w, nil
 }
 
 // Rename moves src to dst and returns the final client path; see Move.
@@ -524,6 +541,12 @@ type Moved struct {
 	Final    string // client path the source now has
 	Conflict string // ConflictNone, ConflictRenamed, ConflictOverwritten or ConflictVersioned
 	Version  string // client path the replaced target was moved to (versioned)
+	// Uploaded marks the rename that completes an upload: the first
+	// rename of a file whose upload by this user was closed with result
+	// ok (ADR 0010).
+	Uploaded bool
+	// Where is the file under its final name, with its identity.
+	Where Where
 }
 
 // Move renames src to dst. With posix set (posix-rename@openssh.com) an
@@ -556,9 +579,11 @@ func (s *Session) Move(src, dst string, posix bool) (Moved, error) {
 	if !sv.perm.Has(PermRename) && (!own || !sv.perm.Has(PermWrite)) {
 		return Moved{}, ErrDenied
 	}
+	uploaded := own && s.arrived(sv, srel, fi)
 	done := func(rel, conflict string) (Moved, error) {
-		s.moveCreated(sv, srel, rel, own)
-		return Moved{Final: s.virtual(sv, rel), Conflict: conflict}, nil
+		s.moveCreated(sv, srel, rel, own, false)
+		where := Where{Mount: sv.m.name, HostPath: sv.hostPath(rel), Info: fi} // a rename keeps the inode
+		return Moved{Final: s.virtual(sv, rel), Conflict: conflict, Uploaded: uploaded, Where: where}, nil
 	}
 
 	err = noClobberRename(sv.root, srel, drel)
@@ -655,7 +680,7 @@ func (s *Session) register(h *WriteHandle) {
 	s.writers[h.key] = append(s.writers[h.key], h)
 	s.mu.Unlock()
 	if h.reserved && h.id != nil {
-		s.own(h.v, h.rel, h.id)
+		s.own(h.v, h.rel, h.id, false)
 	}
 }
 

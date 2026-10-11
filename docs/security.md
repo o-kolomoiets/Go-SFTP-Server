@@ -143,6 +143,13 @@ to root or to the user running gosftpd (like sshd's `StrictModes`); host
 keys must be private (`chmod 600`). None of them may lie inside a mount
 clients can write.
 
+Hook files follow the same rules, stricter: a webhook's `secret_file` and
+every file an exec hook runs may lie inside no mount at all; a secret file
+must also have no permissions for others and no write for group, and an
+exec hook's files are checked again just before each run. Hooks never get
+a client's name as an argument or through a shell
+([hooks.md](hooks.md)).
+
 ## Certificates
 
 gosftpd checks OpenSSH user certificates itself rather than with the SSH

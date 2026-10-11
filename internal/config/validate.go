@@ -74,6 +74,7 @@ func (c *Config) Validate() (warnings []string, err error) {
 	c.validateUsers(p)
 	c.validateLogs(p)
 	c.validateMetrics(p)
+	c.validateHooks(p)
 	return p.result()
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
+	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
@@ -37,6 +38,8 @@ type running struct {
 	// /debug/pprof on and off.
 	metrics *obs.Metrics
 	pprof   atomic.Bool
+	// hooks lives for the process; a reload updates its hooks.
+	hooks *hooks.Dispatcher
 
 	mu     sync.Mutex // serializes reloads; guards the fields below
 	c      *config.Config
@@ -46,7 +49,10 @@ type running struct {
 	// hostKeys are the host keys in use; reloaded gets a value after each
 	// reload, for watchHostCerts.
 	hostKeys hostKeys
-	reloaded chan struct{}
+	// hookSpecs are the hooks in use, by name: a reload keeps the running
+	// secret of a hook whose secret file cannot be used.
+	hookSpecs map[string]hooks.Spec
+	reloaded  chan struct{}
 }
 
 // Reasons a reload fails, for the server.reload event.
@@ -151,6 +157,13 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 		c.Server.HostKeys = hostKeys.paths()
 		c.Server.HostCertificates = r.c.Server.HostCertificates
 	}
+	// Before the file checks too; hooks that cannot be used are left out
+	// or keep their running secret, so the checks cover what will run.
+	hookSpecs, warns, staleHooks, err := buildHooks(c, r.hookSpecs)
+	warn(warns)
+	if err != nil {
+		return nil, 0, reloadConfig, err
+	}
 	warns, unavailable, err := c.CheckFSReload(r.liveMounts())
 	warn(warns)
 	if err != nil {
@@ -199,12 +212,15 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	}
 	r.level.Set(level)
 	r.metrics.SetMountsUnavailable(len(unavailable))
+	r.hooks.Update(hookSpecs)
+	r.metrics.SetHooksNotUpdated(staleHooks)
+	warnOrphans(ctx, r.log, hookSpecs)
 	if was := r.pprof.Swap(c.Metrics.Pprof); r.metrics != nil && was != c.Metrics.Pprof {
 		r.log.InfoContext(ctx, "pprof changed", "enabled", c.Metrics.Pprof)
 	}
 	_ = r.mounts.Close()
 	hostKeys.logChanges(ctx, r.log, r.hostKeys)
-	r.c, r.mounts, r.keys, r.hostKeys = c, mounts, keys, hostKeys
+	r.c, r.mounts, r.keys, r.hostKeys, r.hookSpecs = c, mounts, keys, hostKeys, specsByName(hookSpecs)
 	r.tables = append(r.tables, mounts)
 	select {
 	case r.reloaded <- struct{}{}:

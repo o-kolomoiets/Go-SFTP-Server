@@ -26,6 +26,7 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
+	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hostkey"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
@@ -405,18 +406,32 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if c.Metrics.Listen != "" {
 		metrics = obs.NewMetrics(version.Get().Version)
 	}
+	hookSpecs, _, _, err := buildHooks(c, nil)
+	if err != nil {
+		_ = mounts.Close()
+		return configError{err}
+	}
+	// It always exists, so that a reload can add the first hook; it loads
+	// the TLS roots now, before a sandbox could hide them.
+	dispatcher := hooks.New(hooks.Options{Log: log, Metrics: metrics})
+	defer dispatcher.Close(time.Now()) // on early returns; a no-op after the drain
+	dispatcher.Update(hookSpecs)
+	warnOrphans(ctx, log, hookSpecs)
 	cfg := serverConfig(c, authn, mounts, keys)
-	cfg.Audit, cfg.Log, cfg.Metrics, cfg.CryptoPolicy = al, log, metrics, c.Server.CryptoPolicy
+	cfg.Audit, cfg.Log, cfg.Metrics, cfg.CryptoPolicy, cfg.Hooks = al, log, metrics, c.Server.CryptoPolicy, dispatcher
 	srv, err := server.New(cfg)
 	if err != nil {
 		_ = mounts.Close()
 		return err
 	}
-	metrics.SetSources(obs.Sources{BansActive: srv.ActiveBans, AuditWriteErrors: al.WriteErrors, AuditFailing: al.Failing})
+	metrics.SetSources(obs.Sources{
+		BansActive: srv.ActiveBans, AuditWriteErrors: al.WriteErrors, AuditFailing: al.Failing,
+		HookQueueLength: dispatcher.QueueLength,
+	})
 	r := &running{
 		flags: flags, opts: o, getenv: getenv, log: log, level: level, out: out, al: al, srv: srv,
-		metrics: metrics, c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
-		hostKeys: keys, reloaded: make(chan struct{}, 1),
+		metrics: metrics, hooks: dispatcher, c: c, mounts: mounts, tables: []*vfs.Table{mounts}, keys: keyFiles,
+		hostKeys: keys, hookSpecs: specsByName(hookSpecs), reloaded: make(chan struct{}, 1),
 	}
 	r.pprof.Store(c.Metrics.Pprof)
 	if c.File != "" {
@@ -502,15 +517,26 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	for range pending {
 		<-served
 	}
+	drain := time.Now()
 	sctx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancelShutdown()
 	if err := srv.Shutdown(sctx); err != nil {
 		log.WarnContext(ctx, "closed connections that did not finish in time")
 	}
+	// Hooks delivered during the drain; they get what is left of the
+	// timeout, at least 5 s (ADR 0010).
+	deadline := drain.Add(timeout)
+	if least := time.Now().Add(hookGrace); deadline.Before(least) {
+		deadline = least
+	}
+	dispatcher.Close(deadline)
 	r.release()
 	al.Event("server.stop")
 	return serveErr
 }
+
+// hookGrace is the least time hooks get after the SFTP drain.
+const hookGrace = 5 * time.Second
 
 // serverConfig returns the reloadable part of the server configuration.
 func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table, keys hostKeys) server.Config {

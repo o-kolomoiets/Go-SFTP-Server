@@ -468,7 +468,7 @@ func TestOwnSurvivesEvictionWhileOpen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c2.own(v, fmt.Sprintf("f%d", i), fi)
+		c2.own(v, fmt.Sprintf("f%d", i), fi, false)
 	}
 	if err := big.Close(false); err != nil {
 		t.Fatal(err)

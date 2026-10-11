@@ -402,7 +402,7 @@ func TestAtomicOwnSurvivesEviction(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range maxOwned {
-		c2.own(v, fmt.Sprintf("f%d", i), fi)
+		c2.own(v, fmt.Sprintf("f%d", i), fi, false)
 	}
 	if err := big.Close(false); err != nil {
 		t.Fatal(err)
@@ -595,7 +595,7 @@ func TestVersionMove(t *testing.T) {
 	}
 	m, err := s.Move("b.txt", "a.txt", true)
 	const v1 = "/.versions/a.txt/a.20260102T030405Z.txt"
-	if err != nil || m != (Moved{Final: "/a.txt", Conflict: ConflictVersioned, Version: v1}) {
+	if err != nil || m.Final != "/a.txt" || m.Conflict != ConflictVersioned || m.Version != v1 {
 		t.Fatalf("posix-rename = %+v, %v", m, err)
 	}
 	if got := readFile(t, filepath.Join(share, "a.txt")); got != "b" {
