@@ -853,7 +853,7 @@ PY
 	else
 		missing paramiko
 	fi
-	grep -q '"event":"fs.upload","mount":"drop"' "$K/audit.jsonl" && pass "hooks: the audit log has the mount" || fail "hooks: no mount in the audit log"
+	grep -q '"event":"fs.upload","mount":"inbox","path":"/inbox/report.pdf"' "$K/audit.jsonl" && pass "hooks: the audit log has the mount" || fail "hooks: no mount in the audit log"
 else
 	missing python3
 fi
