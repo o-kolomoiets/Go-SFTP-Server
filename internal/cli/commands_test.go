@@ -169,6 +169,15 @@ func TestInit(t *testing.T) {
 	if fi, err := os.Stat(out); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Errorf("config file: %v, %v", fi, err)
 	}
+	// users.d exists before the first start: under Landlock a directory
+	// that appears later needs a restart.
+	usersDir := filepath.Join(dir, "users.d")
+	if fi, err := os.Stat(usersDir); err != nil || !fi.IsDir() || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o700) {
+		t.Errorf("users.d: %v, %v", fi, err)
+	}
+	if !strings.Contains(stdout, "Created "+usersDir) {
+		t.Errorf("output does not name users.d:\n%s", stdout)
+	}
 	keyPath := filepath.Join(home, ".config", "gosftpd", "ssh_host_ed25519_key")
 	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		if _, err := os.Stat(keyPath); err != nil {

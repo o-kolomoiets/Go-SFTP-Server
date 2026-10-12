@@ -125,6 +125,8 @@ Incompatible changes are prefixed with **BREAKING:**.
   not apply Landlock (no Landlock in the kernel, a seccomp filter that
   blocks it, ABI 1, exec hooks, a mount at `/`); `required` makes that an
   error at start. `config validate` refuses `required` with exec hooks.
+  `gosftpd init` creates `users.d/`, since under Landlock an include
+  directory that is missing at start needs a restart for its first file.
   New dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
 
 ### Changed

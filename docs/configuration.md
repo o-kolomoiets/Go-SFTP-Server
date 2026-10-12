@@ -711,7 +711,7 @@ is given: run it as a dedicated user.
 
 | Command | What it does |
 |---|---|
-| `gosftpd init` | Writes `./gosftpd.toml` (0600) and a host key; never overwrites without `--force`. |
+| `gosftpd init` | Writes `./gosftpd.toml` (0600), a host key and an empty `users.d/` next to the file, for `user add --write`; never overwrites without `--force`. |
 | `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions. |
 | `gosftpd config show` | Prints the effective configuration. |
 | `gosftpd config example [--full]` | Prints an example. |
