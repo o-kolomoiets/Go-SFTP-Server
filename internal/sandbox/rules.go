@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 
@@ -579,14 +580,24 @@ func (p *planner) addDir(r resolved, rights Rights, key string) {
 // the directory is dedicated, else the file with fileRights and a start
 // warning. A named file that is a symlink resolving outside a dedicated
 // directory also gets a rule on its target: a directory rule covers only
-// what resolves beneath it.
+// what resolves beneath it. One that cannot be resolved, below a directory
+// gosftpd cannot search (an authorized_keys file read only with
+// "publickey"), gets no rule and a start warning.
 func (p *planner) place(key, path string, fileRights, dirRights Rights) error {
 	path = filepath.Clean(path)
 	if p.special(path) {
 		return nil
 	}
 	r, err := p.resolve(path)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.ELOOP):
+		why := err
+		if pe, ok := errors.AsType[*fs.PathError](err); ok {
+			why = pe.Err
+		}
+		p.notes = append(p.notes, &note{text: key + ": " + path + " cannot be resolved (" + why.Error() + "): no Landlock rule; reading it needs a restart"})
+		return nil
+	case err != nil:
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	if !r.exists || p.special(r.path) {

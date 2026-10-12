@@ -410,6 +410,30 @@ func TestSymlinksIntoAnotherTree(t *testing.T) {
 	)
 }
 
+// TestUnresolvable: a named file that cannot be resolved (a directory on
+// its path that gosftpd cannot search, a symlink loop, a file on its
+// path) gets no rule, with a start warning, instead of failing the start:
+// an authorized_keys file read only with "publickey" is still named.
+func TestUnresolvable(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).
+		files("/etc/gosftpd/config.toml", "/home/bob/.ssh/authorized_keys", "/etc/gosftpd/keys/alice.pub").
+		symlink("/etc/gosftpd/keys/loop.pub", "loop.pub").
+		noSearch("/home/bob/.ssh").
+		dirs("/srv/sftp/inbox")
+	c := newConfig("/etc/gosftpd/config.toml")
+	c.Auth.Methods = []string{"password"}
+	addUser(c, "alice", "/etc/gosftpd/keys/alice.pub")
+	addUser(c, "bob", "/home/bob/.ssh/authorized_keys")
+	addUser(c, "carol", "/etc/gosftpd/keys/loop.pub")
+	addUser(c, "dave", "/etc/gosftpd/config.toml/authorized_keys")
+	checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, inbox},
+		"users.bob.authorized_keys_file: /home/bob/.ssh/authorized_keys cannot be resolved (permission denied): no Landlock rule; reading it needs a restart",
+		"users.carol.authorized_keys_file: /etc/gosftpd/keys/loop.pub cannot be resolved (",
+		"users.dave.authorized_keys_file: /etc/gosftpd/config.toml/authorized_keys cannot be resolved (",
+	)
+}
+
 // TestHostKeySiblings: in a shared directory each existing sibling gets a
 // file rule; one warning names them.
 func TestHostKeySiblings(t *testing.T) {
