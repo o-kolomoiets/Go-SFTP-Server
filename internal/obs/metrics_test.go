@@ -118,6 +118,11 @@ func TestMetricsFamilies(t *testing.T) {
 	if ts := fams["gosftpd_config_last_reload_success_timestamp_seconds"].samples[0].value; time.Since(time.Unix(int64(ts), 0)) > time.Minute {
 		t.Errorf("last reload timestamp %v is not the start", ts)
 	}
+	// Both causes: a file problem, and under Landlock an exec hook that
+	// a reload adds, for which the remedy is a restart.
+	if h := fams["gosftpd_hooks_not_updated"].help; !strings.Contains(h, "file problem") || !strings.Contains(h, "Landlock") {
+		t.Errorf("gosftpd_hooks_not_updated: HELP %q leaves out a cause", h)
+	}
 	gc := fams["go_gc_duration_seconds"].samples
 	if len(gc) != 7 || gc[0].labels["quantile"] != "0" || gc[4].labels["quantile"] != "1" {
 		t.Errorf("go_gc_duration_seconds: %v", gc)
