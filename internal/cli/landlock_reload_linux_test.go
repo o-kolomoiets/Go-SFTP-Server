@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // replaceFile writes data to path through a new file renamed over it, as
@@ -295,5 +297,48 @@ access = { inbox = "full" }
 	}
 	if code := sb.stop(t); code != exitOK {
 		t.Errorf("exit %d", code)
+	}
+}
+
+// TestLandlockLinkedTeam: a team directory of a wildcard include that is
+// a link into another tree gets a rule on its target, with a warning that
+// names the link: a reload still lists it and loads its users, whether
+// the leading directory is dedicated or holds another file.
+func TestLandlockLinkedTeam(t *testing.T) {
+	t.Parallel()
+	if serveChild(t) {
+		return
+	}
+	for _, shared := range []bool{false, true} {
+		base := t.TempDir()
+		bob, carol := newSigner(t), newSigner(t)
+		p := func(rel string) string { return filepath.Join(base, filepath.FromSlash(rel)) }
+		user := func(name string, key ssh.Signer) string {
+			return "[users." + name + "]\nauthorized_keys = [\"" + authorizedKey(key) + "\"]\naccess = { inbox = \"read\" }\n"
+		}
+		tree := map[string]string{
+			"etc/config.toml":             `include = ["teams/*/users.toml"]` + "\n" + minimalConfig(base, newSigner(t), ""),
+			"etc/teams/b/users.toml":      user("carol", carol),
+			"elsewhere/team-a/users.toml": user("bob", bob),
+			"srv/inbox/":                  "", "state/": "",
+		}
+		if shared {
+			tree["etc/teams/README"] = "readme"
+		}
+		files(t, base, tree)
+		if err := os.Symlink(p("elsewhere/team-a"), p("etc/teams/a")); err != nil {
+			t.Fatal(err)
+		}
+		sb := startSandboxed(t, sandboxOpts{args: []string{"--config", p("etc/config.toml")}})
+		waitLog(t, sb.logs, "include: "+p("etc/teams/a")+" is a link to "+p("elsewhere/team-a")+", outside "+p("etc/teams"))
+		if ev := sb.reload(t, sb.audit); ev["result"] != "ok" || ev["restart_required"] != nil {
+			t.Errorf("shared = %v: server.reload = %v\n%s", shared, ev, sb.logs())
+		}
+		if !canLogIn(sb.addr, "bob", bob) || !canLogIn(sb.addr, "carol", carol) {
+			t.Errorf("shared = %v: a team's user cannot log in after the reload:\n%s", shared, sb.logs())
+		}
+		if code := sb.stop(t); code != exitOK {
+			t.Errorf("exit %d", code)
+		}
 	}
 }

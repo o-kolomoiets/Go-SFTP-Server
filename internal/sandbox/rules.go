@@ -727,6 +727,9 @@ func (p *planner) includeRules() error {
 					p.addFile(rf, ReadFile, keyInclude)
 				}
 			}
+			if err := p.linkedIncludeDirs(inc, false); err != nil {
+				return err
+			}
 			p.notes = append(p.notes, &note{text: keyInclude + ": Landlock covers only the include files found at start in " + inc.lead +
 				", which " + v.why + "; a new or renamed include file needs a restart"})
 			continue
@@ -740,10 +743,60 @@ func (p *planner) includeRules() error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", keyInclude, err)
 			}
-			if rf.exists && !p.special(rf.path) && !beneath(rf.path, rl.path) {
+			if !rf.exists || p.special(rf.path) {
+				continue
+			}
+			// Beneath its own directory, wherever that resolves to: a
+			// linked directory gets its rule below.
+			rd, err := p.resolve(filepath.Dir(f))
+			if err != nil {
+				return fmt.Errorf("%s: %w", keyInclude, err)
+			}
+			if !beneath(rf.path, rd.path) {
 				p.addFile(rf, ReadFile, keyInclude)
 				p.noteLink(keyInclude, f, rf.path, filepath.Dir(f))
 			}
+		}
+		if err := p.linkedIncludeDirs(inc, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// linkedIncludeDirs adds a rule on the target of each directory between
+// inc's leading directory and a match that resolves outside the rules so
+// far, with a start warning naming it: a team directory of
+// teams/*/users.toml that is a link into another tree. Glob lists it, and
+// ignores a directory it cannot list. The target gets read_file too when
+// the leading directory and the linked one are dedicated.
+func (p *planner) linkedIncludeDirs(inc include, dedicated bool) error {
+	for _, f := range p.matches(inc) {
+		rel, ok := relative(filepath.Dir(f), inc.lead)
+		if !ok || rel == "" {
+			continue
+		}
+		d := inc.lead
+		for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
+			d = filepath.Join(d, part)
+			rights := ReadDir
+			if dedicated && p.dedicated(d).dedicated {
+				rights |= ReadFile
+			}
+			if p.covers(d, rights) {
+				continue
+			}
+			rd, err := p.resolve(d)
+			switch {
+			case err != nil:
+				return fmt.Errorf("%s: %w", keyInclude, err)
+			case !rd.exists || !rd.info.IsDir() || p.special(rd.path):
+				continue
+			case isRoot(rd.path):
+				return &RootError{Key: keyInclude}
+			}
+			p.addDir(rd, rights, keyInclude)
+			p.noteLink(keyInclude, d, rd.path, filepath.Dir(d))
 		}
 	}
 	return nil

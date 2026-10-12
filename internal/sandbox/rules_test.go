@@ -365,6 +365,33 @@ func TestIncludes(t *testing.T) {
 			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds notes.txt",
 			"include: /etc/gosftpd/users.d does not exist: the first file added there needs a restart")
 	})
+	t.Run("a team directory that is a link into another tree", func(t *testing.T) {
+		t.Parallel()
+		// Glob lists teams/a: its target gets a directory rule, and the
+		// warning names the link, not the include file in it.
+		m := newMemFS(t).
+			files("/etc/gosftpd/config.toml", "/etc/gosftpd/teams/b/users.toml", "/srv/elsewhere/team-a/users.toml").
+			symlink("/etc/gosftpd/teams/a", "/srv/elsewhere/team-a").
+			dirs("/srv/sftp/inbox")
+		c := newConfig("/etc/gosftpd/config.toml", "teams/*/users.toml")
+		loaded(c, "/etc/gosftpd/teams/a/users.toml", "/etc/gosftpd/teams/b/users.toml")
+		link := "include: /etc/gosftpd/teams/a is a link to /srv/elsewhere/team-a, outside /etc/gosftpd/teams, so Landlock covers only that target"
+		checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, "dir /srv/elsewhere/team-a " + ro, inbox}, link)
+
+		// In a shared leading directory, read_dir on the target.
+		m.files("/etc/gosftpd/teams/README")
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"file /etc/gosftpd/config.toml " + rfile,
+			"dir /etc/gosftpd/teams " + rdir,
+			"file /etc/gosftpd/teams/b/users.toml " + rfile,
+			"dir /srv/elsewhere/team-a " + rdir,
+			"file /srv/elsewhere/team-a/users.toml " + rfile,
+			inbox,
+		},
+			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds teams"+shared,
+			link,
+			"include: Landlock covers only the include files found at start in /etc/gosftpd/teams, which holds README")
+	})
 	t.Run("a leading directory at the root", func(t *testing.T) {
 		t.Parallel()
 		m := newMemFS(t).files("/etc/gosftpd/config.toml").dirs("/srv/sftp/inbox")
