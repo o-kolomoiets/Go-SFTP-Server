@@ -74,6 +74,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
 | `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). |
+| `trusted_proxies` | `[]` | Load balancers that send a PROXY protocol header (v1 or v2), as addresses or CIDR blocks such as `["10.0.0.5", "10.0.1.0/28"]`; `/0` is refused. A connection from one of them must begin with a header, which names the client for bans, limits, `allow_from` and the audit log; a header from any other peer is refused. Reloadable. |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.

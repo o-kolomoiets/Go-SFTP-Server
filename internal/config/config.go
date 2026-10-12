@@ -80,6 +80,10 @@ type Server struct {
 	IdleTimeout       Duration `toml:"idle_timeout"`
 	KeepaliveInterval Duration `toml:"keepalive_interval"`
 	ShutdownTimeout   Duration `toml:"shutdown_timeout"`
+	// TrustedProxies are the load balancers whose connections begin with a
+	// PROXY protocol header that names the client (ADR 0011): addresses
+	// or CIDR blocks, as allow_from takes them. Reloadable.
+	TrustedProxies []string `toml:"trusted_proxies"`
 }
 
 // Reload is the [reload] table: what a reload on SIGHUP does besides

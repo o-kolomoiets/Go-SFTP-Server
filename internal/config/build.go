@@ -412,6 +412,18 @@ func (c *Config) Bans() *auth.BanTable {
 	})
 }
 
+// TrustedProxyPrefixes returns server.trusted_proxies, unmapped and
+// masked. Call after Validate.
+func (c *Config) TrustedProxyPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range c.Server.TrustedProxies {
+		if p, err := ParseTrustedProxy(s); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Grants returns the mounts user may access. In zero-config mode every user
 // gets full access to every mount (read-only mounts stay read-only).
 func (c *Config) Grants(user string) []vfs.Grant {

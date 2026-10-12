@@ -170,6 +170,8 @@ func TestMetricsMethods(t *testing.T) {
 	m.ConnectionEnded("no_version")
 	m.ConnectionEnded("bogus") // outside the set: dropped, but no longer active
 	m.ConnectionRefused("banned")
+	m.ConnectionStarted()
+	m.ConnectionEndedRefused("proxy_header") // refused after its admission: not a result
 	m.Login(true)
 	m.Login(false)
 	m.AuthAttempt("publickey", false)
@@ -194,6 +196,8 @@ func TestMetricsMethods(t *testing.T) {
 		`gosftpd_connections_active`:                                          0,
 		`gosftpd_connections_total{result="no_version"}`:                      1,
 		`gosftpd_connections_refused_total{reason="banned"}`:                  1,
+		`gosftpd_connections_refused_total{reason="proxy_header"}`:            1,
+		`gosftpd_connections_total{result="untrusted_proxy"}`:                 0,
 		`gosftpd_logins_total{result="success"}`:                              1,
 		`gosftpd_logins_total{result="failure"}`:                              1,
 		`gosftpd_auth_attempts_total{method="publickey",result="failure"}`:    1,
@@ -238,6 +242,7 @@ func TestNilMetrics(t *testing.T) {
 	m.ConnectionStarted()
 	m.ConnectionEnded("ok")
 	m.ConnectionRefused("banned")
+	m.ConnectionEndedRefused("proxy_header")
 	m.Login(true)
 	m.AuthAttempt("password", false)
 	m.Operation("fs.upload", "ok")

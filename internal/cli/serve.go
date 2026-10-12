@@ -476,6 +476,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if admin != nil {
 		startAttrs = append(startAttrs, slog.String("metrics_listen", admin.addr()))
 	}
+	startAttrs = append(startAttrs, trustedProxiesAttr(c)...)
 	al.Event("server.start", startAttrs...)
 
 	serveCtx, cancel := context.WithCancel(ctx)
@@ -557,9 +558,25 @@ func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table
 		MaxOpenHandles:        c.Limits.MaxOpenHandles,
 		MaxAuthTries:          c.Limits.MaxAuthTries,
 		DisconnectRevoked:     c.Reload.DisconnectRemovedUsers,
+		TrustedProxies:        c.TrustedProxyPrefixes(),
 	}
 	keys.apply(&cfg)
 	return cfg
+}
+
+// trustedProxiesAttr returns the trusted_proxies field of server.start and
+// server.reload, comma-separated as listen is, or none when no proxy is
+// trusted.
+func trustedProxiesAttr(c *config.Config) []slog.Attr {
+	prefixes := c.TrustedProxyPrefixes()
+	if len(prefixes) == 0 {
+		return nil
+	}
+	s := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		s[i] = p.String()
+	}
+	return []slog.Attr{slog.String("trusted_proxies", strings.Join(s, ","))}
 }
 
 // checkRoot refuses to serve as root unless allowed: a confinement bug

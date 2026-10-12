@@ -117,6 +117,7 @@ func (r *running) reload(ctx context.Context) bool {
 		if disconnected > 0 {
 			attrs = append(attrs, slog.Int("disconnected", disconnected))
 		}
+		attrs = append(attrs, trustedProxiesAttr(r.c)...)
 	}
 	r.al.Event("server.reload", append(attrs, slog.Int64("duration_ms", time.Since(start).Milliseconds()))...)
 	r.metrics.Reloaded(err == nil, time.Now())

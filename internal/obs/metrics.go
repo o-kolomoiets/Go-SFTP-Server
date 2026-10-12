@@ -14,11 +14,15 @@ import (
 // no value comes from a client (ADR 0009).
 var (
 	// ConnResults are the results of gosftpd_connections_total: those of
-	// conn.close, then no_version (the client sent nothing) and
+	// conn.close, then no_version (the client sent nothing),
 	// handshake_failed (it sent something, but never reached
-	// authentication).
-	ConnResults    = []string{"ok", "error", "idle_timeout", "keepalive_timeout", "revoked", "no_version", "handshake_failed"}
-	RefusedReasons = []string{"banned", "max_connections", "max_connections_per_ip", "max_preauth_connections", "audit_unavailable"}
+	// authentication) and untrusted_proxy (it began with a PROXY protocol
+	// header that gosftpd does not trust, ADR 0011).
+	ConnResults = []string{"ok", "error", "idle_timeout", "keepalive_timeout", "revoked", "no_version", "handshake_failed", "untrusted_proxy"}
+	// RefusedReasons are the reasons of gosftpd_connections_refused_total;
+	// proxy_header is a connection from a trusted proxy without a valid
+	// PROXY protocol header (ADR 0011).
+	RefusedReasons = []string{"banned", "max_connections", "max_connections_per_ip", "max_preauth_connections", "audit_unavailable", "proxy_header"}
 	AuthMethods    = []string{"publickey", "password", "other"}
 	Ops            = []string{"upload", "download", "rename", "mkdir", "rmdir", "remove", "setstat", "list", "stat", "other"}
 	OpResults      = []string{"ok", "denied", "not_found", "error", "aborted"}
@@ -164,6 +168,18 @@ func (m *Metrics) ConnectionEnded(result string) {
 // one of RefusedReasons.
 func (m *Metrics) ConnectionRefused(reason string) {
 	if m != nil {
+		m.refused.Add(1, reason)
+	}
+}
+
+// ConnectionEndedRefused ends an admitted connection that was refused
+// before the handshake, for one of RefusedReasons: a connection from a
+// trusted proxy is admitted before its PROXY protocol header names the
+// client (ADR 0011). It is no longer active and counts as refused, not in
+// gosftpd_connections_total.
+func (m *Metrics) ConnectionEndedRefused(reason string) {
+	if m != nil {
+		m.connsActive.Add(-1)
 		m.refused.Add(1, reason)
 	}
 }

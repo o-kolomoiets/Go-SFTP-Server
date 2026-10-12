@@ -2,10 +2,10 @@
   "comment": "Audit log schema 1 (ROADMAP §6.4). Within schema 1 fields are only added. Every line has the common fields; context fields appear once known; each event has its required and optional fields and nothing else.",
   "schema": 1,
   "common": ["time", "level", "msg", "schema", "event"],
-  "context": ["conn_id", "remote_addr", "local_addr", "user", "session_id"],
+  "context": ["conn_id", "remote_addr", "local_addr", "proxy_addr", "user", "session_id"],
   "events": {
-    "server.start": {"required": ["version", "listen"], "optional": ["metrics_listen"]},
-    "server.reload": {"required": ["result", "duration_ms"], "optional": ["reason", "restart_required", "disconnected"]},
+    "server.start": {"required": ["version", "listen"], "optional": ["metrics_listen", "trusted_proxies"]},
+    "server.reload": {"required": ["result", "duration_ms"], "optional": ["reason", "restart_required", "disconnected", "trusted_proxies"]},
     "server.stop": {},
     "server.audit_recovered": {},
     "conn.reject": {"required": ["reason"], "optional": ["suppressed"]},
