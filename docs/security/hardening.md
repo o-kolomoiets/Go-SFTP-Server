@@ -120,6 +120,14 @@ forward 22 in the firewall.
 - Behind NAT, many legitimate clients share one address: raise
   `max_connections_per_ip`, and list monitoring hosts in `auth.ban.exempt`
   rather than turning bans off.
+- Behind a load balancer, have it send PROXY protocol and list only its own
+  addresses in `server.trusted_proxies`; firewall gosftpd's port so that
+  nothing else reaches it
+  ([Behind a load balancer](../configuration.md#behind-a-load-balancer)).
+  The rate limit above then sees the load balancer, not the clients:
+  rate-limit on the load balancer, or leave its addresses out of the meter.
+  A load balancer on the same host without PROXY protocol makes every
+  client a loopback address, which bans exempt by default.
 - Bans live in memory; for longer bans, feed `auth.ban` audit events to
   fail2ban or the firewall.
 

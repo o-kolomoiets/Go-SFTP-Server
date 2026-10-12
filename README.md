@@ -474,6 +474,7 @@ To run it as a service under its own user, see the v0.3.0
 | Host key rotation without the `REMOTE HOST IDENTIFICATION HAS CHANGED` warning (OpenSSH 8.5+ clients), host certificates | | ✓ |
 | Prometheus `/metrics` (22 `gosftpd_*` metrics, no user, path or address in any label), `/healthz`, `/readyz`, `gosftpd healthcheck` | | ✓ |
 | Hooks: a signed webhook or a program when a file arrives, also for WinSCP and rclone temp-file uploads | | ✓ |
+| PROXY protocol behind HAProxy, nginx or a cloud load balancer: bans, limits and the audit log see the client, not the load balancer | | ✓ |
 
 To try `main` today: `init` sets you up, and `user add --write` adds a
 partner and prints the host, port, host key fingerprint and `sftp` command to
@@ -519,7 +520,7 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 | Version | Status | What's in it |
 |---|---|---|
 | v0.3.0 | **released** 2026-10-09 | Connection limits and bans, password login, versions, atomic uploads, size limits, fuzzing, ssh-audit in CI |
-| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks). To do: PROXY protocol v2, a systemd unit, Landlock |
+| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol. To do: a systemd unit, Landlock |
 | v0.5 | planned | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
 | v1.0 | planned | Compatibility freeze, benchmarks against OpenSSH, OpenSSF Best Practices badge |
 

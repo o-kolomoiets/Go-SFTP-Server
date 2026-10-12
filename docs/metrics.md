@@ -74,7 +74,7 @@ event.
 | `gosftpd_build_info` | gauge | `version`, `goversion` | Always 1. |
 | `gosftpd_connections_active` | gauge | | Admitted connections being served, before and after login. |
 | `gosftpd_connections_total` | counter | `result` | Admitted connections when they end, one result each: `ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked` (the `result` of `conn.close`); `no_version` (the client sent nothing: health checks, port scanners; from a trusted proxy also nothing but a `LOCAL` header); `handshake_failed` (it sent something but never reached authentication: no common algorithm, `ssh-keyscan`, a bad version line); `untrusted_proxy` (it began with a PROXY protocol header, after the server's banner, from a peer not in `server.trusted_proxies` or behind a trusted proxy's own header; audited as `conn.reject`). |
-| `gosftpd_connections_refused_total` | counter | `reason` | Connections refused before the handshake: `banned`, `max_connections`, `max_connections_per_ip`, `max_preauth_connections`, `audit_unavailable`, `proxy_header` (a peer in `server.trusted_proxies` sent no valid PROXY protocol header). Exact, unlike the `conn.reject` events, which are limited to 10 per second. A connection from a trusted proxy is admitted, and counted in `gosftpd_connections_active`, before its header names the client: when the ban or `max_connections_per_ip` of the client, or `proxy_header`, refuses it then, it counts here and not in `gosftpd_connections_total`. A refused connection counts in one of the two, never in both. |
+| `gosftpd_connections_refused_total` | counter | `reason` | Connections refused before the handshake: `banned`, `max_connections`, `max_connections_per_ip`, `max_preauth_connections`, `audit_unavailable`, `proxy_header` (a peer in `server.trusted_proxies` sent no valid PROXY protocol header). Exact, unlike the `conn.reject` events, which are limited to 10 per second; `conn.reject` with `reason=untrusted_proxy` is counted in `gosftpd_connections_total` instead, since that connection was refused only after the server's banner. A connection from a trusted proxy is admitted, and counted in `gosftpd_connections_active`, before its header names the client: when the ban or `max_connections_per_ip` of the client, or `proxy_header`, refuses it then, it counts here and not in `gosftpd_connections_total`. A refused connection counts in one of the two, never in both. |
 | `gosftpd_logins_total` | counter | `result` | Connections that reached authentication: `success` or `failure` (as `auth.success` and `auth.failure`). |
 | `gosftpd_auth_attempts_total` | counter | `method` (`publickey`, `password`, `other`), `result` (`success`, `failure`) | Authentication requests other than `none`. A key the server does not accept counts as a failure: an SSH agent that offers several keys makes several. |
 | `gosftpd_sftp_operations_total` | counter | `op`, `result` | One per SFTP operation when it ends; a transfer when it is closed, or when its open fails. `op`: `upload`, `download`, `rename`, `mkdir`, `rmdir`, `remove`, `setstat`, `list`, `stat`, `other` (symlink, link, readlink, statvfs). `result`: `ok`, `denied`, `not_found`, `error`, `aborted` (a transfer cut off by the end of the session). Counted whatever `audit.events` records. |
@@ -129,6 +129,11 @@ rate(gosftpd_transfer_bytes_total{direction="upload"}[5m])
 
 # Connections refused because a limit was reached
 sum by (reason) (rate(gosftpd_connections_refused_total{reason=~"max_.*"}[5m]))
+
+# PROXY protocol set up on one side only: a trusted load balancer that sends
+# no header, or a header from a peer that is not trusted
+rate(gosftpd_connections_refused_total{reason="proxy_header"}[5m])
+rate(gosftpd_connections_total{result="untrusted_proxy"}[5m])
 
 # 95th percentile transfer time
 histogram_quantile(0.95, sum by (le, direction) (rate(gosftpd_transfer_duration_seconds_bucket[1h])))

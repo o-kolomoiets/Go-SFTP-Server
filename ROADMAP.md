@@ -303,7 +303,7 @@ The `sftpd.fileHandler` type, a wrapper around `*vfs.Session`, implements `sftp.
 | — (own code, `internal/obs`) | Prometheus text format 0.0.4 | metrics (opt-in, ADR 0009; D12: no library) | M4 |
 | — (own code) | about 30 lines on top of `$NOTIFY_SOCKET` | `sd_notify`; `github.com/coreos/go-systemd/v22` is not used, to stay within the dependency limit | M4 |
 | `github.com/landlock-lsm/go-landlock` | v0.10.1 (MIT) | optional Linux sandbox | M4 |
-| `github.com/pires/go-proxyproto` | v0.15.0 | PROXY protocol v2 behind a load balancer (persona U2, opt-in) | M4 |
+| `github.com/pires/go-proxyproto` | v0.15.0 (minimum: earlier versions return a nil address for undefined v2 families) | PROXY protocol v1 and v2 behind a load balancer (persona U2; v1 because nginx sends only v1). Used as a parser only (`proxyproto.Read`): its `Listener` and `Conn` read the header lazily and would stall the accept loop; its `x/net` requirement does not enter the build (ADR 0011) | M4 |
 | `go.uber.org/goleak` | v1.3.0 (tests) | goroutine leak detection | M1 |
 
 This adds up to 9 direct runtime dependencies (`goleak` is test-only). Every new dependency requires removing another one or revisiting principle 8.
@@ -608,7 +608,12 @@ flowchart LR
   - `exec`: argv without a shell, env `GOSFTPD_EVENT/USER/MOUNT/PATH/FINAL_PATH/TARGET_PATH/HOST_PATH/CONN_ID`, the file's identity checked before each run, a timeout that kills the process group;
   - `webhook`: POST of the audit line, `X-Gosftpd-Signature` (HMAC-SHA256 over delivery ID, timestamp and body), retries with backoff, at least once while running;
   - asynchronous, with a bounded queue per hook; one process-wide dispatcher that a reload updates in place.
-- [ ] PROXY protocol v2 (`go-proxyproto` v0.15.0), opt-in `server.trusted_proxies = [CIDR]`; a PROXY header from any other address drops the connection.
+- [ ] **PROXY protocol** v1 and v2, `server.trusted_proxies = [CIDR]` (ADR 0011, after three rounds of design reviews):
+  - trust is decided by the TCP peer: a connection from a trusted address must begin with a header, one from any other address must not (it is refused after the banner, also when no proxy is trusted: a breaking change); reloadable, read at accept; `/0` is refused;
+  - `go-proxyproto` v0.15.0 as a parser only: the header is read in the connection's goroutine within `min(handshake_timeout, 10 s)`, never in the accept loop;
+  - admission in two phases: bans and `max_connections_per_ip` apply to the client the header names, never to the proxy for its clients; `LOCAL` and `UNKNOWN` are the proxy's own connections;
+  - `proxy_addr` in the audit log, `conn.reject` reasons `proxy_header` and `untrusted_proxy`, the same values in the metrics; `gosftpd healthcheck` sends `LOCAL` from a trusted address;
+  - interop with OpenSSH, paramiko and rclone through HAProxy (v1, v2, TLVs, Unix socket front ends) and nginx.
 - [ ] `packaging/systemd/gosftpd.service` (§9.4), `packaging/gosftpd.sysusers` and `packaging/gosftpd.tmpfiles`.
 - [ ] Optional on Linux: Landlock (`go-landlock` v0.10.1) after the listeners are bound, `landlock.V5.BestEffort().RestrictPaths(landlock.RWDirs(rw...), landlock.RODirs(ro...), landlock.ROFiles(cfg...))`:
   - the restrictions are irreversible: new mounts on SIGHUP require a restart;
@@ -792,6 +797,7 @@ Two streams. The **operational log** is written to stderr in text or JSON format
 | `conn_id`, `session_id` | hex(64 bit) | after accept / session | `9f3c2a17d0b4e6a1` |
 | `user` | string ≤ 64 | after auth | `alice` |
 | `remote_addr`, `local_addr` | string | always | `203.0.113.7:53122` |
+| `proxy_addr` | string | behind a trusted load balancer (ADR 0011) | `10.0.0.5:41022` |
 | `client_version` | string ≤ 128 | after KEX | `SSH-2.0-OpenSSH_9.6p1 ...` |
 | `auth_method`, `key_fp` | string | auth.* | `publickey`, `SHA256:...` |
 | `cert_key_id`, `cert_serial`, `cert_ca_fp` | string (the serial as a decimal string: CAs use random 64-bit serials) | with a certificate | `alice-laptop`, `"42"`, `SHA256:...` |
@@ -856,6 +862,7 @@ handshake_timeout = "30s"
 idle_timeout = "15m"
 keepalive_interval = "30s"
 shutdown_timeout = "30s"
+trusted_proxies = []                    # load balancers that send a PROXY protocol header (ADR 0011)
 
 [limits]
 max_connections = 256
@@ -1077,7 +1084,7 @@ output = "stdout"
 
 **P2 (M4–M6)**
 - [ ] Landlock (Linux); host certificates and key rotation; signed releases, SBOM, provenance.
-- [ ] PROXY protocol v2 (`github.com/pires/go-proxyproto` v0.15.0) only from `trusted_proxies`, if the server sits behind a load balancer.
+- [ ] PROXY protocol v1 and v2 (`github.com/pires/go-proxyproto` v0.15.0, as a parser only) only from `trusted_proxies`, if the server sits behind a load balancer; headers from every other peer refused (ADR 0011).
 - [ ] Recommendation in the documentation: `fs.protected_hardlinks=1` and `fs.protected_symlinks=1`.
 
 **P3 (post-1.0)**

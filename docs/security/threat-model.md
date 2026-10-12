@@ -34,6 +34,10 @@ trusted.
 
 - TCP listener and SSH version exchange; key exchange; user authentication
   (N1 → pre-auth).
+- PROXY protocol headers from the load balancers in
+  `server.trusted_proxies` (ADR 0011), which name the client address that
+  bans, limits, `allow_from` and the audit log use (load balancer →
+  pre-auth).
 - Connection layer: channels and global requests (pre-auth → session).
 - SFTP packets, including extensions (session → `internal/sftpd` →
   `internal/vfs` → `os.Root`).
@@ -59,6 +63,8 @@ trusted.
 | Spoofing | MITM on first connection (N2) | Host key fingerprint and `known_hosts` line printed at start; SHA-2 signatures only; host certificates for clients that trust a host CA (ADR 0008) | interop with `@cert-authority` |
 | Spoofing | Users trained to accept a changed host key after a rotation (N2) | `hostkey rotate`: OpenSSH clients learn the next key before it is used (`UpdateHostKeys`); the previous key stays announced until it is retired, so a rollback goes unnoticed; a compromised key is retired at once and revoked out of band (ADR 0008) | server and cli tests, interop with OpenSSH (ed25519 and RSA with `rsa-sha2-256`) |
 | Spoofing | Making the server sign chosen data with its host key | Proofs sign only `hostkeys-prove-00@openssh.com`, the session identifier and an announced key; one proof request per connection, after login | `FuzzHostKeyProof`, server tests |
+| Spoofing | Choosing the client address that bans, per-address limits, `allow_from`, `from=`, certificate `source-address` and the audit log see, with a PROXY protocol header (N1), or from a host or local process that can connect from a trusted address | Headers are read only from TCP peers in `server.trusted_proxies` (`/0` refused) and refused from every other peer, also with the list empty and after a trusted header; only TCP clients can be named; a loopback or unspecified client only from a proxy on this host; the proxy recorded as `proxy_addr`; docs: trust only the load balancers' own addresses, an nftables rule for a proxy on loopback, never Kubernetes node or pod ranges (ADR 0011) | server tests over pipes and real sockets, `FuzzProxyHeader`, interop with HAProxy and nginx |
+| Repudiation | Clients logged with a load balancer's address, because x/crypto skips a PROXY header it was not told about | A header from a peer that is not trusted ends the connection after the banner (`untrusted_proxy`) | server tests, interop |
 | Tampering | Leaving a mount through `..`, absolute paths, symlinks (N3) | One `resolve` for every path; `os.Root` per mount; links cannot be created | `FuzzResolve`, `FuzzResolveInRoot`, `FuzzRequestServer`, interop |
 | Tampering | Swapping a `{user}` home or a mount for a symlink or another mount (N4) | Parent `os.Root`, `Lstat` and `os.SameFile` for homes; `require_mountpoint` | vfs tests |
 | Tampering | A client writing a file gosftpd trusts (a key, an included user file, the configuration, the audit log), which a reload would apply (N3) | `CheckFS` refuses trusted files inside writable mounts, including those that connections of an earlier configuration still use, and host keys and configuration files inside any mount, at start and on reload; symlinks and Linux bind mounts are followed | config tests |
@@ -71,6 +77,7 @@ trusted.
 | Information disclosure | Reading through planted hard links or bind mounts (N4) | Not prevented by `os.Root`; documented limit | — |
 | Information disclosure | Learning versions, users or load from the admin listener (N1) | Off by default; a warning when it is not on loopback; when gosftpd binds loopback, requests must name a loopback host (DNS rebinding gets 421; not with Docker's `0.0.0.0` bind); labels hold no user, path, address or fingerprint; pprof only in binaries built for it, off by default, without `cmdline` (ADR 0009) | obs and cli tests, interop with promtool |
 | Denial of service | Connection floods, slow handshakes (N1) | Connection limits before the handshake; handshake, idle and keepalive timeouts; bans | 1000-connection test, synctest timeouts |
+| Denial of service | Getting a load balancer banned or limited for its clients, or stalling the accept loop with a slow PROXY header (N1) | Bans and `max_connections_per_ip` apply to the client the header names, never to the load balancer for them; the header is read in the connection's goroutine within `handshake_timeout`, at most 10 s; `config validate` warns when `trusted_proxies` overlaps `auth.ban.exempt` | server tests under synctest |
 | Denial of service | Password hashing exhaustion (N1) | Opt-in passwords, bounded hash costs, one check per CPU, 1024-byte limit | auth tests |
 | Denial of service | File descriptor or memory exhaustion through handles (N3) | 64 handles per session | handle limit test |
 | Denial of service | Filling the disk, sparse writes (N3) | `max_file_size` on the end of every write, `min_free_space` | vfs tests |
@@ -104,6 +111,12 @@ trusted.
   the Diffie-Hellman groups make each exchange costlier; rate-limit new
   connections in the firewall for servers on the internet (see
   [hardening.md](hardening.md)).
+- Whoever can connect from an address in `server.trusted_proxies` can name
+  any client address; gosftpd cannot tell the load balancer from another
+  process or host that uses that address (see
+  [What trust means](../configuration.md#what-trust-means)). The clients of
+  a load balancer's Unix socket front end arrive as its own connections and
+  share its ban entry: one of them can get the load balancer banned.
 - The admin listener has no authentication or TLS; who can reach it can
   read the metrics, and with pprof on, profile the process (see
   [hardening.md](hardening.md#admin-listener)).

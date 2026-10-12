@@ -8,6 +8,11 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+Before upgrading a server behind a load balancer that sends PROXY protocol
+headers, list the load balancer in `server.trusted_proxies` or turn PROXY
+protocol off there: headers from any other address are now refused (see
+Changed).
+
 ### Added
 
 - Reload on SIGHUP (`systemctl reload`): the audit log file is reopened
@@ -114,6 +119,22 @@ Incompatible changes are prefixed with **BREAKING:**.
   hour, of a file whose upload closed ok: the rename that completes a
   temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
   upload renamed later. `fs.upload` hooks fire for it.
+- PROXY protocol v1 and v2 behind a load balancer
+  ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md)): a connection from
+  an address in the new `server.trusted_proxies` must begin with a PROXY
+  protocol header, which names the client. Bans, `max_connections_per_ip`,
+  `allow_from`, `from=`, certificate `source-address` and the audit log's
+  `remote_addr` and `local_addr` then see the client, and the new context
+  field `proxy_addr` names the load balancer. `LOCAL` and `UNKNOWN` headers
+  (health checks, clients of a Unix socket front end) are the load
+  balancer's own connections. A trusted peer that sends no valid header is
+  refused (`conn.reject` with `reason=proxy_header`,
+  `gosftpd_connections_refused_total{reason="proxy_header"}`); one that sends
+  nothing at all, as a TCP health check, is not audited. The setting is
+  reloadable, and `server.start` and `server.reload` record it.
+  `gosftpd healthcheck` sends a `LOCAL` header when its own address is
+  trusted. See
+  [docs/configuration.md](docs/configuration.md#behind-a-load-balancer).
 
 ### Changed
 
@@ -148,6 +169,20 @@ Incompatible changes are prefixed with **BREAKING:**.
   with a warning, now take effect: check existing files before upgrading. In
   zero-config mode without `--user`, a `cert-authority` line needs
   `principals=`.
+- **BREAKING:** a connection that begins with a PROXY protocol header (v1 or
+  v2) from a peer that is not in `server.trusted_proxies` is closed after
+  the server's banner, also when no proxy is trusted: `conn.reject` with
+  `reason=untrusted_proxy`, `gosftpd_connections_total{result="untrusted_proxy"}`
+  and a warning in the log. Before, a v1 header, and a v2 header whose last
+  byte is a line feed, were skipped, and every client was logged, banned and
+  limited with the load balancer's address; other v2 headers failed the
+  handshake.
+  If a load balancer sends PROXY protocol to gosftpd, list it in
+  `server.trusted_proxies` (reload gosftpd first, then the load balancer),
+  or turn PROXY protocol off on the load balancer.
+- `conn.reject` means a connection refused before the SSH handshake: for
+  `untrusted_proxy` that is after the server's banner, and from a trusted
+  load balancer after its header.
 
 ### Fixed
 

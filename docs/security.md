@@ -54,6 +54,12 @@ vulnerabilities as described in [SECURITY.md](../SECURITY.md).
 - Bans are a soft limit: a burst over many parallel connections can get
   up to about `max_connections_per_ip` more password checks than
   `after_failures` before the ban stops it.
+- Behind a load balancer listed in `server.trusted_proxies`, limits, bans
+  and `allow_from` apply to the client its PROXY protocol header names, and
+  a load balancer is never banned for its clients. A header from any other
+  peer ends the connection, so a client cannot choose its own address; but
+  whoever can connect from a trusted address can (see
+  [What trust means](configuration.md#what-trust-means)).
 - Refused connections are logged at most 10 per second.
 
 ## Protocol robustness

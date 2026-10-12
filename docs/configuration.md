@@ -74,7 +74,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
 | `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). |
-| `trusted_proxies` | `[]` | Load balancers that send a PROXY protocol header (v1 or v2), as addresses or CIDR blocks such as `["10.0.0.5", "10.0.1.0/28"]`; `/0` is refused. A connection from one of them must begin with a header, which names the client for bans, limits, `allow_from` and the audit log; a header from any other peer is refused. Reloadable. |
+| `trusted_proxies` | `[]` | Load balancers that send a PROXY protocol header (v1 or v2), as addresses or CIDR blocks such as `["10.0.0.5", "10.0.1.0/28"]`; `/0` is refused. A connection from one of them must begin with a header, which names the client for bans, limits, `allow_from` and the audit log; a header from any other peer is refused. Reloadable. See [Behind a load balancer](#behind-a-load-balancer). |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.
@@ -90,11 +90,15 @@ similar scanners flag its additions. SHA-1, CBC and DSA are never offered.
 
 ## `[limits]`
 
-Connections over a limit are closed right after they are accepted, before
-the SSH handshake, and logged as `conn.reject`. Behind a TCP proxy or load
-balancer every client has the proxy's address, so per-address limits and
-bans apply to all of them together; raise `max_connections_per_ip` and add
-the proxy to `auth.ban.exempt`.
+Connections over a limit are closed before the SSH handshake, and logged as
+`conn.reject`: right after they are accepted, or, from a load balancer in
+`server.trusted_proxies`, once its PROXY protocol header has named the
+client. Behind a TCP proxy or load balancer that sends no such header, every
+client has the proxy's address, so per-address limits and bans apply to all
+of them together. Let the load balancer send PROXY protocol and list it in
+`server.trusted_proxies` ([Behind a load balancer](#behind-a-load-balancer));
+where it cannot, raise `max_connections_per_ip` and add it to
+`auth.ban.exempt`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -625,6 +629,145 @@ plain host key algorithms (rclone: `host_key_algorithms = ssh-ed25519`) or
 trust the CA. paramiko does not support host certificates; it keeps using
 the plain key.
 
+## Behind a load balancer
+
+Behind HAProxy, nginx or a cloud load balancer, every connection comes from
+the load balancer. gosftpd then sees one address for all clients: one
+client's failed logins ban them all, and `max_connections_per_ip` counts
+them as one. With the PROXY protocol the load balancer names the client at
+the start of each connection. List the load balancers' own addresses in
+`server.trusted_proxies` and turn the protocol on there:
+
+```toml
+[server]
+listen = [":2022"]
+trusted_proxies = ["10.0.0.5", "10.0.1.0/28"]
+```
+
+```
+# HAProxy
+listen sftp
+    mode tcp
+    bind :22
+    server gosftpd 10.0.0.20:2022 send-proxy-v2 check
+
+# nginx (stream module)
+stream {
+    server {
+        listen 22;
+        proxy_pass 10.0.0.20:2022;
+        proxy_protocol on;
+    }
+}
+```
+
+- A connection from an address in `trusted_proxies` must begin with a
+  header, v1 (text; nginx sends only this) or v2 (binary). gosftpd reads it
+  before it sends its banner. The header must be complete within
+  `handshake_timeout`, and at most 10 s, of the accept; the SSH handshake
+  keeps its own deadline, also counted from the accept. `config validate`
+  warns when `handshake_timeout` is below 3 s, the least the protocol asks
+  for.
+- A connection from a trusted address that sends nothing before it ends or
+  the deadline passes (a TCP health check) is not audited;
+  `gosftpd_connections_total` counts it as `no_version`. Anything else that
+  is not a valid header (an SSH version line, a header cut short, a header
+  for a client over UDP or a Unix socket) closes the connection:
+  `conn.reject` with `reason=proxy_header`, and a warning in the log, at
+  most once a minute, that names the load balancer and what it sent
+  instead.
+- A connection from any other address must not begin with a header. gosftpd
+  checks the first bytes each client sends after the server's banner, and
+  closes the connection when they are a header: `conn.reject` with
+  `reason=untrusted_proxy`, and a warning, at most once a minute. This holds
+  also when `trusted_proxies` is empty, and for a second header after a
+  trusted one (a client that sends its own, or two proxies in a row). No SSH
+  client starts with these bytes.
+- The client the header names is `remote_addr` in the audit log and in hook
+  events. Bans, `max_connections_per_ip`, `allow_from`, `from=` in
+  `authorized_keys` and a certificate's `source-address` apply to it, also
+  when a reload checks open connections again. `local_addr` is the address
+  the client connected to, and `proxy_addr` the load balancer, on every
+  event of the connection. Until the header is read, the connection counts
+  against `max_connections` and `max_preauth_connections` only: a load
+  balancer is never banned or limited for the clients it names.
+- `LOCAL` (v2) and `UNKNOWN` (v1), which load balancers send for their own
+  health checks and for clients that reached them over a Unix socket, make
+  the connection the load balancer's own, with its address. These
+  connections share the load balancer's ban entry and its
+  `max_connections_per_ip`: one client of a Unix socket front end can get
+  the load balancer banned, and then its health checks refused. Pass the
+  client on with PROXY protocol on every hop instead (HAProxy:
+  `accept-proxy` on the socket's `bind` line). `config validate` warns when
+  `trusted_proxies` overlaps `auth.ban.exempt` (by default loopback): such
+  connections are then never banned.
+- A header whose client is a loopback or unspecified address (`127.0.0.1`,
+  `::1`, `0.0.0.0`, `::`) is refused as `proxy_header` unless the load
+  balancer runs on this host: it connects from loopback, or from the very
+  address it connects to. In `allow_from`, `from=`, `source-address` and
+  `auth.ban.exempt`, loopback keeps meaning this host.
+- TLVs, such as a load balancer's unique ID or a CRC32C checksum, are
+  ignored.
+
+### What trust means
+
+Whoever can connect to gosftpd from a trusted address chooses the client
+address that bans, limits, `allow_from`, `from=`, `source-address` and the
+audit log see. List only addresses that never carry direct client traffic:
+the load balancers' own, not a NAT gateway or Docker's userland proxy that
+clients also come through. The setting applies to every listener, so such
+an address cannot be trusted at all. Keep everyone else from reaching
+gosftpd's port directly, with a firewall or a security group that admits
+only the load balancers.
+
+- **A load balancer on the same host.** A loopback entry, or one of the
+  host's own addresses, trusts every local user and every container of a
+  Kubernetes pod. Let only the load balancer's user, and the user that runs
+  `gosftpd healthcheck` (root, or gosftpd's own user), connect to the port
+  over loopback; connections to the host's own addresses go over loopback
+  too. With nftables, for HAProxy running as `haproxy`:
+
+  ```
+  table inet gosftpd_loopback {
+      chain output {
+          type filter hook output priority filter; policy accept;
+          oifname "lo" tcp dport 2022 ct state new meta skuid != { haproxy, gosftpd, root } reject with tcp reset
+      }
+  }
+  ```
+
+  Load it with `nft -f FILE`; the users must exist then.
+- **AWS Network Load Balancer.** With instance targets it keeps the client's
+  address by default, and gosftpd sees the client itself. Leave proxy
+  protocol off there and `trusted_proxies` empty. Where you turn it on
+  (proxy protocol v2 on the target group), list the load balancer's private
+  addresses.
+- **Kubernetes.** Never trust node or pod ranges: every pod, and every node
+  that forwards a Service's traffic, could then name any client. Set
+  `externalTrafficPolicy: Local` on the Service, so that connections reach
+  gosftpd from the load balancer's own addresses instead of through another
+  node, and list those.
+
+A header from an address that is not trusted is refused with a warning that
+names the peer. If that is a client's address, the load balancer already
+keeps client addresses: turn PROXY protocol off there.
+
+### Turning it on, and health checks
+
+`trusted_proxies` is reloadable. Each connection is classified by the
+configuration current at its accept, so a reload does not affect open
+connections. The two sides cannot switch at the same moment: reload
+gosftpd first, then the load balancer. In between, the load balancer's
+connections without a header are refused as `proxy_header`.
+
+The load balancer's health checks work when they send the header (HAProxy's
+`check` does) or nothing at all (a bare TCP connect); see
+[interop.md](interop.md#load-balancers) for HAProxy's check options.
+`gosftpd healthcheck` reads `server.trusted_proxies` from the configuration
+file and, when its own address is trusted, sends a `LOCAL` header before it
+waits for the banner. A probe from a trusted address that sends no header
+gets no banner; see [metrics.md](metrics.md#gosftpd-healthcheck).
+
 ## Reload
 
 On SIGHUP gosftpd first reopens the audit log file (for logrotate), then
@@ -660,6 +803,9 @@ command-line flags and environment, and checks it like `config validate
   out until a reload fixes it; one whose `secret_file` cannot be used keeps
   its running secret. Both give a warning, count in
   `gosftpd_hooks_not_updated`, and do not fail the reload.
+- **Trusted proxies** (`server.trusted_proxies`) apply to connections
+  accepted after the reload; open connections keep the classification they
+  got at accept (see [Turning it on](#turning-it-on-and-health-checks)).
 - **Restart only:** `server.listen`, `server.host_key_auto_generate`,
   `server.crypto_policy`, `log.format`, `audit.events`, `audit.on_error`
   and `metrics.listen`. A change is logged as a warning and listed in the
