@@ -10,10 +10,46 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 )
 
-// Ready reports that the service has started, or finished a reload.
+// Ready reports that the service has started.
 func Ready() error { return Notify("READY=1") }
+
+// Reloaded reports that a reload has finished, with its result as the
+// status that systemctl status shows: under Type=notify-reload, systemctl
+// reload succeeds whatever the result.
+func Reloaded(ok bool, restartRequired []string) error {
+	return Notify("READY=1\nSTATUS=" + ReloadStatus(ok, restartRequired))
+}
+
+// maxStatusKeys is how many keys of restart_required a reload status
+// names. systemd drops a notify message over 4096 bytes whole, READY=1
+// with it, and the reload would then time out.
+const maxStatusKeys = 5
+
+// ReloadStatus is the STATUS= text after a reload: whether it worked, and
+// the settings that need a restart to change.
+func ReloadStatus(ok bool, restartRequired []string) string {
+	switch {
+	case !ok:
+		return "configuration reload failed, see the log"
+	case len(restartRequired) == 0:
+		return "configuration reloaded"
+	case len(restartRequired) <= maxStatusKeys:
+		return "configuration reloaded; restart needed for: " + strings.Join(restartRequired, ", ")
+	}
+	return "configuration reloaded; restart needed for: " + strings.Join(restartRequired[:maxStatusKeys], ", ") +
+		" and " + strconv.Itoa(len(restartRequired)-maxStatusKeys) + " more; see the log"
+}
+
+// ExtendTimeout asks systemd for d more time, from now, to finish the
+// current state, such as stopping: TimeoutStopSec is fixed, while the
+// time a stop needs can change at a reload. systemd only ever extends.
+func ExtendTimeout(d time.Duration) error {
+	return Notify("EXTEND_TIMEOUT_USEC=" + strconv.FormatInt(d.Microseconds(), 10))
+}
 
 // Reloading reports that a reload has started. systemd ≥ 253 needs the
 // monotonic timestamp for Type=notify-reload.

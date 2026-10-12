@@ -63,6 +63,37 @@ func TestReloading(t *testing.T) {
 	}
 }
 
+// EXTEND_TIMEOUT_USEC goes in a datagram of its own, in microseconds.
+func TestExtendTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notify")
+	c := listen(t, path)
+	t.Setenv("NOTIFY_SOCKET", path)
+	if err := ExtendTimeout(40 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := receive(t, c); got != "EXTEND_TIMEOUT_USEC=40000000" {
+		t.Errorf("received %q", got)
+	}
+}
+
+func TestReloaded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notify")
+	c := listen(t, path)
+	t.Setenv("NOTIFY_SOCKET", path)
+	if err := Reloaded(true, []string{"server.listen"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := receive(t, c), "READY=1\nSTATUS=configuration reloaded; restart needed for: server.listen"; got != want {
+		t.Errorf("received %q, want %q", got, want)
+	}
+	if err := Reloaded(false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := receive(t, c), "READY=1\nSTATUS=configuration reload failed, see the log"; got != want {
+		t.Errorf("received %q, want %q", got, want)
+	}
+}
+
 func TestAbstractSocket(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("abstract sockets are Linux-only")
