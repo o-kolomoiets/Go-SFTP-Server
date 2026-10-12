@@ -412,7 +412,7 @@ wrong, [open an issue](https://github.com/o-kolomoiets/go-sftp-server/issues).
 ## Client compatibility
 
 CI tests every change with OpenSSH `sftp` and `scp`, paramiko, rclone and
-lftp. Things to know:
+lftp, directly and through HAProxy and nginx. Things to know:
 
 - `scp` works over the SFTP protocol, the default since OpenSSH 9.0; legacy
   `scp -O` does not.

@@ -133,7 +133,7 @@ Changed).
   nothing at all, as a TCP health check, is not audited. The setting is
   reloadable, and `server.start` and `server.reload` record it.
   `gosftpd healthcheck` sends a `LOCAL` header when its own address is
-  trusted. See
+  trusted. Tested with HAProxy and nginx. See
   [docs/configuration.md](docs/configuration.md#behind-a-load-balancer).
 
 ### Changed

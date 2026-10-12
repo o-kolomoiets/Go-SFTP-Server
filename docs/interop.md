@@ -10,6 +10,13 @@ change. Tested:
 | rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount; with a host certificate served, `known_hosts_file` with the plain key fails and `host_key_algorithms` fixes it |
 | lftp | 4.9.2 | put, get, listing |
 | promtool | 3.5.0 | `promtool check metrics` on the `/metrics` output of a server that served the clients above |
+| HAProxy | 2.8.16 (Ubuntu 24.04) | As a load balancer that sends PROXY protocol headers ([below](#load-balancers)): OpenSSH `sftp`, paramiko and rclone through `send-proxy` (v1), `send-proxy-v2`, `send-proxy-v2` with TLVs (`unique-id`, `ssl`, `crc32c`) and Unix socket front ends (`UNKNOWN`, `LOCAL`), with `remote_addr`, `local_addr` and `proxy_addr` checked in the audit log; health checks (with a v1 or `LOCAL` header, one that waits for the banner, a bare connect) pass and leave no audit event; a proxy that is not trusted, and a trusted one without `send-proxy`, are refused |
+| nginx | 1.24.0 (Ubuntu 24.04) | The stream module with `proxy_protocol on` (v1): OpenSSH `sftp`, paramiko and rclone, with the audit fields checked |
+
+The same run sends v1 and v2 headers straight to gosftpd from an address it
+does not trust (refused after the banner, `untrusted_proxy`), and runs
+`gosftpd healthcheck` from a trusted loopback address (it sends a `LOCAL`
+header) and from one that is not trusted.
 
 WinSCP, FileZilla and Cyberduck are not tested automatically yet; WinSCP has
 a manual checklist below.
@@ -87,6 +94,30 @@ mount `inbox` and one with `full` on mount `files`.
 | 8 | Disconnect and reconnect during a large upload with `resume = "append-only"` | WinSCP offers to resume; the result is identical to the source. |
 | 9 | Synchronize a local folder to `files` (Commands → Synchronize) | Runs without errors; a second run finds nothing to do. |
 | 10 | Check the audit log | Every step is there with `user`, `path` and `final_path`. |
+
+### Load balancers
+
+gosftpd reads the PROXY protocol header of the load balancers listed in
+`server.trusted_proxies` and refuses headers from anyone else; see
+[Behind a load balancer](configuration.md#behind-a-load-balancer).
+
+- **HAProxy**: add `send-proxy-v2` (or `send-proxy` for v1) to the `server`
+  line. Its default health check (`check`) sends a header too, `LOCAL` for
+  v2 and a v1 line with HAProxy's own addresses for v1, and passes. A check
+  that waits for the banner (`option tcp-check` with `tcp-check expect
+  rstring ^SSH-2\.0-`) passes as long as HAProxy opens its connection
+  itself; with `check port N` add `check-send-proxy`. An explicit
+  `tcp-check connect` sends no header, so such a check times out: write
+  `tcp-check connect send-proxy`. A check that only connects passes without
+  a header, and gosftpd counts it as `no_version`.
+- **HAProxy with a Unix socket front end**: its clients have no TCP address,
+  so HAProxy sends `UNKNOWN` (v1) or `LOCAL` (v2), and gosftpd sees them as
+  the proxy's own connections, with the proxy's address. If the hop before
+  the socket knows the client, pass it on with PROXY protocol as well
+  (`accept-proxy` on the `bind` line).
+- **nginx**: the stream module (on Debian and Ubuntu the package
+  `libnginx-mod-stream`) with `proxy_protocol on;` in the `server` block. It
+  sends v1 only; gosftpd accepts both versions.
 
 ### Clients that append at offset 0
 

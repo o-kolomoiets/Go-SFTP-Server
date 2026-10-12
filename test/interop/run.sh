@@ -4,7 +4,9 @@
 # openssh-client and Go. KEEP_WORK=1 keeps the work directory for inspection.
 #
 # paramiko, rclone and lftp are tested when available (PYTHON with paramiko,
-# RCLONE, lftp in PATH); REQUIRE_CLIENTS=1 makes a missing one a failure.
+# RCLONE, lftp in PATH), and so are HAProxy and nginx with its stream module
+# as PROXY protocol load balancers; REQUIRE_CLIENTS=1 makes a missing one a
+# failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -858,11 +860,394 @@ else
 	missing python3
 fi
 
+# --- PROXY protocol behind HAProxy and nginx (ADR 0011) ----------------------
+# gosftpd trusts 127.0.0.2: the load balancers connect from there and name
+# their clients, which connect to them from 127.0.0.1, in a PROXY protocol
+# header. Whoever connects to gosftpd itself from 127.0.0.1 is not trusted.
+P="$WORK/proxy"
+mkdir -p "$P/etc" "$P/state" "$P/data" "$P/audit" "$P/haproxy" "$P/nginx"
+used_ports=" ${OVERWRITE_PORT:-} ${PORT:-} ${MPORT:-} ${HPORT:-} ${KPORT:-} "
+free_port() { # free_port VAR: sets VAR to a port nothing listens on and that was not handed out before
+	local p
+	while :; do
+		p=$((20000 + RANDOM % 12000))
+		case "$used_ports" in *" $p "*) continue ;; esac
+		(exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null || break
+	done
+	used_ports+="$p "
+	printf -v "$1" %s "$p"
+}
+for v in PPORT PMPORT FE_V1 FE_V2 FE_TLV FE_UNIX_V1 FE_UNIX_V2 FE_UNTRUSTED FE_NOHEADER FE_STATS FE_NGINX; do free_port "$v"; done
+cat >"$P/etc/gosftpd.toml" <<TOML
+config_version = 1
+
+[server]
+listen = ["127.0.0.1:$PPORT"]
+host_keys = ["$P/state/host_key"]
+host_key_auto_generate = true
+trusted_proxies = ["127.0.0.2"]
+
+[mounts.data]
+path = "$P/data"
+
+[users.openssh]
+authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
+access = { data = "full" }
+
+[users.paramiko]
+authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
+access = { data = "full" }
+
+[users.rclone]
+authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
+access = { data = "full" }
+
+[audit]
+output = "$P/audit/audit.jsonl"
+
+[metrics]
+listen = "127.0.0.1:$PMPORT"
+TOML
+chmod 600 "$P/etc/gosftpd.toml"
+if "$WORK/gosftpd" config validate --check-fs --config "$P/etc/gosftpd.toml" >/dev/null 2>"$P/validate.err" &&
+	grep -q 'server.trusted_proxies: 127.0.0.2/32 overlaps auth.ban.exempt (127.0.0.0/8)' "$P/validate.err"; then
+	pass "proxy: config validate warns that the clients of a proxy's Unix socket front end would never be banned"
+else
+	fail "proxy: config validate: $(cat "$P/validate.err")"
+fi
+"$WORK/gosftpd" serve --config "$P/etc/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$P/server.log" &
+PROXY_PID=$!
+PIDS+=("$PROXY_PID")
+for _ in $(seq 100); do
+	if (exec 3<>"/dev/tcp/127.0.0.1/$PPORT") 2>/dev/null && curl -fsS -o /dev/null "http://127.0.0.1:$PMPORT/healthz" 2>/dev/null; then break; fi
+	sleep 0.1
+done
+for p in "$PPORT" "$FE_V1" "$FE_V2" "$FE_TLV" "$FE_UNIX_V1" "$FE_UNIX_V2" "$FE_UNTRUSTED" "$FE_NOHEADER" "$FE_NGINX"; do
+	"$WORK/gosftpd" hostkey show --host-key "$P/state/host_key" --known-hosts "127.0.0.1:$p" | tail -n 1
+done >"$P/known_hosts"
+p_count() { grep -c -- "$1" "$P/audit/audit.jsonl" || true; }
+p_wait() { # p_wait PATTERN [N]: waits until more than N (0) audit lines match PATTERN
+	for _ in $(seq 50); do
+		if [ "$(p_count "$1")" -gt "${2:-0}" ]; then return 0; fi
+		sleep 0.1
+	done
+	return 1
+}
+pmetric() { # pmetric SERIES: its value on the proxy server's /metrics, 0 when absent
+	curl -fsS "http://127.0.0.1:$PMPORT/metrics" 2>/dev/null | awk -v s="$1" '$1 == s { v = $2 } END { print v + 0 }'
+}
+p_sftp() { # p_sftp PORT BATCH: OpenSSH sftp as the user openssh to 127.0.0.1:PORT
+	sftp -P "$1" -o "UserKnownHostsFile=$P/known_hosts" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes \
+		-i "$WORK/id_admin" -b "$2" openssh@127.0.0.1
+}
+p_wait '"event":"server.start".*"trusted_proxies":"127.0.0.2/32"' && pass "proxy: server.start records trusted_proxies" ||
+	fail "proxy: server.start: $(head -1 "$P/audit/audit.jsonl")"
+
+# A header sent straight to gosftpd from an address it does not trust is
+# refused after the banner (a client that waits for the banner never waits).
+direct_header() { # direct_header BYTES: reads the banner, sends BYTES (printf %b) and waits for the server to close
+	local banner= rc=0
+	exec 3<>"/dev/tcp/127.0.0.1/$PPORT"
+	IFS= read -r -t 5 banner <&3 || true
+	printf '%b' "$1" >&3
+	timeout 5 cat <&3 >/dev/null 2>&1 || rc=$?
+	exec 3<&-
+	[[ $banner == SSH-2.0-* ]] && [ "$rc" != 124 ]
+}
+untrusted='"remote_addr":"127\.0\.0\.1:[0-9]*","local_addr":"127\.0\.0\.1:'"$PPORT"'","schema":1,"event":"conn\.reject","reason":"untrusted_proxy"'
+if direct_header 'PROXY TCP4 192.0.2.1 127.0.0.1 51000 22\r\n' &&
+	direct_header '\r\n\r\n\x00\r\nQUIT\n\x21\x11\x00\x0c\xc0\x00\x02\x01\x7f\x00\x00\x01\xc7\x38\x00\x16'; then
+	pass "proxy: v1 and v2 headers from an untrusted client get the banner, then the connection is closed"
+else
+	fail "proxy: a header from an untrusted client was not refused after the banner"
+fi
+p_wait "$untrusted" 1 && grep -q 'PROXY protocol header from a peer not in server.trusted_proxies.*peer=127.0.0.1' "$P/server.log" &&
+	pass "proxy: audit has conn.reject untrusted_proxy for the client, the log a warning" ||
+	fail "proxy: untrusted headers: $(grep '"conn.reject"' "$P/audit/audit.jsonl")"
+want_untrusted=2 want_header=0
+
+# The clients that go through the load balancers: OpenSSH sftp, and paramiko
+# and rclone when they are installed.
+p_clients=(openssh)
+if "$PYTHON" -c 'import paramiko' 2>/dev/null; then p_clients+=(paramiko); else missing paramiko; fi
+if command -v "$RCLONE" >/dev/null 2>&1; then p_clients+=(rclone); else missing rclone; fi
+for v in $(compgen -e | grep '^RCLONE_' || true); do unset "$v"; done
+# p_upload NAME:PORT...: each client uploads a file named after itself and
+# the front end NAME, through 127.0.0.1:PORT.
+p_upload() {
+	local fe name port
+	for fe in "$@"; do
+		name=${fe%%:*} port=${fe##*:}
+		printf 'put %s /openssh-%s.txt\n' "$WORK/local/short.txt" "$name" >"$P/put.batch"
+		p_sftp "$port" "$P/put.batch" >"$P/sftp-$name.out" 2>&1 || fail "proxy: sftp through $name: $(cat "$P/sftp-$name.out")"
+		if [[ " ${p_clients[*]} " == *" rclone "* ]]; then
+			"$RCLONE" --config /dev/null --retries 1 --low-level-retries 1 copyto "$WORK/local/short.txt" \
+				":sftp,host=127.0.0.1,port=$port,user=rclone,key_file=$WORK/id_admin,known_hosts_file=$P/known_hosts,shell_type=none:rclone-$name.txt" \
+				2>"$P/rclone-$name.err" || fail "proxy: rclone through $name: $(tail -3 "$P/rclone-$name.err")"
+		fi
+	done
+	if [[ " ${p_clients[*]} " == *" paramiko "* ]]; then
+		"$PYTHON" - "$P/known_hosts" "$WORK/id_admin" "$WORK/local/short.txt" "$@" <<'PY' || fail "proxy: paramiko through $*"
+import sys, paramiko
+kh, key, src = sys.argv[1:4]
+for fe in sys.argv[4:]:
+    name, port = fe.split(":")
+    c = paramiko.SSHClient()
+    c.load_host_keys(kh)
+    c.set_missing_host_key_policy(paramiko.RejectPolicy())
+    c.connect("127.0.0.1", port=int(port), username="paramiko", key_filename=key, allow_agent=False, look_for_keys=False, timeout=10)
+    c.open_sftp().put(src, "/paramiko-%s.txt" % name)
+    c.close()
+PY
+	fi
+}
+# p_proxied CLIENT NAME LOCAL: CLIENT's file uploaded through the front end
+# NAME is there, and each audit event of it names the client 127.0.0.1 and
+# the proxy 127.0.0.2, or for a Unix socket front end the proxy as both;
+# local_addr is LOCAL.
+p_proxied() {
+	local client=$1 name=$2 dst=${3//./\\.} want events
+	case $name in
+	unix-*) want='"remote_addr":"(127\.0\.0\.2:[0-9]+)","local_addr":"'"$dst"'","proxy_addr":"\1"' ;;
+	*) want='"remote_addr":"127\.0\.0\.1:[0-9]+","local_addr":"'"$dst"'","proxy_addr":"127\.0\.0\.2:[0-9]+"' ;;
+	esac
+	events=$(grep -F "\"user\":\"$client\"" "$P/audit/audit.jsonl" | grep -F "/$client-$name.txt\"" || true)
+	cmp -s "$WORK/local/short.txt" "$P/data/$client-$name.txt" && [ -n "$events" ] &&
+		! grep -Evq "$want,\"user\":\"$client\"" <<<"$events"
+}
+p_check() { # p_check NAME LOCAL WHAT: p_proxied for each client, passing as WHAT
+	local client
+	for client in "${p_clients[@]}"; do
+		p_proxied "$client" "$1" "$2" && pass "proxy: $client through $1: $3" ||
+			fail "proxy: $client through $1: $(ls "$P/data"): $(grep -F "/$client-$1.txt\"" "$P/audit/audit.jsonl")"
+	done
+}
+
+if command -v haproxy >/dev/null 2>&1; then
+	cat >"$P/haproxy/haproxy.cfg" <<CFG
+global
+	maxconn 256
+
+defaults
+	mode tcp
+	timeout connect 5s
+	timeout client 1m
+	timeout server 1m
+
+# v1 (send-proxy) and v2 (send-proxy-v2). Their health checks send a header
+# too: v1 with the proxy's own addresses, v2 as LOCAL.
+listen v1
+	bind 127.0.0.1:$FE_V1
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2 send-proxy check inter 100ms
+
+listen v2
+	bind 127.0.0.1:$FE_V2
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2 send-proxy-v2 check inter 100ms
+
+# v2 with TLVs, which gosftpd ignores; the check waits for the SSH banner.
+listen tlv
+	bind 127.0.0.1:$FE_TLV
+	unique-id-format %{+X}o%ci:%cp_%fi:%fp_%Ts_%rt:%pid
+	option tcp-check
+	tcp-check expect rstring ^SSH-2\.0-
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2 send-proxy-v2 proxy-v2-options unique-id,ssl,crc32c check inter 100ms
+
+# A bare TCP check: connect and close, without a byte.
+backend tcp-check
+	option tcp-check
+	tcp-check connect
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2 send-proxy-v2 check inter 100ms
+
+# Unix socket front ends (abstract, so that no path is too long): their
+# clients have no TCP address, so HAProxy sends UNKNOWN (v1) or LOCAL (v2).
+# The test clients reach them through a TCP hop.
+listen unix-v1-hop
+	bind 127.0.0.1:$FE_UNIX_V1
+	server front abns@gosftpd-interop-$FE_UNIX_V1
+
+listen unix-v1
+	bind abns@gosftpd-interop-$FE_UNIX_V1
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2 send-proxy
+
+listen unix-v2-hop
+	bind 127.0.0.1:$FE_UNIX_V2
+	server front abns@gosftpd-interop-$FE_UNIX_V2
+
+listen unix-v2
+	bind abns@gosftpd-interop-$FE_UNIX_V2
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2 send-proxy-v2
+
+# Wrong setups: a header from an address gosftpd does not trust, and none
+# from the one it trusts.
+listen untrusted
+	bind 127.0.0.1:$FE_UNTRUSTED
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.1 send-proxy-v2
+
+listen no-header
+	bind 127.0.0.1:$FE_NOHEADER
+	server gosftpd 127.0.0.1:$PPORT source 127.0.0.2
+
+listen stats
+	mode http
+	bind 127.0.0.1:$FE_STATS
+	stats enable
+	stats uri /
+CFG
+	# haproxy_checked: true once each of the four checked servers is up and
+	# passed its last check.
+	haproxy_checked() {
+		curl -fsS "http://127.0.0.1:$FE_STATS/;csv" >"$P/haproxy/stats.csv" 2>/dev/null &&
+			awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+				$(col["check_status"]) != "" { n++; if ($(col["status"]) == "UP" && $(col["check_status"]) ~ /L[467]OK$/) ok++ }
+				END { exit !(n == 4 && ok == 4) }' "$P/haproxy/stats.csv"
+	}
+	lines=$(wc -l <"$P/audit/audit.jsonl")
+	checks=$(pmetric 'gosftpd_connections_total{result="no_version"}')
+	if haproxy -c -f "$P/haproxy/haproxy.cfg" >"$P/haproxy/haproxy.log" 2>&1; then
+		haproxy -db -f "$P/haproxy/haproxy.cfg" >>"$P/haproxy/haproxy.log" 2>&1 &
+		HAPROXY_PID=$!
+		PIDS+=("$HAPROXY_PID")
+		checked=
+		for _ in $(seq 100); do
+			if haproxy_checked; then checked=yes && break; fi
+			sleep 0.1
+		done
+		[ -n "$checked" ] && pass "proxy: HAProxy's health checks pass (v1, LOCAL, the SSH banner, a bare connect)" ||
+			fail "proxy: HAProxy's health checks: $(cut -d, -f1,2,18,37 "$P/haproxy/stats.csv")"
+		for _ in $(seq 100); do
+			if [ "$(pmetric 'gosftpd_connections_total{result="no_version"}')" -ge $((checks + 40)) ]; then break; fi
+			sleep 0.1
+		done
+		[ "$(pmetric 'gosftpd_connections_total{result="no_version"}')" -ge $((checks + 40)) ] && [ "$(wc -l <"$P/audit/audit.jsonl")" = "$lines" ] &&
+			pass "proxy: HAProxy's health checks count as no_version and stay out of the audit log" ||
+			fail "proxy: health checks: $(pmetric 'gosftpd_connections_total{result="no_version"}') no_version, audit: $(tail -n +$((lines + 1)) "$P/audit/audit.jsonl")"
+
+		p_upload "v1:$FE_V1" "v2:$FE_V2" "tlv:$FE_TLV" "unix-v1:$FE_UNIX_V1" "unix-v2:$FE_UNIX_V2"
+		p_check v1 "127.0.0.1:$FE_V1" "remote_addr is the client, proxy_addr the proxy"
+		p_check v2 "127.0.0.1:$FE_V2" "remote_addr is the client, proxy_addr the proxy"
+		p_check tlv "127.0.0.1:$FE_TLV" "TLVs are ignored"
+		p_check unix-v1 "127.0.0.1:$PPORT" "UNKNOWN is the proxy's own connection"
+		p_check unix-v2 "127.0.0.1:$PPORT" "LOCAL is the proxy's own connection"
+
+		echo pwd >"$P/pwd.batch"
+		if p_sftp "$FE_UNTRUSTED" "$P/pwd.batch" >"$P/untrusted.out" 2>&1; then
+			fail "proxy: a header from a proxy that is not trusted was accepted"
+		else
+			p_wait "$untrusted" 2 && pass "proxy: a proxy that is not trusted is refused (untrusted_proxy)" ||
+				fail "proxy: untrusted proxy: $(grep '"conn.reject"' "$P/audit/audit.jsonl")"
+		fi
+		if p_sftp "$FE_NOHEADER" "$P/pwd.batch" >"$P/noheader.out" 2>&1; then
+			fail "proxy: a trusted proxy without a header was accepted"
+		else
+			p_wait '"remote_addr":"127\.0\.0\.2:[0-9]*","local_addr":"127\.0\.0\.1:'"$PPORT"'","proxy_addr":"127\.0\.0\.2:[0-9]*","schema":1,"event":"conn\.reject","reason":"proxy_header"' &&
+				grep -q 'a peer in server.trusted_proxies sent no valid PROXY protocol header.*peer=127.0.0.2.*no PROXY header but an SSH version line' "$P/server.log" &&
+				pass "proxy: a trusted proxy that sends no header is refused (proxy_header), the log says what came instead" ||
+				fail "proxy: no header: $(grep '"conn.reject"' "$P/audit/audit.jsonl")"
+		fi
+		want_untrusted=3 want_header=1
+	else
+		fail "proxy: haproxy -c: $(cat "$P/haproxy/haproxy.log")"
+	fi
+else
+	missing haproxy
+fi
+
+if command -v nginx >/dev/null 2>&1; then
+	# nginx's stream module is often a module of its own (libnginx-mod-stream).
+	ngx_v=$(nginx -V 2>&1) ngx_load= ngx_stream=yes
+	case $ngx_v in
+	*--with-stream=dynamic*)
+		ngx_mod="$(sed -n 's/.*--modules-path=\([^ ]*\).*/\1/p' <<<"$ngx_v")/ngx_stream_module.so"
+		if [ -f "$ngx_mod" ]; then ngx_load="load_module $ngx_mod;"; else ngx_stream=; fi
+		;;
+	*"--with-stream "* | *--with-stream) ;;
+	*) ngx_stream= ;;
+	esac
+	if [ -n "$ngx_stream" ]; then
+		cat >"$P/nginx/nginx.conf" <<CONF
+$ngx_load
+daemon off;
+pid $P/nginx/nginx.pid;
+error_log $P/nginx/error.log info;
+events {
+	worker_connections 64;
+}
+stream {
+	server {
+		listen 127.0.0.1:$FE_NGINX;
+		proxy_pass 127.0.0.1:$PPORT;
+		proxy_protocol on;
+		proxy_bind 127.0.0.2;
+	}
+}
+CONF
+		if nginx -t -q -e "$P/nginx/error.log" -p "$P/nginx" -c "$P/nginx/nginx.conf" >"$P/nginx/test.out" 2>&1; then
+			nginx -e "$P/nginx/error.log" -p "$P/nginx" -c "$P/nginx/nginx.conf" &
+			NGINX_PID=$!
+			PIDS+=("$NGINX_PID")
+			for _ in $(seq 100); do
+				if (exec 3<>"/dev/tcp/127.0.0.1/$FE_NGINX") 2>/dev/null; then break; fi
+				sleep 0.1
+			done
+			p_upload "nginx:$FE_NGINX"
+			p_check nginx "127.0.0.1:$FE_NGINX" "proxy_protocol on (v1)"
+		else
+			fail "proxy: nginx -t: $(cat "$P/nginx/test.out" "$P/nginx/error.log" 2>/dev/null)"
+		fi
+	else
+		missing "nginx's stream module"
+	fi
+else
+	missing nginx
+fi
+
+# Every connection the load balancers made has ended, refused or not.
+for pid in ${HAPROXY_PID:-} ${NGINX_PID:-}; do
+	kill "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+done
+for _ in $(seq 50); do
+	if [ "$(pmetric gosftpd_connections_active)" = 0 ]; then break; fi
+	sleep 0.1
+done
+[ "$(pmetric gosftpd_connections_active)" = 0 ] && [ "$(pmetric 'gosftpd_connections_total{result="untrusted_proxy"}')" = "$want_untrusted" ] &&
+	[ "$(pmetric 'gosftpd_connections_refused_total{reason="proxy_header"}')" = "$want_header" ] &&
+	[ "$(p_count '"event":"conn\.reject"')" = $((want_untrusted + want_header)) ] &&
+	pass "proxy: metrics: no connection left active, each refusal counted once" ||
+	fail "proxy: metrics: $(curl -fsS "http://127.0.0.1:$PMPORT/metrics" | grep -E '^gosftpd_connections_(active|total|refused_total)' | grep -v ' 0$')"
+
+# gosftpd healthcheck sends a LOCAL header when its own address is trusted,
+# as for a load balancer on this host that connects from 127.0.0.1.
+"$WORK/gosftpd" healthcheck --config "$P/etc/gosftpd.toml" >"$P/hc.out" 2>&1 && grep -qx "ok: 127.0.0.1:$PPORT sent an SSH banner" "$P/hc.out" &&
+	pass "proxy: healthcheck from an address that is not trusted sends no header" || fail "proxy: healthcheck: $(cat "$P/hc.out")"
+reloads=$(p_count '"event":"server\.reload"')
+sed -i 's|^trusted_proxies = .*|trusted_proxies = ["127.0.0.2", "127.0.0.1"]|' "$P/etc/gosftpd.toml"
+kill -HUP "$PROXY_PID"
+p_wait '"event":"server\.reload","result":"ok".*"trusted_proxies":"127\.0\.0\.2/32,127\.0\.0\.1/32"' "$reloads" &&
+	pass "proxy: a reload changes trusted_proxies" || fail "proxy: reload: $(grep '"server.reload"' "$P/audit/audit.jsonl")"
+lines=$(wc -l <"$P/audit/audit.jsonl")
+"$WORK/gosftpd" healthcheck --config "$P/etc/gosftpd.toml" >"$P/hc.out" 2>&1 &&
+	grep -qx "ok: 127.0.0.1:$PPORT sent an SSH banner after a PROXY protocol LOCAL header" "$P/hc.out" &&
+	pass "proxy: healthcheck from a trusted loopback sends a LOCAL header" || fail "proxy: healthcheck: $(cat "$P/hc.out")"
+printf 'config_version = 1\n' >"$P/plain.toml"
+set +e
+"$WORK/gosftpd" healthcheck --config "$P/plain.toml" --address "127.0.0.1:$PPORT" --timeout 1s >/dev/null 2>"$P/hc.err"
+code=$?
+set -e
+[ "$code" = 1 ] && grep -q "127.0.0.1:$PPORT sent no SSH banner within 1s" "$P/hc.err" &&
+	pass "proxy: a probe from a trusted address without a header gets no banner" || fail "proxy: probe without a header: exit $code: $(cat "$P/hc.err")"
+[ "$(wc -l <"$P/audit/audit.jsonl")" = "$lines" ] && pass "proxy: the probes leave no trace in the audit log" ||
+	fail "proxy: probes audited: $(tail -n +$((lines + 1)) "$P/audit/audit.jsonl")"
+
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"
 	echo "--- server log (config)"; cat "$C/server.log"
 	echo "--- server log (host keys)"; cat "$WORK/hk/server.log"
 	if [ -f "$WORK/hooks/server.log" ]; then echo "--- server log (hooks)"; cat "$WORK/hooks/server.log"; fi
+	echo "--- server log (proxy)"; cat "$P/server.log"
+	for f in "$P/haproxy/haproxy.log" "$P/nginx/error.log"; do
+		if [ -f "$f" ]; then echo "--- $f"; cat "$f"; fi
+	done
 	exit 1
 fi
 echo "all interop checks passed ($(ssh -V 2>&1))"

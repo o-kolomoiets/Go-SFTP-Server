@@ -94,7 +94,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - openssh: system # 9.6p1 on ubuntu-24.04, plus paramiko, rclone, lftp and promtool
+          - openssh: system # 9.6p1 on ubuntu-24.04, plus paramiko, rclone, lftp, promtool, HAProxy and nginx
             clients: true
           - openssh: V_10_6_P1 # built from source
     runs-on: ubuntu-24.04
@@ -128,11 +128,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/openssh-bin/bin"
           cp ssh sftp scp ssh-keygen "$RUNNER_TEMP/openssh-bin/bin/"
           echo "$RUNNER_TEMP/openssh-bin/bin" >> "$GITHUB_PATH"
-      - name: Install paramiko, rclone, lftp and promtool
+      - name: Install paramiko, rclone, lftp, promtool, HAProxy and nginx
         if: matrix.clients
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q lftp
+          # HAProxy and nginx's stream module send PROXY protocol headers (ADR 0011).
+          sudo apt-get install -y -q lftp haproxy nginx libnginx-mod-stream
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install -q "paramiko==$CLIENT_PARAMIKO_VERSION"
           curl -fsSLo "$RUNNER_TEMP/rclone.zip" \
