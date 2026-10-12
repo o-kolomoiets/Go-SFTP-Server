@@ -112,15 +112,17 @@ If the file cannot be opened again (for example because logrotate created it
 with the wrong owner), gosftpd closes the rotated file and every write fails
 until the file can be opened: with `on_error = "fail-closed"` it refuses
 connections and changes, and the events go to stderr. It retries every 5
-seconds and recovers on its own. `copytruncate` works too: the file is opened
-with `O_APPEND`, so truncating it leaves no hole.
+seconds and recovers on its own, with one exception under Landlock (below).
+`copytruncate` works too: the file is opened with `O_APPEND`, so truncating
+it leaves no hole.
 
-Under Landlock (Linux, [security.md](security.md#landlock)) gosftpd may
-create files only in an audit directory that holds nothing but the audit log
-and its rotated copies, as `/var/log/gosftpd` in the packaged layout does.
-Elsewhere, for example next to the configuration file, only the file itself
-has a rule, and it does not recover on its own: once logrotate has renamed
-it, gosftpd cannot create the new file until a restart. The reload names
+Under Landlock (Linux, [configuration.md](configuration.md#landlock)) gosftpd
+may create files only in an audit directory that holds nothing but the
+audit log and its rotated copies, as `/var/log/gosftpd` in the packaged
+layout does. Elsewhere, for example next to the configuration file, only
+the file itself has a rule, and it does not recover on its own: once
+logrotate has renamed it, gosftpd can neither create the new file nor open
+the one logrotate created until a restart. The reload names
 `audit.output` in `restart_required`, the operational log adds "outside the
 Landlock ruleset applied at start; restart gosftpd", and with `on_error =
 "fail-closed"` every new connection is refused meanwhile. Give the audit log

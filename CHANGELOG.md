@@ -114,35 +114,22 @@ Incompatible changes are prefixed with **BREAKING:**.
   hour, of a file whose upload closed ok: the rename that completes a
   temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
   upload renamed later. `fs.upload` hooks fire for it.
-- Landlock on Linux ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md)),
-  with `server.landlock = "auto"` (the default), `"off"` or `"required"`,
-  restart-only: once its listeners are bound, gosftpd can open only its
-  mounts, its configuration and key files, its audit log, `/proc/self` and
-  the files name resolution reads. A directory gets a rule only when every
-  entry in it is a file the configuration names; elsewhere the files get
-  rules of their own, with a warning at start, and such a file replaced by
-  rename cannot be read until a restart. `auto` says in the log why it does
-  not apply Landlock (no Landlock in the kernel, a seccomp filter that
-  blocks it, ABI 1, exec hooks, a mount at `/`); `required` makes that an
-  error at start. `config validate` refuses `required` with exec hooks,
-  and `config validate --check-fs` prints the start warnings.
-  `server.start` records `landlock` (`v2` to `v5`, `off`, `unavailable`,
-  `blocked`, `not_applied`). A reload checks the new configuration against
-  the rules applied at start: a new or moved mount outside them, or a
-  mount directory recreated since the start, is unavailable; new rights of
-  a mount (`read_only = false`, `create = true`) and a new `audit.output`
-  outside them keep their running values; an exec hook added by the reload
-  is left out; each is named in `restart_required`. A key file the rules no
-  longer cover is left out as an unreadable one is, and every such error
-  in the log says "outside the Landlock ruleset applied at start; restart
-  gosftpd". An `audit.output` on `/dev/stderr` is not reopened at reload.
-  `gosftpd init` creates `users.d/`, since under Landlock an include
-  directory that is missing at start needs a restart for its first file.
-  New dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
-- Once its listeners are bound, before any hook can run, `serve` clears
-  its ambient capabilities on every thread: with
-  `AmbientCapabilities=CAP_NET_BIND_SERVICE` (port 22) an exec hook would
-  inherit the capability.
+- Landlock on Linux ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md),
+  [docs/security.md](docs/security.md#landlock)): once its listeners are
+  bound, `serve` can open only its mounts, its configuration and key files,
+  its audit log, `/proc/self` and the files name resolution reads.
+  `server.landlock` (restart-only) is `"auto"`, the default: applied where
+  it can be, and the log says why not elsewhere (no Landlock in the kernel,
+  a seccomp filter that blocks it, ABI 1, exec hooks, a mount at `/`);
+  `"required"`, which makes each of these an error at start (exit status
+  2); or `"off"`. Any other failure to apply it fails the start (exit
+  status 1). The log says `landlock: ABI vN applied`, and `server.start`
+  records `landlock` (`v2` to `v5`, `off`, `unavailable`, `blocked`,
+  `not_applied`). A directory gets a rule only when every entry in it is a
+  file the configuration names; elsewhere the files get rules of their
+  own, with a warning at start, which `config validate --check-fs` prints
+  too. `config validate` refuses `required` with exec hooks. New
+  dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
 
 ### Changed
 
@@ -177,6 +164,29 @@ Incompatible changes are prefixed with **BREAKING:**.
   with a warning, now take effect: check existing files before upgrading. In
   zero-config mode without `--user`, a `cert-authority` line needs
   `principals=`.
+- On Linux, with Landlock applied (the default where the kernel offers
+  it), a reload cannot reach beyond the rules applied at start
+  ([docs/configuration.md](docs/configuration.md#landlock)): a new or moved
+  mount, or a mount directory recreated or remounted since the start, is
+  unavailable; `read_only = false`, `create = true` and a new
+  `audit.output` that the rules do not allow keep their running values; an
+  exec hook added by the reload is left out; a key, CA or secret file in a
+  shared directory replaced by rename is left out as an unreadable one is.
+  Each is named in `restart_required`; such an include file or revocation
+  list fails the reload instead. The log adds "outside the Landlock
+  ruleset applied at start; restart gosftpd". An audit log that shares its
+  directory with other files cannot be rotated by rename without a
+  restart: give it a directory of its own or use `copytruncate`. An
+  `audit.output` on `/dev/stderr` is no longer reopened at reload. Keep the
+  configuration, `users.d` and key files in directories of their own, as
+  the packaged layout does, or set `server.landlock = "off"`.
+- `gosftpd init` also creates an empty `users.d/` next to the file: under
+  Landlock an include directory that is missing at start needs a restart
+  for its first file.
+- Exec hooks no longer inherit ambient capabilities: once its listeners
+  are bound, before any hook can run, `serve` clears the ambient set on
+  every thread (with `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port
+  22 a hook inherited the capability).
 
 ### Fixed
 

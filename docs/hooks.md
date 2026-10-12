@@ -130,7 +130,9 @@ group or others; symlinks are followed, so `/bin/sh` is checked at its
 target. That is checked at start and on reload, and the owner and mode
 again just before each run: a script that became writable by others is not
 run, and the run counts as failed. On Windows only the location is
-checked.
+checked. On Linux an exec hook turns Landlock off for the whole process
+(see [Sandboxes and containers](#sandboxes-and-containers)); webhooks do
+not.
 
 The program gets:
 
@@ -398,9 +400,12 @@ every thread, once its listeners are bound and before any hook can run.
 On Linux gosftpd confines itself with Landlock
 ([security.md](security.md#landlock)) only while no exec hook is
 configured: a hook needs the loader, its libraries and whatever it
-touches. A reload that adds an exec hook while Landlock is applied leaves
-the hook out, with a warning, and names `hooks` in `restart_required`;
-after a restart gosftpd runs it, without Landlock. Webhooks work under
+touches. With an exec hook the log says `landlock: not applied` with
+`reason="exec hooks configured"`, `server.start` records `not_applied`, and
+`server.landlock = "required"` is refused. A reload that adds an exec hook
+while Landlock is applied leaves the hook out, with a warning, and names
+`hooks` in `restart_required`; after a restart gosftpd runs it, without
+Landlock. Webhooks work under
 Landlock: the TLS roots are loaded at start, and name resolution reads
 `/etc/hosts`, `/etc/nsswitch.conf` and `/etc/resolv.conf` through rules on
 these files. One of them replaced by rename after the start

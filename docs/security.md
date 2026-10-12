@@ -156,7 +156,12 @@ ruleset cannot be lifted, also not by root.
 Once Landlock can be used, every other failure (a rule that cannot be
 added, a ruleset the kernel refuses, a self-check that can still open `/`)
 fails the start with exit status 1, in `auto` too: the default never runs
-unconfined because of an error.
+unconfined because of an error. Under systemd, `SystemCallFilter=` must
+allow `landlock_create_ruleset`, `landlock_add_rule` and
+`landlock_restrict_self`, which are not in `@system-service`; without them
+the log says "blocked by a seccomp filter". gosftpd tries these calls in a
+child process first when a seccomp filter is installed, so a filter that
+kills the process instead of refusing the call does not stop the server.
 
 The log says what happened: `landlock: ABI v5 applied` (with `kernel_abi`),
 `landlock: not applied` or `landlock: not available` with a `reason`.
@@ -194,10 +199,11 @@ rule covers gets a warning too: the first file added there needs a
 restart (`gosftpd init` therefore creates `users.d/`). Keep the
 configuration, `users.d` and key files in directories of their own, as the
 packaged layout does (`/etc/gosftpd`, `/var/lib/gosftpd`,
-`/var/log/gosftpd`). `gosftpd config validate --check-fs` prints the same
-warnings before the first start (run it as the user that runs gosftpd).
-Dedication is decided at start: a file created later in a dedicated
-directory is readable to gosftpd.
+`/var/log/gosftpd`; see [configuration.md](configuration.md#landlock)).
+`gosftpd config validate --check-fs` prints the same warnings before the
+first start (run it as the user that runs gosftpd). Dedication is decided
+at start: a file created later in a dedicated directory is readable to
+gosftpd, so keep nothing else there.
 
 A mount's rule is added through the directory the mount holds open, so a
 mount directory swapped for a symlink before the rules are added cannot
@@ -249,8 +255,10 @@ resolution, warns about it ([hooks.md](hooks.md#sandboxes-and-containers)).
   terminal, so that `TIOCSTI` on an inherited terminal cannot type commands
   into the shell that started it;
 - the network, and signals to processes of the same user;
-- files created later in a dedicated directory, and on ABI 2 truncating
-  files.
+- files created later in a dedicated directory;
+- on ABI 2 (Debian 12) truncating files, and below ABI 5 `ioctl` on
+  devices;
+- anything while exec hooks are configured: Landlock is not applied then.
 
 ## Running as root
 

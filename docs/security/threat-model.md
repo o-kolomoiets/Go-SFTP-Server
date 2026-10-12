@@ -68,7 +68,11 @@ trusted.
 | Repudiation | "I did not upload that" | Audit log with `user`, `key_fp`, `session_id`, `path`, `final_path`, `version_path` | audit schema test |
 | Repudiation | Acting while the audit log cannot be written | `audit.on_error = "fail-closed"`; a file that cannot be reopened after rotation fails writes instead of filling the rotated file | server and cli tests |
 | Information disclosure | Host paths in errors, host accounts in listings | Fixed client messages; virtual owners | protocol tests |
-| Information disclosure | Reading through planted hard links or bind mounts (N4) | Not prevented by `os.Root`; documented limit | — |
+| Information disclosure | Reading through planted hard links or bind mounts (N4) | Not prevented by `os.Root`, nor by Landlock, which checks paths: a hard link or a bind mount inside a mount is a path inside it; documented limit | a sandboxed cli test asserts the hard-link gap |
+| Information disclosure, Tampering | A compromised gosftpd process (a bug in gosftpd or a library) reading or changing the rest of the host (AS4), other users' private keys or its own configuration and keys (AS2, AS3, AS7) | Landlock on Linux (ADR 0011): once the listeners are bound, the process can open only its mounts, its configuration and key files (read only), its audit log (writing it, and creating files next to it only when its directory holds nothing else), `/proc/self` and the name-resolution files; `auto` by default, the audit event `server.start` records whether it applied; computing or applying the rules fails the start rather than running without them | sandbox and cli tests that re-execute the test binary under the real ruleset, in CI with and without cgo; interop checks every server's log |
+| Elevation of privilege | Landlock skipped without notice: a seccomp filter that refuses or kills its calls, a kernel without it | gosftpd queries the ABI itself and probes the calls in a child under a seccomp filter; every reason not to apply it is logged and recorded in `server.start` (`unavailable`, `blocked`, `not_applied`); `server.landlock = "required"` makes it an error | sandbox tests with seccomp filters that kill, trap or refuse the calls |
+| Elevation of privilege | An exec hook inheriting `CAP_NET_BIND_SERVICE` from `AmbientCapabilities=` (port 22) | The ambient set is cleared on every thread once the listeners are bound, before any hook can run | cli test under `sudo setpriv` with the capability in the ambient set |
+| Elevation of privilege | Commands typed into the shell that started `serve`, through an inherited terminal (`TIOCSTI`) | Landlock checks a descriptor only when it is opened; gosftpd gives up its controlling terminal after applying the ruleset | sandbox test under a pty |
 | Information disclosure | Learning versions, users or load from the admin listener (N1) | Off by default; a warning when it is not on loopback; when gosftpd binds loopback, requests must name a loopback host (DNS rebinding gets 421; not with Docker's `0.0.0.0` bind); labels hold no user, path, address or fingerprint; pprof only in binaries built for it, off by default, without `cmdline` (ADR 0009) | obs and cli tests, interop with promtool |
 | Denial of service | Connection floods, slow handshakes (N1) | Connection limits before the handshake; handshake, idle and keepalive timeouts; bans | 1000-connection test, synctest timeouts |
 | Denial of service | Password hashing exhaustion (N1) | Opt-in passwords, bounded hash costs, one check per CPU, 1024-byte limit | auth tests |
@@ -92,7 +96,16 @@ trusted.
 - Hard links and bind mounts created on the host inside a served directory
   give access to what they point to; a local user who can create symlinks
   may race `symlinks = "deny"` and SETSTAT (see
-  [../security.md](../security.md#limits-of-the-protection)).
+  [../security.md](../security.md#limits-of-the-protection)). Landlock
+  does not change this: it checks paths, and it does not check `chmod`,
+  `chown`, `utimes` or `stat`.
+- Landlock leaves a compromised process its Unix sockets (by path and
+  abstract), descriptors opened before the ruleset, the network, signals to
+  processes of the same user and files created later in a dedicated
+  directory; on ABI 2 it does not restrict truncation. It is not applied
+  while exec hooks are configured, nor where the kernel or a seccomp filter
+  does not allow it; `server.start` says so (see
+  [../security.md](../security.md#what-landlock-does-not-stop)).
 - Bans are per process and in memory; a restart clears them, and a burst
   over many parallel connections gets a few more attempts than
   `after_failures`.

@@ -74,7 +74,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
 | `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). |
-| `landlock` | `"auto"` | Linux only: after binding its listeners, gosftpd confines itself with Landlock to its mounts, its configuration and key files, its audit log, `/proc/self` and the name-resolution files. `auto` applies it where the kernel allows it and logs why not elsewhere; `required` makes that an error at start (exit status 2); `off` never applies it. Landlock is not applied while exec hooks are configured, and `required` with an exec hook is an error. Changes only at restart; see [Landlock](security.md#landlock). |
+| `landlock` | `"auto"` | Linux only: after binding its listeners, gosftpd confines itself with Landlock to its mounts, its configuration and key files, its audit log, `/proc/self` and the name-resolution files. `auto` applies it where the kernel allows it and logs why not elsewhere; `required` makes that an error at start (exit status 2); `off` never applies it. Landlock is not applied while exec hooks are configured, and `required` with an exec hook is an error. Changes only at restart; see [Landlock](#landlock) for the directory layout it needs. |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.
@@ -625,6 +625,75 @@ plain host key algorithms (rclone: `host_key_algorithms = ssh-ed25519`) or
 trust the CA. paramiko does not support host certificates; it keeps using
 the plain key.
 
+## Landlock
+
+On Linux, `serve` confines itself with Landlock once its listeners are bound
+(`server.landlock`; what it protects against is in
+[security.md](security.md#landlock)). The rules are computed once, at start,
+from the configuration, and a reload cannot widen them. So the way the files
+are laid out decides what a reload can change without a restart.
+
+A directory gets a rule of its own only when it is dedicated to gosftpd: at
+start it can be listed, and every entry in it is a file the configuration
+names (the configuration and included files, `authorized_keys` files, the CA
+file, the revocation list, host keys with their `.pub`, `.next`, `.old` and
+certificate files, webhook `secret_file`s), a name derived from one (a
+backup such as `config.toml~`, an editor's swap file, the temporary files of
+`user add --write` and `hostkey rotate`), or a subdirectory such as
+`users.d` that is dedicated itself. The full rule is in
+[security.md](security.md#which-files-are-covered). In a dedicated directory
+files may be replaced by rename (editors, `sed -i`, `user add --write`,
+`hostkey rotate --finish`) and added later: a reload reads them. Elsewhere
+each file gets a rule of its own, which belongs to the file, not to its
+name: replaced by rename, the file cannot be read until a restart.
+
+Keep in directories of their own, as the packaged layout does:
+
+- the configuration file, `users.d/` (or the other include directories),
+  the CA file, the revocation list and webhook secret files:
+  `/etc/gosftpd`;
+- the host keys: `/var/lib/gosftpd`;
+- the audit log with its rotated copies: `/var/log/gosftpd`. Its directory
+  gets write rights only when it holds nothing else, so that no
+  configuration or key file is ever writable; next to other files, the
+  audit log cannot be rotated by rename (logrotate's `create`) without a
+  restart. Use a directory of its own or `copytruncate` (see
+  [Rotation](audit-log.md#rotation)).
+
+A `.ssh` directory, `/` and the home directory of the user running gosftpd
+are never dedicated: in zero-config mode the default
+`~/.ssh/authorized_keys` gets a rule on the file only, and the private keys
+next to it stay unreadable. Create `users.d/` before the first start
+(`gosftpd init` does): an include directory that does not exist at start
+needs a restart for its first file. Files created later in a dedicated
+directory are readable to gosftpd, so keep nothing else there.
+
+At start gosftpd warns about each file that got a rule of its own, naming
+its directory and up to three of the entries that make the directory
+shared, or the symlink whose target lies in another directory (a NixOS
+generation, an `ln -sfn` deployment: re-pointed, the link cannot be read
+until a restart). `gosftpd config validate --check-fs` prints the same
+warnings before the first start; run it as the user that runs gosftpd.
+
+Under Landlock a restart is needed for (the reload names each in
+`restart_required`, see [Reload](#reload)):
+
+- a new mount, a mount moved outside the rules, and a mount directory that
+  was recreated or had a disk mounted on it since the start; the mount is
+  unavailable until then;
+- `read_only = false` or `create = true` that the rules do not allow; the
+  mount keeps its running value;
+- a new `audit.output` outside the rules (the running output stays), and an
+  audit log next to other files once it was rotated by rename;
+- an exec hook added by a reload: Landlock is applied only without exec
+  hooks, so the hook is left out;
+- a key, CA or secret file in a shared directory replaced by rename, or a
+  re-pointed link to one. An include file or a revocation list that the
+  rules do not cover fails the reload instead.
+
+`server.landlock = "off"` turns Landlock off, also for these cases; it takes
+effect at the next restart.
+
 ## Reload
 
 On SIGHUP gosftpd first reopens the audit log file (for logrotate), then
@@ -664,20 +733,16 @@ command-line flags and environment, and checks it like `config validate
   `server.crypto_policy`, `server.landlock`, `log.format`, `audit.events`,
   `audit.on_error` and `metrics.listen`. A change is logged as a warning and listed in the
   `server.reload` audit event; the running value stays.
-- **Under Landlock** (Linux, see [Landlock](security.md#landlock)) the
-  ruleset applied at start stays as it is, and a reload cannot reach
-  beyond it. A new or moved mount outside it, and a mount directory
-  recreated or remounted since the start, are unavailable; a mount whose
-  new `read_only = false` or `create = true` the ruleset does not allow
-  keeps its running value; a new `audit.output` outside it keeps the
-  running one; an exec hook added by the reload is left out (Landlock is
-  applied only without exec hooks). Each is named in `restart_required`
-  (`mounts.NAME.path`, `mounts.NAME.read_only`, `mounts.NAME.create`,
-  `audit.output`, `hooks`). A key or CA file the ruleset does not cover
-  (replaced by rename in a shared directory, a re-pointed link) is left out
-  as an unreadable one is, also listed; an include file or a revocation
-  list it does not cover fails the reload. Every such error in the log adds
-  "outside the Landlock ruleset applied at start; restart gosftpd".
+- **Under Landlock** (Linux) the ruleset applied at start stays as it is,
+  and a reload cannot reach beyond it ([Landlock](#landlock)). A mount, a
+  mount's new rights, a new `audit.output` or an exec hook that the ruleset
+  does not cover keeps its running value or is left out, and is named in
+  `restart_required` (`mounts.NAME.path`, `mounts.NAME.read_only`,
+  `mounts.NAME.create`, `audit.output`, `hooks`). A key, CA or secret file
+  it does not cover is left out as an unreadable one is, and its key is
+  listed too; an include file or a revocation list it does not cover fails
+  the reload. Every such error in the log adds "outside the Landlock
+  ruleset applied at start; restart gosftpd".
 
 Problems that concern one user or one mount do not stop a reload: an
 `authorized_keys_file` that is missing, unsafe, empty or not a regular file
