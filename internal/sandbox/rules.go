@@ -474,9 +474,14 @@ func (p *planner) auditDedicated(dir, file string) verdict {
 	// name up to the last dot followed by a separator or a digit
 	// (audit.1.jsonl, audit-20261012.jsonl), never auditor.toml. A file
 	// the configuration names is no copy, also when its name looks like
-	// one: it would become writable.
+	// one: it would become writable. Nor is a directory (audit-keys/):
+	// it is an olddir or nothing.
 	rotated := func(d, name string) bool {
-		if full := filepath.Join(d, name); p.named[full] && full != audit {
+		full := filepath.Join(d, name)
+		if p.named[full] && full != audit {
+			return false
+		}
+		if info, err := p.fs.Stat(full); err == nil && info.IsDir() {
 			return false
 		}
 		if strings.HasPrefix(name, file) {

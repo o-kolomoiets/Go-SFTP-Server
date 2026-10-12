@@ -241,6 +241,41 @@ output = "audit.jsonl"
 	}
 }
 
+// TestLandlockAuditKeys: a key directory next to the audit file whose name
+// looks like a rotated copy's (audit-keys) is no olddir: the audit file
+// gets a rule of its own, and the key file cannot be written nor a new one
+// created.
+func TestLandlockAuditKeys(t *testing.T) {
+	t.Parallel()
+	if serveChild(t) {
+		return
+	}
+	base := t.TempDir()
+	alice := newSigner(t)
+	p := func(rel string) string { return filepath.Join(base, filepath.FromSlash(rel)) }
+	files(t, base, map[string]string{
+		"etc/config.toml": minimalConfig(base, alice, "[audit]\noutput = \""+p("log/audit.jsonl")+"\"\n") +
+			"[users.bob]\nauthorized_keys_file = \"" + p("log/audit-keys/bob.pub") + "\"\naccess = { inbox = \"read\" }\n",
+		"log/audit-keys/bob.pub": authorizedKey(newSigner(t)) + "\n",
+		"srv/inbox/":             "", "state/": "",
+	})
+	audit := func() string { b, _ := os.ReadFile(p("log/audit.jsonl")); return string(b) }
+	sb := startSandboxed(t, sandboxOpts{args: []string{"--config", p("etc/config.toml")}})
+	waitLog(t, sb.logs, "audit.output: Landlock covers only the file audit.jsonl in "+p("log")+", which holds audit-keys: rotation by rename")
+	sb.denied(t, "write "+p("log/audit-keys/bob.pub"))
+	sb.denied(t, "create "+p("log/audit-keys/carol.pub"))
+	sb.denied(t, "create "+p("log/audit.jsonl.1"))
+	sb.allowed(t, "write "+p("log/audit.jsonl"))
+	sb.allowed(t, "read "+p("log/audit-keys/bob.pub"))
+	if !canLogIn(sb.addr, "alice", alice) {
+		t.Errorf("alice cannot log in:\n%s", sb.logs())
+	}
+	waitLog(t, audit, `"event":"auth.success"`)
+	if code := sb.stop(t); code != exitOK {
+		t.Errorf("exit %d", code)
+	}
+}
+
 // TestLandlockAuditStderr: audit.output = "/dev/stderr" gets no rule; a
 // reload does not open it again, and the audit log is still written, with
 // stderr a regular file or a FIFO.

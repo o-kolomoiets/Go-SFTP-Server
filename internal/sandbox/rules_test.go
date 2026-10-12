@@ -477,6 +477,28 @@ func TestAuditRow(t *testing.T) {
 			"dir /etc/gosftpd " + ro, "dir /srv/state " + rfile, "file /srv/state/audit.log " + wfile, inbox,
 		}, "audit.output: Landlock covers only the file audit.log in /srv/state, which holds audit.log.keys: "+rotWarn)
 	})
+	t.Run("subdirectories with rotated names", func(t *testing.T) {
+		t.Parallel()
+		m, c := base(t)
+		m.files("/srv/state/audit.jsonl", "/srv/state/audit-keys/alice.pub", "/srv/state/audit-2026/audit.jsonl.1")
+		addUser(c, "alice", "/srv/state/audit-keys/alice.pub")
+		c.Audit.Output = native("/srv/state/audit.jsonl")
+		// A directory is no rotated copy: audit-keys takes the olddir
+		// test, and the key file of alice would become writable.
+		// audit-2026 holds only copies and passes it.
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "dir /srv/state/audit-keys " + rfile, "file /srv/state/audit.jsonl " + wfile, inbox,
+		}, "audit.output: Landlock covers only the file audit.jsonl in /srv/state, which holds audit-keys: "+rotWarn)
+
+		// A host key in a subdirectory named like a copy.
+		m, c = base(t)
+		m.files("/var/lib/gosftpd/audit.jsonl", "/var/lib/gosftpd/audit.jsonl.d/ssh_host_ed25519_key")
+		c.Server.HostKeys = []string{native("/var/lib/gosftpd/audit.jsonl.d/ssh_host_ed25519_key")}
+		c.Audit.Output = native("/var/lib/gosftpd/audit.jsonl")
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "dir /var/lib/gosftpd/audit.jsonl.d " + rfile, "file /var/lib/gosftpd/audit.jsonl " + wfile, inbox,
+		}, "audit.output: Landlock covers only the file audit.jsonl in /var/lib/gosftpd, which holds audit.jsonl.d: "+rotWarn)
+	})
 	t.Run("an empty include directory is no olddir", func(t *testing.T) {
 		t.Parallel()
 		m, c := base(t)
