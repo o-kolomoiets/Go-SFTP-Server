@@ -97,6 +97,23 @@ Incompatible changes are prefixed with **BREAKING:**.
   audit log; with `--url` it checks the admin listener. It exits with 0 or
   1 only.
 - `server.start` has `metrics_listen` with an admin listener.
+- Hooks ([ADR 0010](docs/adr/0010-hooks.md), [docs/hooks.md](docs/hooks.md)):
+  `[[hooks]]` run a program (`exec`, argv without a shell, `GOSFTPD_*`
+  variables, the event on stdin) or call a webhook (the audit line, signed
+  with HMAC-SHA256 over the delivery ID, timestamp and body, with retries)
+  when a file event succeeds, filtered by `on`, `mounts`, `glob` and
+  `exclude`, optionally after a `delay`. Asynchronous, with a bounded queue
+  per hook; a reload updates hooks in place, for open connections too. An
+  exec hook runs only if its file is still the one of the event, and its
+  program still belongs to root or gosftpd's user; its process group is
+  killed when it ends or times out. New metrics
+  `gosftpd_hook_deliveries_total`, `gosftpd_hook_retries_total`,
+  `gosftpd_hook_queue_length` and `gosftpd_hooks_not_updated`.
+- Audit: every `fs.*` event on a path in a mount has `mount`; `fs.rename`
+  has `"uploaded":true` for the first rename by its uploader, within an
+  hour, of a file whose upload closed ok: the rename that completes a
+  temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
+  upload renamed later. `fs.upload` hooks fire for it.
 
 ### Changed
 
@@ -134,6 +151,16 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Fixed
 
+- After an interrupted upload to a temporary name was resumed (OpenSSH
+  `reput`), the client's rename was refused for a user with the `upload`
+  preset; likewise after a retry in place under `on_conflict =
+  "overwrite"` for a user with `write` and `overwrite` but not `rename`.
+  The file was no longer counted as the user's own.
+- An upload whose write failed in the file system (a full disk, an I/O
+  error) was audited with `result` `ok`; it is now `error`, and an atomic
+  upload with a failed write is not published. A truncation refused by the
+  append-only guard now makes the upload `denied`, as a refused write
+  does.
 - `known_hosts` lines for IPv6 addresses (`serve` banner, `hostkey show`,
   `user add --write`) are written as `[addr]:port`, which OpenSSH matches.
 - An `include` whose directory exists but cannot be read is an error

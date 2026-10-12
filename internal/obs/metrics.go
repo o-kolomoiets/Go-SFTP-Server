@@ -25,6 +25,8 @@ var (
 	Directions     = []string{"upload", "download"}
 	ConflictOps    = []string{"upload", "rename"}
 	Conflicts      = []string{"renamed", "overwritten", "versioned", "rejected"}
+	HookKinds      = []string{"exec", "webhook"}
+	HookResults    = []string{"ok", "failed", "skipped", "dropped"}
 
 	successFailure = []string{"success", "failure"}
 	okError        = []string{"ok", "error"}
@@ -38,6 +40,7 @@ type Sources struct {
 	BansActive       func() int    // sources banned now; 0 with bans off
 	AuditWriteErrors func() uint64 // failed writes to the audit output
 	AuditFailing     func() bool   // writes to the audit output fail now
+	HookQueueLength  func() int    // hook events queued or being delivered
 }
 
 // Metrics are the metrics of a gosftpd process. Every method does nothing
@@ -59,6 +62,9 @@ type Metrics struct {
 	reloads      *CounterVec
 	reloadOK     *Gauge
 	reloadTime   *Gauge
+	hooks        *CounterVec
+	hookRetries  *Counter
+	hooksStale   *Gauge
 
 	sources atomic.Pointer[Sources]
 }
@@ -93,6 +99,10 @@ func NewMetrics(version string) *Metrics {
 		Label{"result", okError})
 	m.reloadOK = newGauge(r, "gosftpd_config_last_reload_successful", "Whether the last configuration reload succeeded (1 at start).")
 	m.reloadTime = newGauge(r, "gosftpd_config_last_reload_success_timestamp_seconds", "Time of the start or of the last successful configuration reload.")
+	m.hooks = newCounterVec(r, "gosftpd_hook_deliveries_total", "Hook deliveries, once per event and hook at the final outcome, by hook type and result.",
+		Label{"type", HookKinds}, Label{"result", HookResults})
+	m.hookRetries = newCounter(r, "gosftpd_hook_retries_total", "Webhook attempts after the first.")
+	m.hooksStale = newGauge(r, "gosftpd_hooks_not_updated", "Hooks the last reload kept at their running secret or left out because of a file problem.")
 	m.reloadOK.Set(1)
 	m.reloadTime.Set(unixSeconds(time.Now()))
 
@@ -111,6 +121,12 @@ func NewMetrics(version string) *Metrics {
 	newFunc(r, typeGauge, "gosftpd_audit_log_failing", "1 while writes to the audit output fail, else 0.", func() (float64, bool) {
 		if s := m.sources.Load(); s != nil && s.AuditFailing != nil {
 			return boolFloat(s.AuditFailing()), true
+		}
+		return 0, false
+	})
+	newFunc(r, typeGauge, "gosftpd_hook_queue_length", "Hook events queued or being delivered, of all hooks.", func() (float64, bool) {
+		if s := m.sources.Load(); s != nil && s.HookQueueLength != nil {
+			return float64(s.HookQueueLength()), true
 		}
 		return 0, false
 	})
@@ -243,6 +259,28 @@ func (m *Metrics) Reloaded(ok bool, now time.Time) {
 func (m *Metrics) SetMountsUnavailable(n int) {
 	if m != nil {
 		m.mountsDown.Set(float64(n))
+	}
+}
+
+// HookDelivery counts the final outcome of one event for one hook: kind is
+// one of HookKinds, result one of HookResults.
+func (m *Metrics) HookDelivery(kind, result string) {
+	if m != nil {
+		m.hooks.Add(1, result, kind) // sorted by label name
+	}
+}
+
+// HookRetry counts a webhook attempt after the first.
+func (m *Metrics) HookRetry() {
+	if m != nil {
+		m.hookRetries.Inc()
+	}
+}
+
+// SetHooksNotUpdated sets how many hooks the last reload could not apply.
+func (m *Metrics) SetHooksNotUpdated(n int) {
+	if m != nil {
+		m.hooksStale.Set(float64(n))
 	}
 }
 

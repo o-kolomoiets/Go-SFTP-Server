@@ -714,10 +714,155 @@ curl -fsS "$M/metrics" >"$C/metrics.txt" || true
 [ "$(metric gosftpd_config_last_reload_successful)" = 0 ] && [ "$(metric 'gosftpd_config_reloads_total{result="error"}')" -gt 0 ] &&
 	pass "metrics: a failed reload shows" || fail "metrics: failed reload not shown"
 
+# --- hooks (ADR 0010) ----------------------------------------------------------
+# A webhook to a receiver that verifies every signature, and the archive
+# script of docs/hooks.md as an exec hook fed hostile names.
+K="$WORK/hooks"
+if "$PYTHON" -c 'import hmac' 2>/dev/null; then
+	mkdir -p "$K/inbox" "$K/drop" "$K/archive" "$K/state" "$K/bin"
+	KPORT=$((20000 + RANDOM % 20000))
+	while [ "$KPORT" = "$PORT" ] || [ "$KPORT" = "$MPORT" ] || [ "$KPORT" = "$HPORT" ] || [ "$KPORT" = "$OVERWRITE_PORT" ]; do KPORT=$((KPORT + 1)); done
+	"$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' >"$K/hook.secret"
+	chmod 600 "$K/hook.secret"
+	"$PYTHON" "$ROOT/test/interop/hook_receiver.py" "$K/hook.secret" "$K/receiver.port" "$K/deliveries.jsonl" 2>"$K/receiver.log" &
+	PIDS+=($!)
+	for _ in $(seq 100); do [ -s "$K/receiver.port" ] && break; sleep 0.1; done
+	RPORT=$(cat "$K/receiver.port")
+	# The archive script exactly as docs/hooks.md shows it, archiving under $K.
+	awk '/^A safe archive script/ { s = 1 } s && /^```sh$/ { c = 1; next } c && /^```$/ { exit } c' "$ROOT/docs/hooks.md" |
+		sed "s|/srv/archive|$K/archive|" >"$K/bin/archive-upload"
+	chmod 755 "$K/bin/archive-upload"
+	grep -q 'mv -n --' "$K/bin/archive-upload" || fail "hooks: no archive script in docs/hooks.md"
+	printf 'bystander\n' >"$K/drop/keep.txt"
+	cat >"$K/gosftpd.toml" <<TOML
+config_version = 1
+[server]
+listen = ["127.0.0.1:$KPORT"]
+host_keys = ["$K/state/host_key"]
+host_key_auto_generate = true
+[mounts.inbox]
+path = "$K/inbox"
+[mounts.drop]
+path = "$K/drop"
+[users.partner]
+authorized_keys_file = "$WORK/id_partner.pub"
+access = { inbox = "upload", drop = "upload" }
+[audit]
+output = "$K/audit.jsonl"
+[[hooks]]
+name = "notify"
+on = ["fs.upload"]
+mounts = ["inbox"]
+exclude = ["*.filepart", "*.partial"]
+webhook = { url = "http://127.0.0.1:$RPORT/hooks/secret-token?k=secret-query", secret_file = "$K/hook.secret" }
+[[hooks]]
+name = "archive"
+on = ["fs.upload"]
+mounts = ["drop"]
+exclude = ["*.filepart", "*.partial"]
+delay = "1s"
+exec = { argv = ["/bin/sh", "$K/bin/archive-upload"], timeout = "30s" }
+TOML
+	chmod 600 "$K/gosftpd.toml"
+	"$WORK/gosftpd" config validate --check-fs --config "$K/gosftpd.toml" >/dev/null 2>"$K/validate.err" &&
+		pass "hooks: config validate --check-fs" || fail "hooks: config validate: $(cat "$K/validate.err")"
+	"$WORK/gosftpd" serve --config "$K/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$K/server.log" &
+	PIDS+=($!)
+	for _ in $(seq 100); do
+		if (exec 3<>"/dev/tcp/127.0.0.1/$KPORT") 2>/dev/null; then break; fi
+		sleep 0.1
+	done
+	"$WORK/gosftpd" hostkey show --host-key "$K/state/host_key" --known-hosts "127.0.0.1:$KPORT" | tail -n 1 >"$K/known_hosts"
+	deliveries() { [ -f "$K/deliveries.jsonl" ] && wc -l <"$K/deliveries.jsonl" || echo 0; }
+	wait_deliveries() { # wait_deliveries N: true once there are N deliveries, and no more a moment later
+		for _ in $(seq 200); do [ "$(deliveries)" -ge "$1" ] && break; sleep 0.1; done
+		sleep 1
+		[ "$(deliveries)" = "$1" ]
+	}
+
+	# OpenSSH sftp: one delivery, with the final name.
+	printf 'put %s /inbox/report.pdf\n' "$WORK/local/short.txt" >"$K/put.batch"
+	sftp -P "$KPORT" -o "UserKnownHostsFile=$K/known_hosts" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes \
+		-i "$WORK/id_partner" -b "$K/put.batch" partner@127.0.0.1 >"$K/put.out" 2>&1 || fail "hooks: sftp put: $(cat "$K/put.out")"
+	want=1
+	wait_deliveries 1 || fail "hooks: $(deliveries) deliveries after one sftp put, want 1"
+
+	# rclone: a temporary name and a rename, one delivery for the final name.
+	if command -v "$RCLONE" >/dev/null 2>&1; then
+		for v in $(compgen -e | grep '^RCLONE_' || true); do unset "$v"; done
+		mkdir -p "$WORK/local/rc-hook"
+		cp "$WORK/local/upload.bin" "$WORK/local/rc-hook/big.bin"
+		"$RCLONE" --config /dev/null --retries 1 --low-level-retries 1 copy "$WORK/local/rc-hook" \
+			":sftp,host=127.0.0.1,port=$KPORT,user=partner,key_file=$WORK/id_partner,known_hosts_file=$K/known_hosts,shell_type=none:inbox/rc" \
+			2>"$K/rclone.err" || fail "hooks: rclone copy: $(tail -3 "$K/rclone.err")"
+		want=2
+		wait_deliveries 2 || fail "hooks: $(deliveries) deliveries after rclone, want 2"
+	else
+		missing rclone
+	fi
+	"$PYTHON" - "$K/deliveries.jsonl" "$want" <<'PY' && pass "hooks: one verified delivery per file, with the final name and the mount" || fail "hooks: deliveries: $(cat "$K/deliveries.jsonl")"
+import json, sys
+got = [json.loads(line) for line in open(sys.argv[1])]
+want = [("fs.upload", "/inbox/report.pdf", None), ("fs.rename", "/inbox/rc/big.bin", True)][: int(sys.argv[2])]
+assert len(got) == len(want), got
+assert all(d["ok"] and d["user_agent"] == "gosftpd" and d["url_path"] == "/hooks/secret-token?k=secret-query" for d in got), got
+assert len({d["delivery"] for d in got}) == len(got), got
+for d, (event, final, uploaded) in zip(got, want):
+    b = d["body"]
+    assert d["event"] == event == b["event"] and b["final_path"] == final and b["mount"] == "inbox", d
+    assert b.get("uploaded") == uploaded and b["user"] == "partner" and b["result"] == "ok", d
+PY
+	if grep -q -e secret-token -e secret-query "$K/server.log"; then fail "hooks: the webhook URL's token is in the log"; else pass "hooks: the URL's token stays out of the log"; fi
+
+	# The archive script gets hostile names (paramiko: OpenSSH sftp cannot
+	# send a newline in a name). A name that ran as code would leave a file
+	# ending in .injected; one that became an option or a glob would move
+	# the wrong files.
+	if "$PYTHON" -c 'import paramiko' 2>/dev/null; then
+		"$PYTHON" - "$KPORT" "$K/known_hosts" "$WORK/id_partner" <<'PY' || fail "hooks: paramiko upload of hostile names"
+import sys, paramiko
+port, kh, key = sys.argv[1], sys.argv[2], sys.argv[3]
+names = ["*", "a b", "x\ny", "-rf", '$(touch -- "$GOSFTPD_HOST_PATH".inj"ected")', '`touch -- "$GOSFTPD_HOST_PATH".inj"ected"`']
+c = paramiko.SSHClient()
+c.load_host_keys(kh)
+c.set_missing_host_key_policy(paramiko.RejectPolicy())
+c.connect("127.0.0.1", port=int(port), username="partner", key_filename=key, allow_agent=False, look_for_keys=False, timeout=10)
+s = c.open_sftp()
+for n in names:
+    with s.open("/drop/" + n, "w") as f:
+        f.write(n.encode())
+c.close()
+PY
+		"$PYTHON" - "$K" <<'PY' && pass "hooks: an exec hook from docs/hooks.md moves exactly each uploaded file, whatever its name" || fail "hooks: archive script with hostile names: $(ls -laR "$K/drop" "$K/archive")"
+import os, sys, time
+k = sys.argv[1]
+names = {"*", "a b", "x\ny", "-rf", '$(touch -- "$GOSFTPD_HOST_PATH".inj"ected")', '`touch -- "$GOSFTPD_HOST_PATH".inj"ected"`'}
+archive = os.path.join(k, "archive", "partner")
+for _ in range(200):
+    if os.path.isdir(archive) and len(os.listdir(archive)) >= len(names):
+        break
+    time.sleep(0.1)
+time.sleep(1)
+assert set(os.listdir(archive)) == names, os.listdir(archive)
+for n in names:
+    assert open(os.path.join(archive, n), "rb").read() == n.encode(), n
+assert os.listdir(os.path.join(k, "drop")) == ["keep.txt"], os.listdir(os.path.join(k, "drop"))
+for root, dirs, files in os.walk(k):
+    assert not [f for f in files + dirs if f.endswith(".injected")], (root, files)
+PY
+	else
+		missing paramiko
+	fi
+	grep -q '"event":"fs.upload","mount":"inbox","path":"/inbox/report.pdf"' "$K/audit.jsonl" && pass "hooks: the audit log has the mount" || fail "hooks: no mount in the audit log"
+else
+	missing python3
+fi
+
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"
 	echo "--- server log (config)"; cat "$C/server.log"
 	echo "--- server log (host keys)"; cat "$WORK/hk/server.log"
+	if [ -f "$WORK/hooks/server.log" ]; then echo "--- server log (hooks)"; cat "$WORK/hooks/server.log"; fi
 	exit 1
 fi
 echo "all interop checks passed ($(ssh -V 2>&1))"

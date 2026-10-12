@@ -46,7 +46,7 @@ func TestResumeThroughClient(t *testing.T) {
 	}
 	waitFor(t, func() bool { return strings.Contains(e.auditLog.String(), `"start_offset":20000`) })
 	log := e.auditLog.String()
-	if !strings.Contains(log, `"event":"fs.denied","op":"fs.upload","path":"/part.bin","reason":"existing data is immutable"`) {
+	if !strings.Contains(log, `"event":"fs.denied","mount":"share","op":"fs.upload","path":"/part.bin","reason":"existing data is immutable"`) {
 		t.Errorf("refused write not audited:\n%s", log)
 	}
 	if !strings.Contains(log, `"start_offset":20000,"duration_ms"`) || !strings.Contains(log, `"result":"denied"`) {

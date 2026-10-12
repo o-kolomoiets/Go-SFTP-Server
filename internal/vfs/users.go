@@ -14,7 +14,9 @@ import (
 //   - owned: regular files the user created, so that uploaders may rename
 //     and set times on them with only the write permission (temporary
 //     upload names); an entry holds the file's identity and expires
-//     OwnTTL after the user last changed the file.
+//     OwnTTL after the user last changed the file. It also holds whether
+//     the file's last upload was closed with result ok, for the hooks'
+//     "uploaded" mark (ADR 0010).
 //   - redirects: stat_redirect, see Session.Stat.
 type userState struct {
 	owned     map[userKey]ownEntry
@@ -29,8 +31,9 @@ type userKey struct {
 }
 
 type ownEntry struct {
-	id    fileID
-	until time.Time
+	id      fileID
+	until   time.Time
+	arrived bool // the last upload was closed with result ok; no rename since
 }
 
 // redirect points STAT, LSTAT and SETSTAT of a requested path at the name
@@ -125,8 +128,9 @@ func makeRoom[V ownEntry | redirect](m map[userKey]V, limit int, now time.Time, 
 func ownUntil(e ownEntry) time.Time   { return e.until }
 func redirUntil(r redirect) time.Time { return r.until }
 
-// own records that the session's user created the file fi at rel.
-func (s *Session) own(v *view, rel string, fi os.FileInfo) {
+// own records that the session's user created the file fi at rel;
+// arrived records that its upload was closed with result ok.
+func (s *Session) own(v *view, rel string, fi os.FileInfo, arrived bool) {
 	t := s.t
 	t.umu.Lock()
 	defer t.umu.Unlock()
@@ -139,7 +143,7 @@ func (s *Session) own(v *view, rel string, fi os.FileInfo) {
 	if _, ok := st.owned[k]; !ok {
 		makeRoom(st.owned, maxOwned, now, ownUntil)
 	}
-	st.owned[k] = ownEntry{id: identify(fi), until: now.Add(OwnTTL)}
+	st.owned[k] = ownEntry{id: identify(fi), until: now.Add(OwnTTL), arrived: arrived}
 }
 
 // isCreated reports whether rel is a file this user created and nobody has
@@ -170,18 +174,77 @@ func (s *Session) isCreated(v *view, rel string) bool {
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 	for _, h := range t.writing {
-		if h.reserved && h.s.user == s.user && h.v.m.dir == v.m.dir && os.SameFile(h.ino, cur) {
+		if h.owned && h.s.user == s.user && h.v.m.dir == v.m.dir && os.SameFile(h.ino, cur) {
 			return true
 		}
 	}
 	return false
 }
 
+// ownedFile reports whether fi, a file open at rel, is a file this user
+// created and nobody has changed since.
+func (s *Session) ownedFile(v *view, rel string, fi os.FileInfo) bool {
+	t := s.t
+	t.umu.Lock()
+	defer t.umu.Unlock()
+	st := t.lookup(s.user)
+	if st == nil {
+		return false
+	}
+	e, ok := st.owned[userKey{v.m.dir, rel}]
+	return ok && !t.now().After(e.until) && e.id.matches(fi)
+}
+
+// clearArrived ends the arrived mark of the user's file at rel: an upload
+// to the name again gives up what is there (ADR 0010).
+func (s *Session) clearArrived(v *view, rel string) {
+	t := s.t
+	t.umu.Lock()
+	defer t.umu.Unlock()
+	if st := t.lookup(s.user); st != nil {
+		k := userKey{v.m.dir, rel}
+		if e, ok := st.owned[k]; ok && e.arrived {
+			e.arrived = false
+			st.owned[k] = e
+		}
+	}
+}
+
+// arrived reports whether cur at rel completes an upload of this user: a
+// recorded file whose last upload was closed with result ok, unchanged
+// since, not renamed since, and with no upload of it open (ADR 0010).
+func (s *Session) arrived(v *view, rel string, cur os.FileInfo) bool {
+	t := s.t
+	t.umu.Lock()
+	var (
+		e    ownEntry
+		live bool
+	)
+	if st := t.lookup(s.user); st != nil {
+		var ok bool
+		e, ok = st.owned[userKey{v.m.dir, rel}]
+		live = ok && !t.now().After(e.until)
+	}
+	t.umu.Unlock()
+	if !live || !e.arrived || !e.id.matches(cur) {
+		return false
+	}
+	t.wmu.Lock()
+	defer t.wmu.Unlock()
+	for _, h := range t.writing {
+		if os.SameFile(h.ino, cur) {
+			return false
+		}
+	}
+	return true
+}
+
 // moveCreated follows a rename by the user. own is whether the file was the
 // user's before (checked by isCreated, with its identity and expiry): only
 // then is it the user's under the new name, with its new change time.
-// Either way, neither name keeps an earlier entry.
-func (s *Session) moveCreated(v *view, from, to string, own bool) {
+// Either way, neither name keeps an earlier entry. A rename clears the
+// arrived mark; keep (a change in place, such as setting times) keeps it.
+func (s *Session) moveCreated(v *view, from, to string, own, keep bool) {
 	t := s.t
 	t.umu.Lock()
 	var e ownEntry
@@ -196,22 +259,23 @@ func (s *Session) moveCreated(v *view, from, to string, own bool) {
 		return
 	}
 	if cur, err := v.root.Lstat(to); err == nil && os.SameFile(e.id.fi, cur) {
-		s.own(v, to, cur)
+		s.own(v, to, cur, keep && e.arrived)
 	}
 }
 
 // refreshCreated re-records rel after a change by its owner.
-func (s *Session) refreshCreated(v *view, rel string) { s.moveCreated(v, rel, rel, true) }
+func (s *Session) refreshCreated(v *view, rel string) { s.moveCreated(v, rel, rel, true, true) }
 
-// closedCreated records the final identity of an upload being closed. The
-// handle itself proves that this upload created the file (its entry may
-// have been evicted while the upload was open).
-func (s *Session) closedCreated(h *WriteHandle, st os.FileInfo) {
+// closedCreated records the final identity of an upload being closed, and
+// whether it was closed with result ok. The handle itself proves that the
+// file is the user's (its entry may have been evicted while the upload was
+// open).
+func (s *Session) closedCreated(h *WriteHandle, st os.FileInfo, ok bool) {
 	if h.id == nil || !os.SameFile(h.id, st) {
 		return
 	}
 	if cur, err := h.v.root.Lstat(h.rel); err == nil && os.SameFile(cur, st) {
-		s.own(h.v, h.rel, st)
+		s.own(h.v, h.rel, st, ok)
 	}
 }
 

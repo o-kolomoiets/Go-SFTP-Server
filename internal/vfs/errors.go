@@ -36,6 +36,9 @@ var (
 	// ErrUnavailable: a configured mount could not be opened (see
 	// Options.Unavailable and Table.Reload).
 	ErrUnavailable = errors.New("mount unavailable")
+
+	// errWriteFailed: an atomic upload whose write failed is not published.
+	errWriteFailed = errors.New("a write of the upload failed; not published")
 )
 
 // osError classifies an error from os.Root into one of the VFS errors.

@@ -327,9 +327,11 @@ func TestRecoverAudit(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { defer close(done); recoverAudit(ctx, al, 10*time.Millisecond) }()
-		time.Sleep(50 * time.Millisecond)
-		if !al.Failing() || al.WriteErrors() < 3 {
-			t.Errorf("fail-open %v: while failing: failing %v, %d write errors (want a probe per tick)", failOpen, al.Failing(), al.WriteErrors())
+		// Probes go on while the log fails (timers are coarse on Windows,
+		// so wait for them rather than count ticks).
+		waitUntil(t, "two probes after the first failure", func() bool { return al.WriteErrors() >= 3 })
+		if !al.Failing() {
+			t.Errorf("fail-open %v: not failing after %d write errors", failOpen, al.WriteErrors())
 		}
 		out.setFail(false)
 		waitUntil(t, "the audit log recovers", func() bool { return !al.Failing() })

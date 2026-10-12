@@ -89,6 +89,7 @@ are still errors.
 | VFS registry | shared, see above |
 | Audit output | one writer whose file is reopened or switched under its lock |
 | Log level | a `slog.LevelVar` |
+| Hooks | one dispatcher for the process (ADR 0010); the hook set is replaced in place, for open connections too; events of a kept hook not yet attempted, also those waiting out their delay, are filtered again and use its new spec; those of a removed hook are dropped |
 
 **The reload procedure** (`cli`), serialized by one mutex:
 

@@ -73,7 +73,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `handshake_timeout` | `"30s"` | Time a client has to finish the SSH handshake and authentication (1s–10m). |
 | `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
-| `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`. |
+| `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.
@@ -464,6 +464,55 @@ and examples.
 | `listen` | `""` | `HOST:PORT` of the admin listener, for example `"127.0.0.1:9090"`; empty means none. Restart only. It has no authentication or TLS: an address that is not loopback gets a warning. A failure to bind fails the start. |
 | `pprof` | `false` | Serves `/debug/pprof` there (Go profiles), in binaries built with `-tags pprof` only; release binaries refuse it as a configuration error. A reload turns it on and off. |
 
+## `[[hooks]]`
+
+Programs and webhooks that run when files arrive, are downloaded, renamed
+or removed (ADR 0010). Each `[[hooks]]` table is one hook with exactly one
+of `exec` and `webhook`. Hooks run asynchronously: an SFTP request never
+waits for one. [hooks.md](hooks.md) explains the events, the payload, the
+signature and safe scripts. Hooks are reloadable; a reload reaches open
+connections too (see [Reload](#reload)).
+
+```toml
+[[hooks]]
+name = "notify"
+on = ["fs.upload"]
+exclude = ["*.filepart", "*.partial"]
+webhook = { url = "https://example.internal/hooks/sftp", secret_file = "/etc/gosftpd/hook.secret" }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `name` | required | Unique; it names the hook in the log. |
+| `on` | required | Events: `fs.upload`, `fs.download`, `fs.rename`, `fs.remove`, `fs.mkdir`, `fs.rmdir`, `fs.setstat`. A hook fires only for a result of `ok`. `fs.upload` also fires for the first rename of a file its uploader just uploaded, which completes a temp-file upload (`"uploaded":true`, see [hooks.md](hooks.md#a-file-arrived)). |
+| `mounts` | all | Only events in these mounts (names compared case-insensitively). |
+| `glob` | all | File name patterns (`path.Match`, case-sensitive) matched against the base name of the event's file (`final_path` for uploads and renames); the hook fires if one matches. |
+| `exclude` | none | Patterns like `glob`; the hook does not fire if one matches. `["*.filepart", "*.partial"]` leaves out WinSCP's and rclone's temporary names. |
+| `delay` | `"0s"` | Wait this long after the event before running (at most 1h). A hook that moves or deletes the file needs at least `"1m"`: clients check a file right after uploading it. Events wait in the queue meanwhile. |
+| `concurrency` | `1` | Deliveries at a time (1–16). With 1, the events of a hook run in order. |
+| `queue` | `1000`, or `10000` with a `delay` | Events that may wait (1–10000), and at most 64 MiB of them; beyond that new events are dropped, with a warning. With a delay, the queue holds every event of the last `delay`. |
+
+`on`, `mounts`, `glob` and `exclude` select events; they are not a security
+filter.
+
+### `[hooks.exec]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `argv` | required | The program (an absolute path) and its arguments; never run through a shell, and nothing from a client is an argument. Every absolute element that is not a directory must lie outside every mount; an existing regular file among them must belong to root or to gosftpd's user and not be writable by group or others. |
+| `timeout` | `"30s"` | The program and its process group are killed when it runs out (1s–1h). |
+
+The program gets the event line on stdin and `GOSFTPD_*` variables; see
+[hooks.md](hooks.md#exec).
+
+### `[hooks.webhook]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `url` | required | `https`, or `http` (a warning unless the host is loopback). No user info. |
+| `secret_file` | required | The HMAC key: at least 32 printable ASCII bytes after trimming white space (`openssl rand -hex 32`). Mode 0400, 0440, 0600 or 0640, owned by root or gosftpd's user, outside every mount. Read again on reload. |
+| `timeout` | `"10s"` | Per attempt (1s–60s). |
+
 ## Host keys
 
 `server.host_keys` lists the host private keys, at most one per key type
@@ -603,6 +652,13 @@ command-line flags and environment, and checks it like `config validate
   fails the reload, as every file gosftpd trusts does (for the running keys
   too, when they stay). A change of the host keys is logged with the
   fingerprints.
+- **Hooks** are replaced in place, for open connections too: removing a
+  hook or rotating its secret takes effect at once. A kept hook's pending
+  events are filtered again and use its new settings. A hook whose program
+  fails its checks (missing, not executable, writable by others) is left
+  out until a reload fixes it; one whose `secret_file` cannot be used keeps
+  its running secret. Both give a warning, count in
+  `gosftpd_hooks_not_updated`, and do not fail the reload.
 - **Restart only:** `server.listen`, `server.host_key_auto_generate`,
   `server.crypto_policy`, `log.format`, `audit.events`, `audit.on_error`
   and `metrics.listen`. A change is logged as a warning and listed in the

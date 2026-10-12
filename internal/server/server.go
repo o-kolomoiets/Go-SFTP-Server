@@ -24,6 +24,7 @@ import (
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
+	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sftpd"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -68,6 +69,9 @@ type Config struct {
 	// Metrics counts connections, logins and SFTP operations; nil counts
 	// nothing.
 	Metrics *obs.Metrics
+	// Hooks gets the file events (ADR 0010); nil runs no hooks. It lives
+	// for the process: Reload does not replace it, the caller updates it.
+	Hooks *hooks.Dispatcher
 
 	// Methods lists the enabled login methods, auth.MethodPublicKey and
 	// auth.MethodPassword; empty means public keys only.
@@ -100,6 +104,7 @@ type Server struct {
 	audit   *audit.Logger
 	log     *slog.Logger
 	metrics *obs.Metrics
+	hooks   *hooks.Dispatcher
 	limits  *limiter
 	rejects rejectLog
 
@@ -144,6 +149,7 @@ func New(cfg Config) (*Server, error) {
 		audit:   cfg.Audit,
 		log:     cfg.Log,
 		metrics: cfg.Metrics,
+		hooks:   cfg.Hooks,
 		conns:   make(map[net.Conn]struct{}),
 		live:    make(map[*liveConn]struct{}),
 		now:     time.Now,
@@ -539,7 +545,7 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	done := make(chan struct{})
 	defer close(done)
 	go watch(sconn, act, sn.cfg.IdleTimeout, sn.cfg.KeepaliveInterval, done, lc.close)
-	s.serveChannels(sn, chans, name, act, proofs, al, log)
+	s.serveChannels(sn, chans, name, connID, act, proofs, al, log)
 	end := "ok"
 	if r := lc.reason.Load(); r != nil {
 		end = *r
@@ -735,7 +741,7 @@ func (ca *connAuth) fail() {
 	ca.al.Event("auth.ban", slog.String("source", src), slog.Int64("duration_ms", bans.Duration().Milliseconds()))
 }
 
-func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user string, act *activity, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user, connID string, act *activity, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
 	var (
 		sessions sync.WaitGroup
 		active   atomic.Int32
@@ -757,14 +763,14 @@ func (s *Server) serveChannels(sn *snapshot, chans <-chan ssh.NewChannel, user s
 		active.Add(1)
 		sessions.Go(func() {
 			defer active.Add(-1)
-			s.serveSession(sn, activeChannel{ch, act}, creqs, user, proofs, al, log)
+			s.serveSession(sn, activeChannel{ch, act}, creqs, user, connID, proofs, al, log)
 		})
 	}
 }
 
 // serveSession answers channel requests: only one "subsystem sftp" is
 // accepted; shell, exec, pty-req, env and the rest are refused.
-func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Request, user string, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Request, user, connID string, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
 	var done chan struct{}
 	for req := range reqs {
 		if req.Type == "subsystem" && done == nil && isSFTP(req.Payload) {
@@ -772,7 +778,7 @@ func (s *Server) serveSession(sn *snapshot, ch ssh.Channel, reqs <-chan *ssh.Req
 			done = make(chan struct{})
 			go func() {
 				defer close(done)
-				s.serveSFTP(sn, ch, user, proofs, al, log)
+				s.serveSFTP(sn, ch, user, connID, proofs, al, log)
 			}()
 			continue
 		}
@@ -792,7 +798,7 @@ func isSFTP(payload []byte) bool {
 	return ssh.Unmarshal(payload, &p) == nil && p.Name == "sftp"
 }
 
-func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
+func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user, connID string, proofs *hostKeyProofs, al *audit.Logger, log *slog.Logger) {
 	sessionID := newID()
 	al = al.With("session_id", sessionID)
 	log = log.With("session_id", sessionID)
@@ -817,6 +823,7 @@ func (s *Server) serveSFTP(sn *snapshot, ch ssh.Channel, user string, proofs *ho
 	}
 
 	h := sftpd.New(vs, al, log, s.metrics, sn.cfg.MaxOpenHandles)
+	h.SetHooks(s.hooks, connID)
 	rs := sftp.NewRequestServer(sftpd.NewGate(ch), h.Handlers(), sftp.WithStartDirectory("/"))
 	err := rs.Serve()
 

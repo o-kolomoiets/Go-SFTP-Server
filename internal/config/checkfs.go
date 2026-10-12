@@ -64,6 +64,7 @@ func (c *Config) checkFS(reload bool, live []LiveMount) (warnings, unavailable [
 	if !reload {
 		c.checkHostKeys(p)
 		c.checkUsers(p)
+		c.checkHooks(p) // on reload, cli keeps or leaves out a hook instead
 	}
 	c.checkAudit(p)
 	c.checkTrusted(p, live)
@@ -168,6 +169,9 @@ func (c *Config) checkTrusted(p *problems, live []LiveMount) {
 	}
 	if out := c.Audit.Output; out != "" && out != "stdout" {
 		files = append(files, trusted{out, "the audit log", false, true})
+	}
+	for _, f := range c.hookFiles() {
+		files = append(files, trusted{f, "a file of a hook", true, false})
 	}
 	type mount struct {
 		key, path string

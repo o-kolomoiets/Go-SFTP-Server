@@ -83,7 +83,7 @@ mount `inbox` and one with `full` on mount `files`.
 | 4 | Upload the same 5 MiB file again (`rename`) | WinSCP asks to overwrite; on "Yes" the upload succeeds and lands as `file (1).ext`; the original is unchanged. |
 | 5 | Delete, rename, download as `upload` | Refused with "Permission denied"; the session stays usable. |
 | 6 | Upload into `files` with `on_conflict = "version"` as `full`, twice | The name keeps the new content; the old one is under `.versions/`, readable by typing the path. |
-| 7 | Cancel a 1 GiB upload halfway, with `atomic_uploads = true` | No file under the name and no `.filepart` left; the audit log has `result = "aborted"`. |
+| 7 | Cancel a 1 GiB upload halfway, with `atomic_uploads = true` | No file under the final name. WinSCP's Cancel closes the file normally, so gosftpd cannot tell it from a finished upload: a `.filepart` with the part sent may remain, with `result = "ok"`; a `fs.upload` hook that excludes `*.filepart` does not fire. |
 | 8 | Disconnect and reconnect during a large upload with `resume = "append-only"` | WinSCP offers to resume; the result is identical to the source. |
 | 9 | Synchronize a local folder to `files` (Commands → Synchronize) | Runs without errors; a second run finds nothing to do. |
 | 10 | Check the audit log | Every step is there with `user`, `path` and `final_path`. |
