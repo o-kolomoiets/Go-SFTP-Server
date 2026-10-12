@@ -5,6 +5,11 @@
 #
 # paramiko, rclone and lftp are tested when available (PYTHON with paramiko,
 # RCLONE, lftp in PATH); REQUIRE_CLIENTS=1 makes a missing one a failure.
+#
+# On Linux every server applies Landlock (ADR 0011), so each layout below
+# keeps what a reload reads in a directory of its own (docs/security.md).
+# A kernel without Landlock skips the Landlock checks; REQUIRE_LANDLOCK=1
+# makes that a failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -31,7 +36,9 @@ RCLONE=${RCLONE:-rclone}
 # the atomic mode that unit tests with -race use, so that both merge.
 COVER=()
 if [ -n "${GOCOVERDIR:-}" ]; then COVER=(-cover -covermode=atomic -coverpkg=./...); fi
-(cd "$ROOT" && go build "${COVER[@]}" -o "$WORK/gosftpd" ./cmd/gosftpd)
+# Without cgo, as the release binaries are: Landlock then reaches every
+# thread through syscall.AllThreadsSyscall.
+(cd "$ROOT" && CGO_ENABLED=0 go build "${COVER[@]}" -o "$WORK/gosftpd" ./cmd/gosftpd)
 # gosftpd refuses to run as root; containers often are root.
 ROOT_FLAG=()
 if [ "$(id -u)" = 0 ]; then ROOT_FLAG=(--allow-root); fi
@@ -41,23 +48,44 @@ head -c 3000000 /dev/urandom >"$WORK/local/upload.bin"
 printf 'short' >"$WORK/local/short.txt"
 touch -d '2020-01-02 03:04:05' "$WORK/local/upload.bin"
 
+# landlock_logged NAME LOG [WANT]: the server's log says that Landlock was
+# applied, or WANT. It waits for the line: the listeners accept before
+# the sandbox step has logged.
+landlock_logged() {
+	local name=$1 log=$2 want=${3:-landlock: ABI v[2-5] applied}
+	for _ in $(seq 100); do
+		grep -q 'landlock: \(ABI v[0-9]* applied\|not applied\|not available\|failed\)' "$log" && break
+		sleep 0.1
+	done
+	if grep -q "$want" "$log"; then
+		pass "$name: $(grep -o "$want" "$log" | head -n 1)"
+	elif [ -z "${REQUIRE_LANDLOCK:-}" ] && grep -q 'landlock: not available' "$log"; then
+		echo "skip: $name: $(grep -o 'landlock: not available.*' "$log" | head -n 1)"
+	else
+		fail "$name: no \"$want\" in the log: $(grep landlock "$log" | head -n 3)"
+	fi
+}
+
 # start_server NAME POLICY: serves $WORK/NAME on a free port, sets PORT.
+# The audit log has a directory of its own, so that it can be rotated by
+# rename under Landlock.
 start_server() {
 	local name=$1 policy=$2
-	mkdir -p "$WORK/$name/share" "$WORK/$name/outside" "$WORK/$name/state"
+	mkdir -p "$WORK/$name/share" "$WORK/$name/outside" "$WORK/$name/state" "$WORK/$name/audit"
 	printf 'original content that is longer than the upload\n' >"$WORK/$name/share/a.txt"
 	printf 'secret\n' >"$WORK/$name/outside/secret.txt"
 	ln -s ../outside "$WORK/$name/share/evil"
 	PORT=$((20000 + RANDOM % 20000))
 	"$WORK/gosftpd" serve --dir "$WORK/$name/share" --on-conflict "$policy" \
 		--authorized-keys "$WORK/id_ed25519.pub" --state-dir "$WORK/$name/state" \
-		--listen "127.0.0.1:$PORT" --audit-output "$WORK/$name/audit.jsonl" "${ROOT_FLAG[@]}" \
+		--listen "127.0.0.1:$PORT" --audit-output "$WORK/$name/audit/audit.jsonl" "${ROOT_FLAG[@]}" \
 		2>"$WORK/$name/server.log" &
 	PIDS+=($!)
 	for _ in $(seq 100); do
 		if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then break; fi
 		sleep 0.1
 	done
+	landlock_logged "$name" "$WORK/$name/server.log"
 	"$WORK/gosftpd" hostkey show --state-dir "$WORK/$name/state" --known-hosts "127.0.0.1:$PORT" |
 		tail -n 1 >"$WORK/$name/known_hosts"
 	OPTS=(-o "UserKnownHostsFile=$WORK/$name/known_hosts" -o StrictHostKeyChecking=yes
@@ -112,24 +140,25 @@ cmp -s "$WORK/local/upload.bin" "$WORK/local/scp-down.bin" && pass "scp round tr
 if ssh -p "$PORT" "${OPTS[@]}" alice@127.0.0.1 id >/dev/null 2>&1; then fail "exec allowed"; else pass "exec refused"; fi
 
 # --- audit ----------------------------------------------------------------
+A="$WORK/rename/audit"
 for ev in conn.accept auth.success session.start fs.upload fs.download fs.rename fs.denied session.end; do
-	grep -q "\"event\":\"$ev\"" "$WORK/rename/audit.jsonl" && pass "audit has $ev" || fail "audit lacks $ev"
+	grep -q "\"event\":\"$ev\"" "$A/audit.jsonl" && pass "audit has $ev" || fail "audit lacks $ev"
 done
 
 # --- signals: HUP reloads and reopens the audit log, TERM exits cleanly ----
 RENAME_PID=${PIDS[0]}
-mv "$WORK/rename/audit.jsonl" "$WORK/rename/audit.jsonl.1" # as logrotate does
+mv "$A/audit.jsonl" "$A/audit.jsonl.1" # as logrotate does
 kill -HUP "$RENAME_PID"
 for _ in $(seq 100); do
-	if grep -q '"event":"server.reload"' "$WORK/rename/audit.jsonl" 2>/dev/null; then break; fi
+	if grep -q '"event":"server.reload"' "$A/audit.jsonl" 2>/dev/null; then break; fi
 	sleep 0.1
 done
 kill -0 "$RENAME_PID" 2>/dev/null && pass "SIGHUP does not stop the server" || fail "SIGHUP stopped the server"
-grep -q '"event":"server.reload".*"result":"ok"' "$WORK/rename/audit.jsonl" 2>/dev/null &&
+grep -q '"event":"server.reload".*"result":"ok"' "$A/audit.jsonl" 2>/dev/null &&
 	pass "SIGHUP reloads and reopens the audit log" || fail "no server.reload in the reopened audit log"
 kill -TERM "$RENAME_PID"
 if wait "$RENAME_PID"; then pass "SIGTERM exits 0"; else fail "SIGTERM exit code $?"; fi
-grep -q '"event":"server.stop"' "$WORK/rename/audit.jsonl" && pass "audit has server.stop" || fail "audit lacks server.stop"
+grep -q '"event":"server.stop"' "$A/audit.jsonl" && pass "audit has server.stop" || fail "audit lacks server.stop"
 
 # --- on_conflict=overwrite: scp over a longer file must not keep its tail --
 start_server overwrite overwrite
@@ -139,8 +168,13 @@ cmp -s "$WORK/local/short.txt" "$WORK/overwrite/share/a.txt" &&
 	pass "scp overwrite gives an identical file" || fail "scp overwrite left stale bytes: $(od -c "$WORK/overwrite/share/a.txt" | head -3)"
 
 # --- configuration file: users with read, upload and full access ----------
+# The configuration, users.d, the CA file and the revocation list live in
+# $CE, a directory of their own (ADR 0011): under Landlock its rule covers
+# the files that sed -i, user add --write and the steps below replace or
+# add. Scratch files and server.log stay in $C.
 C="$WORK/cfg"
-mkdir -p "$C/public" "$C/inbox" "$C/state"
+CE="$C/etc"
+mkdir -p "$C/public" "$C/inbox" "$C/state" "$CE/users.d"
 printf 'public file\n' >"$C/public/readme.txt"
 printf 'existing report\n' >"$C/inbox/report.txt"
 printf 'existing document\n' >"$C/inbox/doc.bin"
@@ -151,7 +185,7 @@ printf '#!/bin/sh\necho "%s"\n' "$COURIER_PASSWORD" >"$WORK/askpass"; chmod 700 
 PORT=$((20000 + RANDOM % 20000))
 while [ "$PORT" = "$OVERWRITE_PORT" ] || [ $((PORT + 1)) = "$OVERWRITE_PORT" ]; do PORT=$((PORT + 2)); done
 MPORT=$((PORT + 1)) # the admin listener
-cat >"$C/gosftpd.toml" <<TOML
+cat >"$CE/gosftpd.toml" <<TOML
 config_version = 1
 include = ["users.d/*.toml"]
 
@@ -207,20 +241,21 @@ output = "$C/audit.jsonl"
 [metrics]
 listen = "127.0.0.1:$MPORT"
 TOML
-chmod 600 "$C/gosftpd.toml"
-"$WORK/gosftpd" config validate --check-fs --config "$C/gosftpd.toml" >/dev/null && pass "config validate --check-fs" || fail "config validate"
-sed 's/^read_only = true/read_onyl = true/' "$C/gosftpd.toml" >"$C/typo.toml"; chmod 600 "$C/typo.toml"
+chmod 600 "$CE/gosftpd.toml"
+"$WORK/gosftpd" config validate --check-fs --config "$CE/gosftpd.toml" >/dev/null && pass "config validate --check-fs" || fail "config validate"
+sed 's/^read_only = true/read_onyl = true/' "$CE/gosftpd.toml" >"$C/typo.toml"; chmod 600 "$C/typo.toml"
 set +e; "$WORK/gosftpd" config validate --config "$C/typo.toml" 2>"$C/typo.err" >/dev/null; code=$?; set -e
 [ "$code" = 2 ] && grep -q 'unknown key mounts.public.read_onyl' "$C/typo.err" &&
 	pass "typo in a key: exit 2 naming the key" || fail "typo: exit $code: $(cat "$C/typo.err")"
 
-"$WORK/gosftpd" serve --config "$C/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$C/server.log" &
+"$WORK/gosftpd" serve --config "$CE/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$C/server.log" &
 CFG_PID=$!
 PIDS+=("$CFG_PID")
 for _ in $(seq 100); do
 	if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then break; fi
 	sleep 0.1
 done
+landlock_logged config "$C/server.log"
 "$WORK/gosftpd" hostkey show --host-key "$C/state/host_key" --known-hosts "127.0.0.1:$PORT" | tail -n 1 >"$C/known_hosts"
 as() { # as USER: sftp/scp options for USER
 	echo -o "UserKnownHostsFile=$C/known_hosts" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes -i "$WORK/id_$1"
@@ -448,8 +483,8 @@ for _ in $(seq 100); do
 done
 
 # Remove partner, add newbie.
-sed -i '/^\[users.partner\]/,/^$/d' "$C/gosftpd.toml"
-cat >>"$C/gosftpd.toml" <<TOML
+sed -i '/^\[users.partner\]/,/^$/d' "$CE/gosftpd.toml"
+cat >>"$CE/gosftpd.toml" <<TOML
 
 [users.newbie]
 authorized_keys = ["$(cat "$WORK/id_newbie.pub")"]
@@ -467,7 +502,7 @@ if wait "$HELD_PID" && [ -e "$C/inbox/held2.txt" ]; then pass "reload: an open s
 
 # user add --write, then disable: each applied by a reload.
 ssh-keygen -q -t ed25519 -N '' -C carol -f "$WORK/id_carol"
-if "$WORK/gosftpd" user add carol --key "$WORK/id_carol.pub" --access public=read --write --config "$C/gosftpd.toml" \
+if "$WORK/gosftpd" user add carol --key "$WORK/id_carol.pub" --access public=read --write --config "$CE/gosftpd.toml" \
 	--host 127.0.0.1 >"$C/carol.out" 2>&1 && grep -q "connect: sftp -P $PORT carol@127.0.0.1" "$C/carol.out"; then
 	pass "user add --write: file and connection details"
 else
@@ -476,7 +511,7 @@ fi
 hup || fail "reload after user add"
 # shellcheck disable=SC2046
 sftp -P "$PORT" $(as carol) -b "$C/pwd.batch" carol@127.0.0.1 >/dev/null 2>&1 && pass "user add --write: the user logs in after a reload" || fail "user add --write: carol cannot log in"
-"$WORK/gosftpd" user disable carol --config "$C/gosftpd.toml" >/dev/null || fail "user disable"
+"$WORK/gosftpd" user disable carol --config "$CE/gosftpd.toml" >/dev/null || fail "user disable"
 hup || fail "reload after user disable"
 # shellcheck disable=SC2046
 if sftp -P "$PORT" $(as carol) -b "$C/pwd.batch" carol@127.0.0.1 >/dev/null 2>&1; then
@@ -503,11 +538,11 @@ for u in dana eve fred; do ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$WORK/id_$
 ssh-keygen -q -s "$WORK/user_ca" -I dana-laptop -n dana -V -5m:+1h -z 42 "$WORK/id_dana.pub"
 ssh-keygen -q -s "$WORK/user_ca" -I eve -n mallory -V -5m:+1h "$WORK/id_eve.pub"
 ssh-keygen -q -s "$WORK/user_ca" -I fred-sftp -n dana -V -5m:+1h -O force-command=internal-sftp "$WORK/id_fred.pub"
-cp "$WORK/user_ca.pub" "$C/user_ca.pub"
-: >"$C/revoked"
-chmod 600 "$C/user_ca.pub" "$C/revoked"
-sed -i "s|^methods = \[\"publickey\", \"password\"\]|&\ntrusted_user_ca_keys_file = \"$C/user_ca.pub\"\nrevoked_keys_file = \"$C/revoked\"|" "$C/gosftpd.toml"
-cat >>"$C/gosftpd.toml" <<TOML
+cp "$WORK/user_ca.pub" "$CE/user_ca.pub"
+: >"$CE/revoked"
+chmod 600 "$CE/user_ca.pub" "$CE/revoked"
+sed -i "s|^methods = \[\"publickey\", \"password\"\]|&\ntrusted_user_ca_keys_file = \"$CE/user_ca.pub\"\nrevoked_keys_file = \"$CE/revoked\"|" "$CE/gosftpd.toml"
+cat >>"$CE/gosftpd.toml" <<TOML
 
 [users.dana]
 access = { public = "read" }
@@ -522,30 +557,34 @@ if sftp -P "$PORT" $(as eve) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1; t
 audit_has '"event":"auth.failure".*"reason":"cert_principal"' && pass "certificate: audit has reason cert_principal" || fail "certificate: no reason cert_principal"
 # shellcheck disable=SC2046
 sftp -P "$PORT" $(as fred) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1 && pass "certificate: force-command=internal-sftp is accepted" || fail "certificate: force-command=internal-sftp refused"
-cat "$WORK/id_dana-cert.pub" >>"$C/revoked"
+cat "$WORK/id_dana-cert.pub" >>"$CE/revoked"
 hup || fail "reload after revoking"
 # shellcheck disable=SC2046
 if sftp -P "$PORT" $(as dana) -b "$C/pwd.batch" dana@127.0.0.1 >/dev/null 2>&1; then fail "certificate: a revoked certificate logged in"; else pass "certificate: a revoked certificate is refused after a reload"; fi
 audit_has '"event":"auth.failure".*"reason":"key_revoked"' && pass "certificate: audit has reason key_revoked" || fail "certificate: no reason key_revoked"
-cp "$C/revoked" "$C/revoked.txt"
-ssh-keygen -q -k -f "$C/revoked" "$WORK/id_dana.pub"
+cp "$CE/revoked" "$C/revoked.txt"
+ssh-keygen -q -k -f "$CE/revoked" "$WORK/id_dana.pub"
 errors=$(reload_errors)
 if hup && [ "$(reload_errors)" -gt "$errors" ] && grep -q 'KRL' "$C/server.log"; then
 	pass "certificate: a KRL fails the reload"
 else
 	fail "certificate: a KRL did not fail the reload"
 fi
-cp "$C/revoked.txt" "$C/revoked"
+cp "$C/revoked.txt" "$CE/revoked"
 hup || fail "reload with the text revocation list"
 
 # --- host key rotation and host certificates (ADR 0008) -----------------------
+# The configuration in $HE and the host keys in $H/state each have a
+# directory of their own: under Landlock the rotation's new files and
+# renames there need no restart (ADR 0011).
 H="$WORK/hk"
-mkdir -p "$H/data" "$H/state"
+HE="$H/etc"
+mkdir -p "$H/data" "$H/state" "$HE"
 HPORT=$((20000 + RANDOM % 20000))
 while [ "$HPORT" = "$PORT" ] || [ "$HPORT" = "$MPORT" ] || [ "$HPORT" = "$OVERWRITE_PORT" ]; do HPORT=$((HPORT + 1)); done
 ssh-keygen -q -t ed25519 -N '' -f "$H/state/ed25519"
 ssh-keygen -q -t rsa -b 3072 -N '' -f "$H/state/rsa"
-cat >"$H/gosftpd.toml" <<TOML
+cat >"$HE/gosftpd.toml" <<TOML
 config_version = 1
 [server]
 listen = ["127.0.0.1:$HPORT"]
@@ -558,8 +597,8 @@ access = { data = "full" }
 [audit]
 output = "$H/audit.jsonl"
 TOML
-chmod 600 "$H/gosftpd.toml"
-"$WORK/gosftpd" serve --config "$H/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$H/server.log" &
+chmod 600 "$HE/gosftpd.toml"
+"$WORK/gosftpd" serve --config "$HE/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$H/server.log" &
 HK_PID=$!
 PIDS+=("$HK_PID")
 for _ in $(seq 100); do
@@ -567,6 +606,7 @@ for _ in $(seq 100); do
 	sleep 0.1
 done
 kill -0 "$HK_PID" 2>/dev/null || fail "host key server did not start: $(cat "$H/server.log")"
+landlock_logged "host keys" "$H/server.log"
 hk_hup() { # hk_hup: SIGHUP the host key server and wait for its server.reload event
 	local n
 	n=$(grep -c '"event":"server.reload"' "$H/audit.jsonl" || true)
@@ -593,7 +633,7 @@ known_line "$H/state/ed25519.pub" >"$H/kh_ed"
 known_line "$H/state/rsa.pub" >"$H/kh_rsa"
 
 # ed25519: the next key is learned before it is used, the old one forgotten after --retire.
-"$WORK/gosftpd" hostkey rotate --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/rotate.out" &&
+"$WORK/gosftpd" hostkey rotate --config "$HE/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/rotate.out" &&
 	pass "hostkey rotate: next key created" || fail "hostkey rotate: $(cat "$H/rotate.out")"
 hk_hup || fail "reload after hostkey rotate"
 hk_sftp "$H/kh_ed" >"$H/sftp1.out" 2>&1 || fail "host keys: sftp during the rotation: $(cat "$H/sftp1.out")"
@@ -601,7 +641,7 @@ knows "$H/kh_ed" "$H/state/ed25519.next.pub" && pass "host keys: OpenSSH learned
 	fail "host keys: the next key is not in known_hosts: $(cat "$H/kh_ed")"
 grep -q '"event":"conn.hostkeys_proved"' "$H/audit.jsonl" && pass "host keys: the proof is audited" || fail "host keys: no conn.hostkeys_proved"
 cp "$H/state/ed25519.pub" "$H/old_ed25519.pub"
-"$WORK/gosftpd" hostkey rotate --finish --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/finish.out" ||
+"$WORK/gosftpd" hostkey rotate --finish --config "$HE/gosftpd.toml" --host-key "$H/state/ed25519" >"$H/finish.out" ||
 	fail "hostkey rotate --finish: $(cat "$H/finish.out")"
 hk_hup || fail "reload after --finish"
 known_line "$H/state/ed25519.pub" >"$H/kh_new"
@@ -610,24 +650,24 @@ hk_sftp "$H/kh_new" -o UpdateHostKeys=no -o HostKeyAlgorithms=ssh-ed25519 >"$H/s
 hk_sftp "$H/kh_ed" -o HostKeyAlgorithms=ssh-ed25519 >"$H/sftp2b.out" 2>&1 &&
 	pass "host keys: a client that learned the key connects without a prompt" || fail "host keys: after --finish: $(cat "$H/sftp2b.out")"
 knows "$H/kh_ed" "$H/old_ed25519.pub" && pass "host keys: the previous key stays until --retire" || fail "host keys: the previous key was dropped early"
-"$WORK/gosftpd" hostkey rotate --retire --config "$H/gosftpd.toml" --host-key "$H/state/ed25519" >/dev/null || fail "hostkey rotate --retire"
+"$WORK/gosftpd" hostkey rotate --retire --config "$HE/gosftpd.toml" --host-key "$H/state/ed25519" >/dev/null || fail "hostkey rotate --retire"
 hk_hup || fail "reload after --retire"
 hk_sftp "$H/kh_ed" >/dev/null 2>&1 || fail "host keys: sftp after --retire"
 if knows "$H/kh_ed" "$H/old_ed25519.pub"; then fail "host keys: the retired key is still in known_hosts"; else pass "host keys: OpenSSH forgot the retired key"; fi
 
 # RSA, with rsa-sha2-256 negotiated: proofs must use the same hash. A single
 # command also checks that a short session waits for the proof.
-"$WORK/gosftpd" hostkey rotate --config "$H/gosftpd.toml" --host-key "$H/state/rsa" >/dev/null || fail "hostkey rotate (rsa)"
+"$WORK/gosftpd" hostkey rotate --config "$HE/gosftpd.toml" --host-key "$H/state/rsa" >/dev/null || fail "hostkey rotate (rsa)"
 hk_hup || fail "reload after hostkey rotate (rsa)"
 hk_sftp "$H/kh_rsa" -o HostKeyAlgorithms=rsa-sha2-256 >"$H/sftp3.out" 2>&1 || fail "host keys: sftp with rsa-sha2-256: $(cat "$H/sftp3.out")"
 knows "$H/kh_rsa" "$H/state/rsa.next.pub" && pass "host keys: an RSA next key is learned with rsa-sha2-256" ||
 	fail "host keys: the RSA next key is not in known_hosts: $(cat "$H/kh_rsa")"
-"$WORK/gosftpd" hostkey rotate --abort --config "$H/gosftpd.toml" --host-key "$H/state/rsa" >/dev/null || fail "hostkey rotate --abort"
+"$WORK/gosftpd" hostkey rotate --abort --config "$HE/gosftpd.toml" --host-key "$H/state/rsa" >/dev/null || fail "hostkey rotate --abort"
 
 # Host certificates: a client that trusts only the CA connects.
 ssh-keygen -q -t ed25519 -N '' -C host_ca -f "$WORK/host_ca"
 ssh-keygen -q -s "$WORK/host_ca" -h -I gosftpd -n 127.0.0.1 -V -5m:+1h "$H/state/ed25519.pub"
-sed -i 's|^host_keys = .*|&\nhost_certificates = true|' "$H/gosftpd.toml"
+sed -i 's|^host_keys = .*|&\nhost_certificates = true|' "$HE/gosftpd.toml"
 hk_hup || fail "reload with host_certificates"
 echo "@cert-authority [127.0.0.1]:$HPORT $(cut -d' ' -f1,2 "$WORK/host_ca.pub")" >"$H/kh_ca"
 hk_sftp "$H/kh_ca" -o UpdateHostKeys=no >"$H/sftp4.out" 2>&1 && pass "host certificate: a client that trusts the CA connects" ||
@@ -663,6 +703,60 @@ else
 	missing rclone
 fi
 
+# --- Landlock: a configuration next to other files (ADR 0011) -----------------
+# The documented outcome of a shared directory: the configuration file gets
+# a rule of its own, so sed -i, which replaces the file by rename, fails
+# the next reload with the restart hint, and the running configuration
+# stays.
+L="$WORK/shared"
+mkdir -p "$L/data" "$L/state"
+LPORT=$((20000 + RANDOM % 20000))
+while [ "$LPORT" = "$PORT" ] || [ "$LPORT" = "$MPORT" ] || [ "$LPORT" = "$HPORT" ] || [ "$LPORT" = "$OVERWRITE_PORT" ]; do LPORT=$((LPORT + 1)); done
+cat >"$L/gosftpd.toml" <<TOML
+config_version = 1
+[server]
+listen = ["127.0.0.1:$LPORT"]
+host_keys = ["$L/state/host_key"]
+host_key_auto_generate = true
+[mounts.data]
+path = "$L/data"
+[users.admin]
+authorized_keys = ["$(cat "$WORK/id_admin.pub")"]
+access = { data = "full" }
+[audit]
+output = "$L/audit.jsonl"
+TOML
+chmod 600 "$L/gosftpd.toml"
+"$WORK/gosftpd" serve --config "$L/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$L/server.log" &
+SHARED_PID=$!
+PIDS+=("$SHARED_PID")
+for _ in $(seq 100); do
+	if (exec 3<>"/dev/tcp/127.0.0.1/$LPORT") 2>/dev/null; then break; fi
+	sleep 0.1
+done
+landlock_logged shared "$L/server.log"
+if grep -q 'landlock: ABI v[2-5] applied' "$L/server.log"; then
+	grep -q "configuration: Landlock covers only the file gosftpd.toml in $L, which holds data" "$L/server.log" &&
+		pass "shared: the start warns that the configuration's directory is shared" || fail "shared: no start warning: $(grep landlock "$L/server.log")"
+	sed -i 's|^access = { data = "full" }|access = { data = "read" }|' "$L/gosftpd.toml"
+	kill -HUP "$SHARED_PID"
+	for _ in $(seq 100); do
+		if grep -q '"event":"server.reload"' "$L/audit.jsonl"; then break; fi
+		sleep 0.1
+	done
+	grep -q '"event":"server.reload","result":"error","reason":"config"' "$L/audit.jsonl" &&
+		grep -q 'configuration reload failed.*gosftpd.toml: permission denied (outside the Landlock ruleset applied at start; restart gosftpd)' "$L/server.log" &&
+		pass "shared: sed -i of the configuration fails the reload with the restart hint" ||
+		fail "shared: reload after sed -i: $(grep -h 'server.reload\|reload failed' "$L/audit.jsonl" "$L/server.log")"
+	printf 'put %s /up.txt\n' "$WORK/local/short.txt" >"$L/put.batch"
+	"$WORK/gosftpd" hostkey show --host-key "$L/state/host_key" --known-hosts "127.0.0.1:$LPORT" | tail -n 1 >"$L/known_hosts"
+	sftp -P "$LPORT" -o "UserKnownHostsFile=$L/known_hosts" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes \
+		-i "$WORK/id_admin" -b "$L/put.batch" admin@127.0.0.1 >"$L/put.out" 2>&1 && cmp -s "$WORK/local/short.txt" "$L/data/up.txt" &&
+		pass "shared: the running configuration stays" || fail "shared: upload after the failed reload: $(cat "$L/put.out")"
+fi
+kill -TERM "$SHARED_PID"
+if wait "$SHARED_PID"; then pass "shared: SIGTERM exits 0"; else fail "shared: SIGTERM exit code $?"; fi
+
 # --- admin listener, metrics and healthcheck (ADR 0009) ----------------------
 PROMTOOL=${PROMTOOL:-promtool}
 M="http://127.0.0.1:$MPORT"
@@ -686,7 +780,7 @@ grep -Eq '^gosftpd_(.*)\{[^}]*(alice|admin|partner|127\.0\.0\.1|/)' "$C/metrics.
 
 accepts=$(grep -c '"event":"conn.accept"' "$C/audit.jsonl")
 no_version=$(metric 'gosftpd_connections_total{result="no_version"}')
-"$WORK/gosftpd" healthcheck --config "$C/gosftpd.toml" >"$C/hc.out" 2>&1 && grep -q "^ok: 127.0.0.1:$PORT sent an SSH banner" "$C/hc.out" &&
+"$WORK/gosftpd" healthcheck --config "$CE/gosftpd.toml" >"$C/hc.out" 2>&1 && grep -q "^ok: 127.0.0.1:$PORT sent an SSH banner" "$C/hc.out" &&
 	pass "healthcheck: the SSH banner of server.listen" || fail "healthcheck: $(cat "$C/hc.out")"
 GOSFTPD_LISTEN="127.0.0.1:$PORT" "$WORK/gosftpd" healthcheck --ready >/dev/null 2>&1 && pass "healthcheck: \$GOSFTPD_LISTEN with --ready" || fail "healthcheck: GOSFTPD_LISTEN"
 "$WORK/gosftpd" healthcheck --url "$M/readyz" >/dev/null 2>&1 && pass "healthcheck --url /readyz" || fail "healthcheck --url"
@@ -699,7 +793,7 @@ curl -fsS "$M/metrics" >"$C/metrics.txt" || true
 	pass "healthcheck: probes leave no audit event and count as no_version" || fail "healthcheck: probes audited or not counted"
 
 # An invalid configuration is refused; the running one stays.
-printf '[server\n' >>"$C/gosftpd.toml"
+printf '[server\n' >>"$CE/gosftpd.toml"
 errors=$(reload_errors)
 if hup && [ "$(reload_errors)" -gt "$errors" ] && kill -0 "$CFG_PID" 2>/dev/null; then
 	pass "reload: an invalid configuration is refused"
@@ -772,6 +866,8 @@ TOML
 		if (exec 3<>"/dev/tcp/127.0.0.1/$KPORT") 2>/dev/null; then break; fi
 		sleep 0.1
 	done
+	# An exec hook needs what a fixed ruleset cannot know (ADR 0011).
+	landlock_logged hooks "$K/server.log" 'landlock: not applied.*exec hooks configured'
 	"$WORK/gosftpd" hostkey show --host-key "$K/state/host_key" --known-hosts "127.0.0.1:$KPORT" | tail -n 1 >"$K/known_hosts"
 	deliveries() { [ -f "$K/deliveries.jsonl" ] && wc -l <"$K/deliveries.jsonl" || echo 0; }
 	wait_deliveries() { # wait_deliveries N: true once there are N deliveries, and no more a moment later
@@ -862,6 +958,7 @@ if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"
 	echo "--- server log (config)"; cat "$C/server.log"
 	echo "--- server log (host keys)"; cat "$WORK/hk/server.log"
+	echo "--- server log (shared)"; cat "$WORK/shared/server.log"
 	if [ -f "$WORK/hooks/server.log" ]; then echo "--- server log (hooks)"; cat "$WORK/hooks/server.log"; fi
 	exit 1
 fi
