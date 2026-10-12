@@ -114,6 +114,18 @@ Incompatible changes are prefixed with **BREAKING:**.
   hour, of a file whose upload closed ok: the rename that completes a
   temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
   upload renamed later. `fs.upload` hooks fire for it.
+- Landlock on Linux ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md)),
+  with `server.landlock = "auto"` (the default), `"off"` or `"required"`,
+  restart-only: once its listeners are bound, gosftpd can open only its
+  mounts, its configuration and key files, its audit log, `/proc/self` and
+  the files name resolution reads. A directory gets a rule only when every
+  entry in it is a file the configuration names; elsewhere the files get
+  rules of their own, with a warning at start, and such a file replaced by
+  rename cannot be read until a restart. `auto` says in the log why it does
+  not apply Landlock (no Landlock in the kernel, a seccomp filter that
+  blocks it, ABI 1, exec hooks, a mount at `/`); `required` makes that an
+  error at start. `config validate` refuses `required` with exec hooks.
+  New dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
 
 ### Changed
 

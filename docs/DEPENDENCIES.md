@@ -13,8 +13,9 @@ A new dependency requires removing another one or revisiting this rule.
 | `golang.org/x/sys`               | v0.48.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
 | `golang.org/x/term`              | v0.46.0  | password input without echo              | M3    |
+| `github.com/landlock-lsm/go-landlock` | v0.10.1 | Landlock on Linux (MIT), with `kernel.org/pub/linux/libs/security/libcap/psx` v1.2.77 (BSD-3-Clause), which applies the ruleset to every thread ([ADR 0011](adr/0011-proxy-systemd-landlock.md)) | M4 |
 
-Planned later (see ROADMAP.md §4.5): `go-landlock`, `go-proxyproto` (M4);
+Planned later (see ROADMAP.md §4.5): `go-proxyproto` (M4);
 `golang.org/x/time` for bandwidth limits, if they come.
 Metrics need no library: gosftpd writes the Prometheus text format itself
 (decision D12, ADR 0009).
