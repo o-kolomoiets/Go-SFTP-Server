@@ -1,0 +1,6 @@
+# The user gosftpd runs as (sysusers.d(5)), installed as
+# /usr/lib/sysusers.d/gosftpd.conf. Its home is "/", not the state
+# directory /var/lib/gosftpd (StateDirectory= creates that): systemd sets
+# $HOME from the home, and the sandbox never treats the home as a directory
+# of gosftpd's own, so host key rotation by reload would need a restart.
+u gosftpd - "gosftpd SFTP server" -

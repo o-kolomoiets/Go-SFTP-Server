@@ -9,13 +9,16 @@ before:
   hooks:
     - go mod tidy -diff
 
+# One build per system, so that only the Linux archives get the systemd
+# files (ADR 0011).
 builds:
-  - id: gosftpd
+  - &build
+    id: gosftpd
     main: ./cmd/gosftpd
     binary: gosftpd
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin]
+    goos: [linux]
     goarch: [amd64, arm64]
     flags:
       - -trimpath
@@ -25,9 +28,27 @@ builds:
       - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Commit={{ .FullCommit }}
       - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Date={{ .CommitDate }}
     mod_timestamp: "{{ .CommitTimestamp }}"
+  - <<: *build
+    id: gosftpd-darwin
+    goos: [darwin]
 
 archives:
+  # The packaging files in the layout docs/install.md installs them from.
   - id: gosftpd
+    ids: [gosftpd]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - packaging/config.toml
+      - packaging/gosftpd.sysusers
+      - packaging/gosftpd.tmpfiles
+      - packaging/systemd/gosftpd.service
+      - packaging/systemd/legacy-notify.conf
+  - id: gosftpd-darwin
+    ids: [gosftpd-darwin]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
