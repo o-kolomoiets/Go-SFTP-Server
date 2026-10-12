@@ -1428,6 +1428,46 @@ func TestIncludeSkipsDotFilesAndUnreadable(t *testing.T) {
 	}
 }
 
+// An include pattern with a wildcard directory checks its leading
+// directory, the one Glob lists first: unreadable, it is an error.
+func TestIncludeUnreadableLeadingDir(t *testing.T) {
+	t.Parallel()
+	for pattern, want := range map[string]string{
+		"users.d/*.toml":                  "users.d",
+		"teams/*/users.toml":              "teams",
+		"teams/t[12]/sub/*/users.toml":    "teams",
+		"*/users.toml":                    ".",
+		"/srv/partners/*/users.toml":      "/srv/partners",
+		"/srv/partners/?/[ab]/users.toml": "/srv/partners",
+		"/*.toml":                         "/",
+	} {
+		if got := leadingDir(filepath.FromSlash(pattern)); got != filepath.FromSlash(want) {
+			t.Errorf("leadingDir(%s) = %s, want %s", pattern, got, want)
+		}
+	}
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return // no unreadable directories for this user
+	}
+	dir := t.TempDir()
+	teams := filepath.Join(dir, "teams")
+	if err := os.MkdirAll(filepath.Join(teams, "t1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(teams, "t1", "users.toml"), []byte("[users.carol]\naccess = { m = \"read\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(teams, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(teams, 0o700) })
+	for _, pattern := range []string{"teams/*/users.toml", filepath.Join(teams, "*", "users.toml")} {
+		path := writeConfig(t, dir, "config_version = 1\ninclude = ['"+pattern+"']\n")
+		if _, err := Load(path); !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s with an unreadable leading directory: %v", pattern, err)
+		}
+	}
+}
+
 // The next and previous keys of a rotation and the host certificates are
 // trusted files like the host key (ADR 0008): refused inside mounts, at
 // start and on reload, and checked for their mode at start.

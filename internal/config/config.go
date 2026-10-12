@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"math"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -614,14 +613,15 @@ func (c *Config) loadIncludes(dir string) error {
 // inside dir without treating dir itself as a pattern (it may contain [ or
 // *), and must stay below it.
 //
-// Glob skips directories it cannot read; an include whose fixed directory
-// exists but cannot be read is an error instead, or its users would be
-// left out without a word. Names that start with a dot are skipped, as
-// shells do: editor swap files and the temporary files of user add.
+// Glob skips directories it cannot read; an include whose fixed leading
+// directory (teams for teams/*/users.toml) exists but cannot be read is an
+// error instead, or its users would be left out without a word. Names
+// that start with a dot are skipped, as shells do: editor swap files and
+// the temporary files of user add.
 func globInclude(dir, pattern string) ([]string, error) {
 	var files []string
 	if filepath.IsAbs(pattern) {
-		if err := readableDir(filepath.Dir(pattern)); err != nil {
+		if err := readableDir(leadingDir(pattern)); err != nil {
 			return nil, err
 		}
 		matches, err := filepath.Glob(pattern)
@@ -634,7 +634,7 @@ func globInclude(dir, pattern string) ([]string, error) {
 		if rel == ".." || strings.HasPrefix(rel, "../") {
 			return nil, errors.New("a relative pattern must stay inside the configuration directory; use an absolute path")
 		}
-		if err := readableDir(filepath.Join(dir, filepath.FromSlash(path.Dir(rel)))); err != nil {
+		if err := readableDir(filepath.Join(dir, leadingDir(rel))); err != nil {
 			return nil, err
 		}
 		matches, err := fs.Glob(os.DirFS(dir), rel)
@@ -646,6 +646,16 @@ func globInclude(dir, pattern string) ([]string, error) {
 		}
 	}
 	return slices.DeleteFunc(files, func(f string) bool { return strings.HasPrefix(filepath.Base(f), ".") }), nil
+}
+
+// leadingDir returns the directory of pattern up to its first component
+// with a wildcard: teams for teams/*/users.toml and teams/*.toml.
+func leadingDir(pattern string) string {
+	d := filepath.Dir(pattern)
+	for strings.ContainsAny(d[len(filepath.VolumeName(d)):], "*?[") {
+		d = filepath.Dir(d)
+	}
+	return d
 }
 
 // readableDir fails if d is a directory without wildcards that exists but

@@ -300,6 +300,79 @@ access = { inbox = "full" }
 	}
 }
 
+// TestLandlockWildcardInclude: a wildcard include whose leading directory
+// the rules do not cover fails the reload with the hint, instead of
+// matching nothing: a new pattern outside the ruleset, a leading directory
+// missing at start and created later, one replaced by rename. The running
+// users stay.
+func TestLandlockWildcardInclude(t *testing.T) {
+	t.Parallel()
+	if serveChild(t) {
+		return
+	}
+	base := t.TempDir()
+	alice, bob, carol, dave, erin := newSigner(t), newSigner(t), newSigner(t), newSigner(t), newSigner(t)
+	p := func(rel string) string { return filepath.Join(base, filepath.FromSlash(rel)) }
+	user := func(name string, key ssh.Signer) string {
+		return "[users." + name + "]\nauthorized_keys = [\"" + authorizedKey(key) + "\"]\naccess = { inbox = \"read\" }\n"
+	}
+	conf := func(include string) string {
+		return `include = ["users.d/*.toml", "teams/*/users.toml", "groups/*/users.toml"` + include + "]\n" + minimalConfig(base, alice, "")
+	}
+	files(t, base, map[string]string{
+		"etc/config.toml":            conf(""),
+		"etc/README":                 "the configuration directory is shared",
+		"etc/users.d/bob.toml":       user("bob", bob),
+		"etc/teams/t1/users.toml":    user("carol", carol),
+		"partners/p1/users.toml":     user("dave", dave),
+		"teams.new/t1/users.toml":    user("carol", carol),
+		"teams.new/t2/users.toml":    user("erin", erin),
+		"groups.later/g1/users.toml": user("erin", erin),
+		"srv/inbox/":                 "", "state/": "",
+	})
+	sb := startSandboxed(t, sandboxOpts{args: []string{"--config", p("etc/config.toml")}})
+	waitLog(t, sb.logs, "include: "+p("etc/groups")+" does not exist: the first file added there needs a restart")
+	failed := func(what, dir string) {
+		t.Helper()
+		ev := sb.reload(t, sb.audit)
+		if ev["result"] != "error" || ev["reason"] != "config" || ev["restart_required"] != nil {
+			t.Errorf("%s: server.reload = %v\n%s", what, ev, sb.logs())
+		}
+		if !hinted(sb.logs(), dir) {
+			t.Errorf("%s: no hint for %s:\n%s", what, dir, sb.logs())
+		}
+		if !canLogIn(sb.addr, "bob", bob) || !canLogIn(sb.addr, "carol", carol) || canLogIn(sb.addr, "dave", dave) || canLogIn(sb.addr, "erin", erin) {
+			t.Errorf("%s: the failed reload changed the users", what)
+		}
+	}
+
+	writeFile(t, p("etc/config.toml"), conf(`, "`+p("partners")+`/*/users.toml"`))
+	failed("a new pattern", p("partners"))
+	writeFile(t, p("etc/config.toml"), conf(""))
+	if ev := sb.reload(t, sb.audit); ev["result"] != "ok" {
+		t.Errorf("server.reload = %v\n%s", ev, sb.logs())
+	}
+
+	if err := os.Rename(p("groups.later"), p("etc/groups")); err != nil {
+		t.Fatal(err)
+	}
+	failed("a leading directory created after the start", p("etc/groups"))
+	if err := os.RemoveAll(p("etc/groups")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Rename(p("etc/teams"), p("teams.old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(p("teams.new"), p("etc/teams")); err != nil {
+		t.Fatal(err)
+	}
+	failed("a leading directory replaced by rename", p("etc/teams"))
+	if code := sb.stop(t); code != exitOK {
+		t.Errorf("exit %d", code)
+	}
+}
+
 // TestLandlockLinkedTeam: a team directory of a wildcard include that is
 // a link into another tree gets a rule on its target, with a warning that
 // names the link: a reload still lists it and loads its users, whether
