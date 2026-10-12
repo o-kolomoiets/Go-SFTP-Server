@@ -302,6 +302,35 @@ func TestLandlockReadme(t *testing.T) {
 	}
 }
 
+// TestLandlockInitValidate: in init's layout, share next to gosftpd.toml,
+// config validate --check-fs before the first start prints the warning
+// that serve gives once it has created share. Not parallel: init works in
+// the current directory.
+func TestLandlockInitValidate(t *testing.T) {
+	if serveChild(t) {
+		return
+	}
+	home := isolate(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	files(t, home, map[string]string{".ssh/authorized_keys": authorizedKey(newSigner(t)) + "\n"})
+	if code, out, errOut := execute(t, "init", "--user", "alice"); code != exitOK {
+		t.Fatalf("init: exit %d\n%s%s", code, out, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "share")); err == nil {
+		t.Fatal("init created share: nothing to preview")
+	}
+	want := "configuration: Landlock covers only the file gosftpd.toml in " + dir + ", which holds share"
+	if code, _, errOut := execute(t, "config", "validate", "--check-fs"); code != exitOK || !strings.Contains(errOut, "warning: landlock: "+want) {
+		t.Errorf("config validate: exit %d\n%s", code, errOut)
+	}
+	sb := startSandboxed(t, sandboxOpts{args: []string{"--listen", "127.0.0.1:0"}, dir: dir, home: home})
+	waitLog(t, sb.logs, want)
+	if code := sb.stop(t); code != exitOK {
+		t.Errorf("exit %d", code)
+	}
+}
+
 // packagedConfig is the packaged layout's configuration below base:
 // /etc/gosftpd/config.toml, the host key in /var/lib/gosftpd, the inbox
 // under /srv/sftp, the audit log in /var/log/gosftpd.

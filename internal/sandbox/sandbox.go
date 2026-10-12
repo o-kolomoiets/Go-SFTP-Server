@@ -173,16 +173,17 @@ func (e *RequiredError) Error() string { return e.skip.text() + `; server.landlo
 
 // Preview returns the start warnings that Start would log for c, for
 // config validate --check-fs. The rules are computed without the mount
-// table: a mount directory is found by its path. Nothing is returned where
-// Start would not compute rules because of the configuration (off, exec
-// hooks) or on systems without Landlock; a rule that would be placed on /
-// is a *RootError. The kernel is not asked.
+// table: a mount directory is found by its path, and one with create =
+// true that does not exist yet is taken as serve will have created it.
+// Nothing is returned where Start would not compute rules because of the
+// configuration (off, exec hooks) or on systems without Landlock; a rule
+// that would be placed on / is a *RootError. The kernel is not asked.
 func Preview(c *config.Config) ([]string, error) {
 	in, ok := previewInput()
 	if !ok || c.Server.Landlock == config.LandlockOff || c.ExecHook() >= 0 {
 		return nil, nil
 	}
-	in.Config = c
+	in.Config, in.FS = c, newPreviewFS(in.FS, c)
 	plan, err := Compute(in)
 	return plan.Warnings, err
 }
