@@ -343,20 +343,24 @@ func (p *planner) holdsNamed(dir string) bool {
 // version to: "..2006_01_02_15_04_05." and digits.
 var k8sTimestamp = regexp.MustCompile(`^\.\.\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}\.\d+$`)
 
-// namedEntry reports whether the entry name of dir is named: a named file,
-// a name derived from one, an entry of a Kubernetes volume, lost+found at
-// the root of a file system, or a dedicated subdirectory that an include
-// pattern goes through or that holds a named entry.
+// namedEntry reports whether the entry name of dir is named: an entry of a
+// Kubernetes volume, lost+found at the root of a file system, a named file
+// or a name derived from one, or a dedicated subdirectory that an include
+// pattern goes through or that holds a named entry. A subdirectory is
+// never named for its name alone (config.toml.d): a rule on dir would
+// cover whatever it holds.
 func (p *planner) namedEntry(dir, name string) bool {
 	full := filepath.Join(dir, name)
 	switch {
-	case p.named[full], p.derived(dir, name),
-		name == "..data", name == "..data_tmp", k8sTimestamp.MatchString(name),
+	case name == "..data", name == "..data_tmp", k8sTimestamp.MatchString(name),
 		name == "lost+found" && p.fsRoot(dir):
 		return true
 	}
 	info, err := p.fs.Stat(full)
-	if err != nil || !info.IsDir() || !p.onPath(full) && !p.holdsNamed(full) {
+	if err != nil || !info.IsDir() {
+		return p.named[full] || p.derived(dir, name)
+	}
+	if !p.onPath(full) && !p.holdsNamed(full) {
 		return false
 	}
 	return p.dedicated(full).dedicated

@@ -185,6 +185,15 @@ func TestDedication(t *testing.T) {
 		checkPlan(t, compute(t, input(t, m, c)), []string{"file /etc/gosftpd/config.toml " + rfile, inbox},
 			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds archive"+shared)
 	})
+	t.Run("a subdirectory with a name derived from a named file", func(t *testing.T) {
+		t.Parallel()
+		// A directory is never derived: config.toml.d holds no named
+		// entry, and a rule on /etc/gosftpd would cover other-secret.
+		m := newMemFS(t).files("/etc/gosftpd/config.toml", "/etc/gosftpd/config.toml.d/other-secret").dirs("/srv/sftp/inbox")
+		c := newConfig("/etc/gosftpd/config.toml")
+		checkPlan(t, compute(t, input(t, m, c)), []string{"file /etc/gosftpd/config.toml " + rfile, inbox},
+			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds config.toml.d"+shared)
+	})
 	t.Run("zero-configuration ~/.ssh", func(t *testing.T) {
 		t.Parallel()
 		m := newMemFS(t).
