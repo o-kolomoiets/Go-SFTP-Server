@@ -24,8 +24,9 @@ costs is in the [hardening guide](security/hardening.md#the-systemd-unit).
 
 The service keeps its data in `/srv/sftp` (the mount `inbox` is
 `/srv/sftp/inbox`), its host keys in `/var/lib/gosftpd` (mode 0700) and the
-audit log in `/var/log/gosftpd`. systemd creates the last two at start. The
-rest of the file system is read-only for gosftpd.
+audit log in `/var/log/gosftpd` (mode 0750). systemd creates the state
+directory at start; tmpfiles creates the other two. The rest of the file
+system is read-only for gosftpd.
 
 The `d /srv/sftp` line of the tmpfiles file gives an existing `/srv/sftp` to
 the user gosftpd. If an OpenSSH chroot lives there (it must belong to
@@ -91,7 +92,7 @@ is on a read-only file system; uploads will fail".
 (it writes to `/etc/gosftpd`), then reload:
 
 ```sh
-sudo gosftpd user add partner --key partner.pub --access inbox=upload --write
+sudo gosftpd user add partner --key partner.pub --access inbox=upload --write --config /etc/gosftpd/config.toml
 sudo systemctl reload gosftpd
 systemctl status gosftpd
 ```
@@ -212,8 +213,9 @@ sudo systemd-tmpfiles --create gosftpd.conf
 ```
 
 Then change `path` in `/etc/gosftpd/config.toml` and restart. Without the
-drop-in, the mount is read-only for gosftpd: it warns at start, and every
-upload fails.
+drop-in, the directory is read-only for gosftpd: it warns at start, and
+every upload fails (or the start fails, when gosftpd has to create the
+directory).
 
 ## Mounts or key files under /home
 
@@ -294,7 +296,7 @@ Two settings are not in the unit, because they break common setups:
   then fails to bind, even with the capability.
 - `IPAddressDeny=any` with `IPAddressAllow=` limits the addresses gosftpd
   may talk to. List the client networks and, for webhooks, the receivers
-  and the DNS server, or hooks fail:
+  and the DNS server, or webhooks fail:
 
   ```ini
   [Service]
