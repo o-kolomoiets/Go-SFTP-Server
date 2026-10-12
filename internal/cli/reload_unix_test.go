@@ -17,7 +17,9 @@ import (
 // function that expects the next message received there to be want.
 func notifySocket(t *testing.T) (next func(want string)) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "notify")
+	// A short name: macOS allows 104 bytes for a socket path, and the
+	// temporary directory's name holds the test's.
+	sock := filepath.Join(t.TempDir(), "n")
 	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sock, Net: "unixgram"})
 	if err != nil {
 		t.Skipf("unixgram sockets unavailable: %v", err)
