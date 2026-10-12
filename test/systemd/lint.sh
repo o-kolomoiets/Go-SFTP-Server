@@ -66,7 +66,10 @@ fi
 # --- sysusers and tmpfiles: absolute paths (a relative one is looked up in
 # the sysusers.d and tmpfiles.d directories), into an empty root -------------
 U="$WORK/install"
-mkdir -p "$U"
+# Owned by root, as a real root is: systemd-tmpfiles refuses a path that
+# goes from a directory of another user to one of root's ("unsafe path
+# transition"), and on a CI runner mktemp gives the runner's own.
+as_root mkdir -m 0755 "$U"
 as_root systemd-sysusers --root="$U" "$PKG/gosftpd.sysusers"
 line=$(grep '^gosftpd:' "$U/etc/passwd" || true)
 IFS=: read -r _ _ uid gid gecos home shell <<<"$line"
@@ -77,7 +80,7 @@ else
 fi
 # An existing root-owned /srv/sftp is taken over, as on a host where it
 # existed before.
-mkdir -p "$U/srv/sftp"
+as_root mkdir -p "$U/srv/sftp"
 as_root systemd-tmpfiles --create --root="$U" "$PKG/gosftpd.tmpfiles"
 for d in /srv/sftp /var/log/gosftpd; do
 	got=$(stat -c '%u:%g %a' "$U$d" 2>/dev/null || echo missing)
