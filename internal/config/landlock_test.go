@@ -3,6 +3,7 @@
 package config
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -10,7 +11,11 @@ import (
 func TestValidateLandlock(t *testing.T) {
 	t.Parallel()
 	const webhook = "[[hooks]]\nname = \"w\"\non = [\"fs.upload\"]\nwebhook = { url = \"https://x\", secret_file = \"s\" }\n"
-	const exec = "[[hooks]]\nname = \"e\"\non = [\"fs.upload\"]\nexec = { argv = [\"/bin/true\"] }\n"
+	prog := "/bin/true" // Validate needs only an absolute path
+	if runtime.GOOS == "windows" {
+		prog = "C:/Windows/System32/whoami.exe"
+	}
+	exec := "[[hooks]]\nname = \"e\"\non = [\"fs.upload\"]\nexec = { argv = [\"" + prog + "\"] }\n"
 	cases := []struct {
 		name, landlock, hooks string
 		err                   string // "" for none

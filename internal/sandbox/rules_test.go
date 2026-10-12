@@ -4,11 +4,13 @@ package sandbox
 
 import (
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
@@ -466,11 +468,16 @@ func TestUnresolvable(t *testing.T) {
 	addUser(c, "bob", "/home/bob/.ssh/authorized_keys")
 	addUser(c, "carol", "/etc/gosftpd/keys/loop.pub")
 	addUser(c, "dave", "/etc/gosftpd/config.toml/authorized_keys")
-	checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, inbox},
+	warnings := []string{
 		"users.bob.authorized_keys_file: /home/bob/.ssh/authorized_keys cannot be resolved (permission denied): no Landlock rule; reading it needs a restart",
 		"users.carol.authorized_keys_file: /etc/gosftpd/keys/loop.pub cannot be resolved (",
-		"users.dave.authorized_keys_file: /etc/gosftpd/config.toml/authorized_keys cannot be resolved (",
-	)
+	}
+	// On Windows ENOTDIR is ERROR_PATH_NOT_FOUND, a file that does not
+	// exist, which needs no rule.
+	if !errors.Is(syscall.ENOTDIR, fs.ErrNotExist) {
+		warnings = append(warnings, "users.dave.authorized_keys_file: /etc/gosftpd/config.toml/authorized_keys cannot be resolved (")
+	}
+	checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, inbox}, warnings...)
 }
 
 // TestHostKeySiblings: in a shared directory each existing sibling gets a
