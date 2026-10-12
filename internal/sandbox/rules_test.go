@@ -185,6 +185,15 @@ func TestDedication(t *testing.T) {
 		checkPlan(t, compute(t, input(t, m, c)), []string{"file /etc/gosftpd/config.toml " + rfile, inbox},
 			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds archive"+shared)
 	})
+	t.Run("a subdirectory with a name derived from a named file", func(t *testing.T) {
+		t.Parallel()
+		// A directory is never derived: config.toml.d holds no named
+		// entry, and a rule on /etc/gosftpd would cover other-secret.
+		m := newMemFS(t).files("/etc/gosftpd/config.toml", "/etc/gosftpd/config.toml.d/other-secret").dirs("/srv/sftp/inbox")
+		c := newConfig("/etc/gosftpd/config.toml")
+		checkPlan(t, compute(t, input(t, m, c)), []string{"file /etc/gosftpd/config.toml " + rfile, inbox},
+			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds config.toml.d"+shared)
+	})
 	t.Run("zero-configuration ~/.ssh", func(t *testing.T) {
 		t.Parallel()
 		m := newMemFS(t).
@@ -356,6 +365,33 @@ func TestIncludes(t *testing.T) {
 			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds notes.txt",
 			"include: /etc/gosftpd/users.d does not exist: the first file added there needs a restart")
 	})
+	t.Run("a team directory that is a link into another tree", func(t *testing.T) {
+		t.Parallel()
+		// Glob lists teams/a: its target gets a directory rule, and the
+		// warning names the link, not the include file in it.
+		m := newMemFS(t).
+			files("/etc/gosftpd/config.toml", "/etc/gosftpd/teams/b/users.toml", "/srv/elsewhere/team-a/users.toml").
+			symlink("/etc/gosftpd/teams/a", "/srv/elsewhere/team-a").
+			dirs("/srv/sftp/inbox")
+		c := newConfig("/etc/gosftpd/config.toml", "teams/*/users.toml")
+		loaded(c, "/etc/gosftpd/teams/a/users.toml", "/etc/gosftpd/teams/b/users.toml")
+		link := "include: /etc/gosftpd/teams/a is a link to /srv/elsewhere/team-a, outside /etc/gosftpd/teams, so Landlock covers only that target"
+		checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, "dir /srv/elsewhere/team-a " + ro, inbox}, link)
+
+		// In a shared leading directory, read_dir on the target.
+		m.files("/etc/gosftpd/teams/README")
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"file /etc/gosftpd/config.toml " + rfile,
+			"dir /etc/gosftpd/teams " + rdir,
+			"file /etc/gosftpd/teams/b/users.toml " + rfile,
+			"dir /srv/elsewhere/team-a " + rdir,
+			"file /srv/elsewhere/team-a/users.toml " + rfile,
+			inbox,
+		},
+			"configuration: Landlock covers only the file config.toml in /etc/gosftpd, which holds teams"+shared,
+			link,
+			"include: Landlock covers only the include files found at start in /etc/gosftpd/teams, which holds README")
+	})
 	t.Run("a leading directory at the root", func(t *testing.T) {
 		t.Parallel()
 		m := newMemFS(t).files("/etc/gosftpd/config.toml").dirs("/srv/sftp/inbox")
@@ -398,6 +434,30 @@ func TestSymlinksIntoAnotherTree(t *testing.T) {
 		"configuration: /etc/gosftpd/config.toml is a link to /nix/store/abc-gosftpd/config.toml, outside /etc/gosftpd, so Landlock covers only that target; re-pointed, the link cannot be read until a restart",
 		"include: /etc/gosftpd/users.d is a link to /srv/conf/users.d, outside /etc/gosftpd",
 		"auth.trusted_user_ca_keys_file: /etc/gosftpd/ca.pub is a link to /nix/store/def-ca/ca.pub, outside /etc/gosftpd",
+	)
+}
+
+// TestUnresolvable: a named file that cannot be resolved (a directory on
+// its path that gosftpd cannot search, a symlink loop, a file on its
+// path) gets no rule, with a start warning, instead of failing the start:
+// an authorized_keys file read only with "publickey" is still named.
+func TestUnresolvable(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).
+		files("/etc/gosftpd/config.toml", "/home/bob/.ssh/authorized_keys", "/etc/gosftpd/keys/alice.pub").
+		symlink("/etc/gosftpd/keys/loop.pub", "loop.pub").
+		noSearch("/home/bob/.ssh").
+		dirs("/srv/sftp/inbox")
+	c := newConfig("/etc/gosftpd/config.toml")
+	c.Auth.Methods = []string{"password"}
+	addUser(c, "alice", "/etc/gosftpd/keys/alice.pub")
+	addUser(c, "bob", "/home/bob/.ssh/authorized_keys")
+	addUser(c, "carol", "/etc/gosftpd/keys/loop.pub")
+	addUser(c, "dave", "/etc/gosftpd/config.toml/authorized_keys")
+	checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, inbox},
+		"users.bob.authorized_keys_file: /home/bob/.ssh/authorized_keys cannot be resolved (permission denied): no Landlock rule; reading it needs a restart",
+		"users.carol.authorized_keys_file: /etc/gosftpd/keys/loop.pub cannot be resolved (",
+		"users.dave.authorized_keys_file: /etc/gosftpd/config.toml/authorized_keys cannot be resolved (",
 	)
 }
 
@@ -467,6 +527,28 @@ func TestAuditRow(t *testing.T) {
 		checkPlan(t, compute(t, input(t, m, c)), []string{
 			"dir /etc/gosftpd " + ro, "dir /srv/state " + rfile, "file /srv/state/audit.log " + wfile, inbox,
 		}, "audit.output: Landlock covers only the file audit.log in /srv/state, which holds audit.log.keys: "+rotWarn)
+	})
+	t.Run("subdirectories with rotated names", func(t *testing.T) {
+		t.Parallel()
+		m, c := base(t)
+		m.files("/srv/state/audit.jsonl", "/srv/state/audit-keys/alice.pub", "/srv/state/audit-2026/audit.jsonl.1")
+		addUser(c, "alice", "/srv/state/audit-keys/alice.pub")
+		c.Audit.Output = native("/srv/state/audit.jsonl")
+		// A directory is no rotated copy: audit-keys takes the olddir
+		// test, and the key file of alice would become writable.
+		// audit-2026 holds only copies and passes it.
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "dir /srv/state/audit-keys " + rfile, "file /srv/state/audit.jsonl " + wfile, inbox,
+		}, "audit.output: Landlock covers only the file audit.jsonl in /srv/state, which holds audit-keys: "+rotWarn)
+
+		// A host key in a subdirectory named like a copy.
+		m, c = base(t)
+		m.files("/var/lib/gosftpd/audit.jsonl", "/var/lib/gosftpd/audit.jsonl.d/ssh_host_ed25519_key")
+		c.Server.HostKeys = []string{native("/var/lib/gosftpd/audit.jsonl.d/ssh_host_ed25519_key")}
+		c.Audit.Output = native("/var/lib/gosftpd/audit.jsonl")
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "dir /var/lib/gosftpd/audit.jsonl.d " + rfile, "file /var/lib/gosftpd/audit.jsonl " + wfile, inbox,
+		}, "audit.output: Landlock covers only the file audit.jsonl in /var/lib/gosftpd, which holds audit.jsonl.d: "+rotWarn)
 	})
 	t.Run("an empty include directory is no olddir", func(t *testing.T) {
 		t.Parallel()

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 
@@ -343,20 +344,24 @@ func (p *planner) holdsNamed(dir string) bool {
 // version to: "..2006_01_02_15_04_05." and digits.
 var k8sTimestamp = regexp.MustCompile(`^\.\.\d{4}_\d{2}_\d{2}_\d{2}_\d{2}_\d{2}\.\d+$`)
 
-// namedEntry reports whether the entry name of dir is named: a named file,
-// a name derived from one, an entry of a Kubernetes volume, lost+found at
-// the root of a file system, or a dedicated subdirectory that an include
-// pattern goes through or that holds a named entry.
+// namedEntry reports whether the entry name of dir is named: an entry of a
+// Kubernetes volume, lost+found at the root of a file system, a named file
+// or a name derived from one, or a dedicated subdirectory that an include
+// pattern goes through or that holds a named entry. A subdirectory is
+// never named for its name alone (config.toml.d): a rule on dir would
+// cover whatever it holds.
 func (p *planner) namedEntry(dir, name string) bool {
 	full := filepath.Join(dir, name)
 	switch {
-	case p.named[full], p.derived(dir, name),
-		name == "..data", name == "..data_tmp", k8sTimestamp.MatchString(name),
+	case name == "..data", name == "..data_tmp", k8sTimestamp.MatchString(name),
 		name == "lost+found" && p.fsRoot(dir):
 		return true
 	}
 	info, err := p.fs.Stat(full)
-	if err != nil || !info.IsDir() || !p.onPath(full) && !p.holdsNamed(full) {
+	if err != nil || !info.IsDir() {
+		return p.named[full] || p.derived(dir, name)
+	}
+	if !p.onPath(full) && !p.holdsNamed(full) {
 		return false
 	}
 	return p.dedicated(full).dedicated
@@ -470,9 +475,14 @@ func (p *planner) auditDedicated(dir, file string) verdict {
 	// name up to the last dot followed by a separator or a digit
 	// (audit.1.jsonl, audit-20261012.jsonl), never auditor.toml. A file
 	// the configuration names is no copy, also when its name looks like
-	// one: it would become writable.
+	// one: it would become writable. Nor is a directory (audit-keys/):
+	// it is an olddir or nothing.
 	rotated := func(d, name string) bool {
-		if full := filepath.Join(d, name); p.named[full] && full != audit {
+		full := filepath.Join(d, name)
+		if p.named[full] && full != audit {
+			return false
+		}
+		if info, err := p.fs.Stat(full); err == nil && info.IsDir() {
 			return false
 		}
 		if strings.HasPrefix(name, file) {
@@ -570,14 +580,24 @@ func (p *planner) addDir(r resolved, rights Rights, key string) {
 // the directory is dedicated, else the file with fileRights and a start
 // warning. A named file that is a symlink resolving outside a dedicated
 // directory also gets a rule on its target: a directory rule covers only
-// what resolves beneath it.
+// what resolves beneath it. One that cannot be resolved, below a directory
+// gosftpd cannot search (an authorized_keys file read only with
+// "publickey"), gets no rule and a start warning.
 func (p *planner) place(key, path string, fileRights, dirRights Rights) error {
 	path = filepath.Clean(path)
 	if p.special(path) {
 		return nil
 	}
 	r, err := p.resolve(path)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.ELOOP):
+		why := err
+		if pe, ok := errors.AsType[*fs.PathError](err); ok {
+			why = pe.Err
+		}
+		p.notes = append(p.notes, &note{text: key + ": " + path + " cannot be resolved (" + why.Error() + "): no Landlock rule; reading it needs a restart"})
+		return nil
+	case err != nil:
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	if !r.exists || p.special(r.path) {
@@ -707,6 +727,9 @@ func (p *planner) includeRules() error {
 					p.addFile(rf, ReadFile, keyInclude)
 				}
 			}
+			if err := p.linkedIncludeDirs(inc, false); err != nil {
+				return err
+			}
 			p.notes = append(p.notes, &note{text: keyInclude + ": Landlock covers only the include files found at start in " + inc.lead +
 				", which " + v.why + "; a new or renamed include file needs a restart"})
 			continue
@@ -720,10 +743,60 @@ func (p *planner) includeRules() error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", keyInclude, err)
 			}
-			if rf.exists && !p.special(rf.path) && !beneath(rf.path, rl.path) {
+			if !rf.exists || p.special(rf.path) {
+				continue
+			}
+			// Beneath its own directory, wherever that resolves to: a
+			// linked directory gets its rule below.
+			rd, err := p.resolve(filepath.Dir(f))
+			if err != nil {
+				return fmt.Errorf("%s: %w", keyInclude, err)
+			}
+			if !beneath(rf.path, rd.path) {
 				p.addFile(rf, ReadFile, keyInclude)
 				p.noteLink(keyInclude, f, rf.path, filepath.Dir(f))
 			}
+		}
+		if err := p.linkedIncludeDirs(inc, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// linkedIncludeDirs adds a rule on the target of each directory between
+// inc's leading directory and a match that resolves outside the rules so
+// far, with a start warning naming it: a team directory of
+// teams/*/users.toml that is a link into another tree. Glob lists it, and
+// ignores a directory it cannot list. The target gets read_file too when
+// the leading directory and the linked one are dedicated.
+func (p *planner) linkedIncludeDirs(inc include, dedicated bool) error {
+	for _, f := range p.matches(inc) {
+		rel, ok := relative(filepath.Dir(f), inc.lead)
+		if !ok || rel == "" {
+			continue
+		}
+		d := inc.lead
+		for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
+			d = filepath.Join(d, part)
+			rights := ReadDir
+			if dedicated && p.dedicated(d).dedicated {
+				rights |= ReadFile
+			}
+			if p.covers(d, rights) {
+				continue
+			}
+			rd, err := p.resolve(d)
+			switch {
+			case err != nil:
+				return fmt.Errorf("%s: %w", keyInclude, err)
+			case !rd.exists || !rd.info.IsDir() || p.special(rd.path):
+				continue
+			case isRoot(rd.path):
+				return &RootError{Key: keyInclude}
+			}
+			p.addDir(rd, rights, keyInclude)
+			p.noteLink(keyInclude, d, rd.path, filepath.Dir(d))
 		}
 	}
 	return nil

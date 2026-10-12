@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -278,11 +279,18 @@ func (linuxKernel) releaseTerminal() error {
 // /proc/self/status shows one: with AmbientCapabilities=CAP_NET_BIND_SERVICE
 // (port 22), exec hooks would inherit the capability. Capabilities are per
 // thread and a child inherits its forking thread's, so a plain prctl would
-// clear one thread only. It returns the set that was cleared. Call it after
-// the listeners are bound and before any hook can run; an error fails the
-// start.
-func ClearAmbient() (uint64, error) {
-	v, err := statusField("CapAmb")
+// clear one thread only. It returns the set that was cleared. A status
+// without CapAmb (Linux before 4.3 has no ambient set) or no /proc shows
+// none. Call it after the listeners are bound and before any hook can run;
+// an error fails the start.
+func ClearAmbient() (uint64, error) { return clearAmbient(procStatus) }
+
+// clearAmbient is ClearAmbient with the status file to read.
+func clearAmbient(status string) (uint64, error) {
+	v, err := field(status, "CapAmb")
+	if _, ok := errors.AsType[*noFieldError](err); ok || errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -299,9 +307,14 @@ func ClearAmbient() (uint64, error) {
 	return set, nil
 }
 
+const procStatus = "/proc/self/status"
+
 // statusField returns a field of /proc/self/status.
-func statusField(name string) (string, error) {
-	f, err := os.Open("/proc/self/status")
+func statusField(name string) (string, error) { return field(procStatus, name) }
+
+// field returns a field of a status file, or a *noFieldError.
+func field(status, name string) (string, error) {
+	f, err := os.Open(status)
 	if err != nil {
 		return "", err
 	}
@@ -315,8 +328,13 @@ func statusField(name string) (string, error) {
 	if err := s.Err(); err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("/proc/self/status has no %s", name)
+	return "", &noFieldError{status: status, name: name}
 }
+
+// noFieldError is field's error for a field that the status file lacks.
+type noFieldError struct{ status, name string }
+
+func (e *noFieldError) Error() string { return e.status + " has no " + e.name }
 
 // osFS is the real file system.
 type osFS struct{}

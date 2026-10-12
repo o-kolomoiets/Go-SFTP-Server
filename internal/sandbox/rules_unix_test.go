@@ -139,12 +139,15 @@ func TestCheckSkipsDev(t *testing.T) {
 }
 
 // TestKeepsOpenAuditLink: an audit file that is a link to stderr, when
-// stderr is a pipe, gets no rule and is kept open at reloads; one that got
-// a rule is opened again.
+// stderr is a pipe, gets no rule and is kept open at reloads, as one that
+// resolves under /dev does (/dev/null, a terminal behind /dev/stdout); one
+// that got a rule is opened again.
 func TestKeepsOpenAuditLink(t *testing.T) {
 	t.Parallel()
 	m := linuxFS(t).symlink("/dev/stderr", "/proc/self/fd/2").symlink("/proc/self/fd/2", "pipe:[4242]").
-		symlink("/var/log/gosftpd/audit.jsonl", "/dev/stderr").files("/var/log/other/audit.jsonl")
+		symlink("/var/log/gosftpd/audit.jsonl", "/dev/stderr").files("/var/log/other/audit.jsonl").
+		device("/dev/null").symlink("/var/log/null/audit.jsonl", "/dev/null").
+		device("/dev/pts/3").symlink("/dev/stdout", "/dev/pts/3").symlink("/var/log/tty/audit.jsonl", "/dev/stdout")
 	c := newConfig("/etc/gosftpd/config.toml")
 	c.Audit.Output = "/var/log/gosftpd/audit.jsonl"
 	in := input(t, m, c)
@@ -152,6 +155,12 @@ func TestKeepsOpenAuditLink(t *testing.T) {
 	rs := applied(t, in)
 	if !rs.KeepsOpen("/var/log/gosftpd/audit.jsonl") || rs.KeepsOpen("/var/log/other/audit.jsonl") {
 		t.Error("KeepsOpen")
+	}
+	for _, out := range []string{"/var/log/null/audit.jsonl", "/var/log/tty/audit.jsonl"} {
+		c.Audit.Output = out
+		if rs := applied(t, in); !rs.KeepsOpen(out) {
+			t.Errorf("%s, which resolves under /dev, is opened again", out)
+		}
 	}
 	c.Audit.Output = "/var/log/other/audit.jsonl"
 	if rs := applied(t, input(t, m, c)); rs.KeepsOpen("/var/log/other/audit.jsonl") {

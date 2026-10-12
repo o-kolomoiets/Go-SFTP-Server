@@ -176,6 +176,34 @@ func TestUnsandboxed(t *testing.T) {
 	}
 }
 
+// TestClearAmbientNoField: a status without CapAmb (Linux before 4.3) and
+// a missing /proc show no ambient set, which is nothing to clear and never
+// fails the start; a CapAmb that cannot be parsed does.
+func TestClearAmbientNoField(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	status := func(name, data string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for what, path := range map[string]string{
+		"no CapAmb": status("old", "Name:\tgosftpd\nCapInh:\t0000000000000000\nCapEff:\t0000000000000000\nSeccomp:\t0\n"),
+		"no /proc":  filepath.Join(dir, "missing"),
+		"empty set": status("empty", "CapAmb:\t0000000000000000\n"),
+	} {
+		if cleared, err := clearAmbient(path); cleared != 0 || err != nil {
+			t.Errorf("%s: clearAmbient = %#x, %v", what, cleared, err)
+		}
+	}
+	if _, err := clearAmbient(status("bad", "CapAmb:\tnot hex\n")); err == nil {
+		t.Error("a CapAmb that cannot be parsed is no error")
+	}
+}
+
 // TestPreview: config validate --check-fs gets the start warnings from the
 // real file system, without a mount table; nothing where the
 // configuration keeps Start from computing rules.

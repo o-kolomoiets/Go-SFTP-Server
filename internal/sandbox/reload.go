@@ -24,8 +24,9 @@ type Ruleset struct {
 	fs       FS
 	linux    bool
 	resolver []string // the name-resolution files that got a rule
-	// audit is the audit file of the start when the rules do not let
-	// gosftpd write it: a link to a pipe, as a path under /dev does.
+	// audit is the audit file of the start when it got no rule: a link
+	// to a pipe, or one that resolves under /dev or /proc (/dev/null, a
+	// terminal behind /dev/stdout), as a path under /dev does.
 	audit string
 }
 
@@ -36,8 +37,11 @@ func newRuleset(rules []Rule, in Input) *Ruleset {
 			rs.resolver = append(rs.resolver, f)
 		}
 	}
-	if out := in.Config.Audit.Output; out != "" && out != "stdout" && !rs.Covers(out, WriteFile) {
-		rs.audit = filepath.Clean(out)
+	if out := in.Config.Audit.Output; out != "" && out != "stdout" {
+		// Covers takes a target under /dev or /proc for covered.
+		if r, err := rs.fs.EvalSymlinks(out); err != nil || rs.special(filepath.Clean(r)) || !rs.Covers(out, WriteFile) {
+			rs.audit = filepath.Clean(out)
+		}
 	}
 	return rs
 }
@@ -330,7 +334,7 @@ func (e *hintError) Unwrap() error { return e.err }
 // open, since opening it again would be refused: it lies under /dev or
 // /proc, which never get a rule (audit.output on /dev/stderr), or it is
 // the audit file of the start, which got no rule (a link to stderr when
-// that is a pipe). Without Landlock nothing has to.
+// that is a pipe, or to /dev/null). Without Landlock nothing has to.
 func (rs *Ruleset) KeepsOpen(path string) bool {
 	if rs == nil {
 		return false

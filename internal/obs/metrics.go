@@ -106,7 +106,7 @@ func NewMetrics(version string) *Metrics {
 	m.hooks = newCounterVec(r, "gosftpd_hook_deliveries_total", "Hook deliveries, once per event and hook at the final outcome, by hook type and result.",
 		Label{"type", HookKinds}, Label{"result", HookResults})
 	m.hookRetries = newCounter(r, "gosftpd_hook_retries_total", "Webhook attempts after the first.")
-	m.hooksStale = newGauge(r, "gosftpd_hooks_not_updated", "Hooks the last reload kept at their running secret or left out because of a file problem.")
+	m.hooksStale = newGauge(r, "gosftpd_hooks_not_updated", "Hooks the last reload kept at their running secret or left out: because of a file problem, or exec hooks it added under Landlock.")
 	m.reloadOK.Set(1)
 	m.reloadTime.Set(unixSeconds(time.Now()))
 
