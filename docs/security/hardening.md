@@ -67,7 +67,7 @@ its settings do, and what they cost:
 | `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` | Only Unix (`sd_notify`, journald) and Internet sockets. | None for gosftpd. |
 | `ProtectProc=invisible`, `ProcSubset=pid` | Other processes and most of `/proc` are hidden. | None for gosftpd (the process metrics read `/proc/self`). |
 | `ProtectKernelTunables=`, `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectControlGroups=`, `ProtectClock=`, `ProtectHostname=`, `RestrictNamespaces=`, `RestrictRealtime=`, `RestrictSUIDSGID=`, `RemoveIPC=`, `SystemCallArchitectures=native` | The kernel, clock, host name, namespaces and the other ABIs are off limits. | None for gosftpd. |
-| `UMask=0027` | Uploads are not readable by other users. | Members of the group `gosftpd` can read them. |
+| `UMask=0027` | Uploads get 0666 minus the mount's `umask` (default `"0027"`: not readable by other users); `UMask=` also masks a direct upload, but not one through a temporary file (`atomic_uploads`, a conflict under `on_conflict = "version"`), whose mode gosftpd sets explicitly. `UMask=` covers what else gosftpd and its exec hooks create. | Members of the group `gosftpd` can read them. |
 | `KillMode=mixed`, `TimeoutStopSec=45` | Only gosftpd gets SIGTERM: running exec hooks finish during the drain, and what they leave is killed once gosftpd exits. | A stop takes up to `shutdown_timeout` + 10 s; gosftpd asks for more when a reload raised `shutdown_timeout`. |
 | `Restart=on-failure`, `RestartSec=2s`, `StartLimitBurst=5` in `StartLimitIntervalSec=60`, `RestartPreventExitStatus=2` | Restarts after a crash, but not after a configuration or file system error (exit status 2), and at most 5 times a minute. | A data disk that is mounted late is not retried ([install.md](../install.md#a-data-disk-mounted-later)). |
 | `RequiresMountsFor=/srv/sftp` | Starts after the data file system, and `systemctl stop` of it stops gosftpd first. | A manual `umount` does not stop gosftpd. |
@@ -87,9 +87,13 @@ allowed ([install.md](../install.md#more-hardening)).
 and `landlock_restrict_self`: `@system-service` holds none of them, and
 the group `@sandbox` exists only from systemd 254 (252 warns that it does
 not know it). Without them, gosftpd runs without Landlock and logs
-"landlock: not available: blocked by a seccomp filter". It tests the calls
-in a child process first, so a filter that kills a process for them, as
-one without `SystemCallErrorNumber=` does, does not stop gosftpd.
+`landlock: not available` with the reason "blocked by a seccomp filter"
+(a filter with `SystemCallErrorNumber=EPERM`) or "killed by a seccomp
+filter" (a filter that kills, as one without `SystemCallErrorNumber=`
+does, such as the interim unit of v0.3); `server.start` records
+`landlock` = `blocked` in both cases. It tests the calls in a child
+process first, so a filter that kills a process for them does not stop
+gosftpd.
 
 ## Filesystem
 

@@ -165,9 +165,13 @@ fails the start with exit status 1, in `auto` too: the default never runs
 unconfined because of an error. Under systemd, `SystemCallFilter=` must
 allow `landlock_create_ruleset`, `landlock_add_rule` and
 `landlock_restrict_self`, which are not in `@system-service`; without them
-the log says "blocked by a seccomp filter". gosftpd tries these calls in a
-child process first when a seccomp filter is installed, so a filter that
-kills the process instead of refusing the call does not stop the server.
+the log says `landlock: not available` with the reason "blocked by a
+seccomp filter" (with `SystemCallErrorNumber=`) or "killed by a seccomp
+filter" (a filter that kills, such as the interim unit of v0.3), and
+`server.start` records `blocked` in both cases. gosftpd tries these calls
+in a child process first when a seccomp filter is installed, so a filter
+that kills the process instead of refusing the call does not stop the
+server.
 
 The log says what happened: `landlock: ABI v5 applied` (with `kernel_abi`),
 `landlock: not applied` or `landlock: not available` with a `reason`.
@@ -231,12 +235,15 @@ restart, and `server.reload` names its key in `restart_required`
 - a new `audit.output` outside the rules keeps the running one; an audit
   log next to other files, rotated by rename, cannot be created again
   ([audit-log.md](audit-log.md#rotation));
-- an exec hook added by the reload is left out;
+- an exec hook added by the reload is left out (with `server.landlock =
+  "required"` such a configuration is invalid, and the reload fails);
 - a key or CA file the rules do not cover is left out as an unreadable file
   is, a host key keeps the running host keys, and a webhook's
   `secret_file` keeps the running secret (a new hook is left out); an
-  include file or the revocation list the rules do not cover fails the
-  reload, without `restart_required`.
+  include file, the revocation list or the configuration file itself that
+  the rules do not cover (in a shared directory, replaced by rename:
+  `sed -i`, most editors) fails the reload, without `restart_required`,
+  until a restart.
 
 Every permission error on a path the rules do not cover adds "outside the
 Landlock ruleset applied at start; restart gosftpd" in the operational log,
@@ -259,7 +266,10 @@ resolution, warns about it ([hooks.md](hooks.md#sandboxes-and-containers)).
   zero-configuration mode) or abstract;
 - descriptors opened before the ruleset; gosftpd gives up its controlling
   terminal, so that `TIOCSTI` on an inherited terminal cannot type commands
-  into the shell that started it;
+  into the shell that started it. That holds only without `CAP_SYS_ADMIN`:
+  as root (`--allow-root`) `TIOCSTI` works on any terminal, so start a
+  root `serve` detached from your shell (systemd, or `setsid` with stdin,
+  stdout and stderr redirected);
 - the network, and signals to processes of the same user;
 - files created later in a dedicated directory;
 - on ABI 2 (Debian 12) truncating files, and below ABI 5 `ioctl` on

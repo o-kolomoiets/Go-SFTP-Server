@@ -77,6 +77,13 @@ and the `sftp` command. On a running server, `kill -HUP` (or `systemctl reload
 gosftpd`) applies it without a restart; `gosftpd user disable partner`,
 `enable` and `remove` change the file the same way.
 
+On Linux `serve` confines itself with Landlock
+([security.md](security.md#landlock)), and in `init`'s layout `share` lies
+next to `gosftpd.toml`: an edit that replaces `gosftpd.toml` by rename
+(`sed -i`, most editors) then needs a restart, and every reload fails until
+one. To reload such edits too, keep the configuration file in a directory
+of its own, or serve a directory elsewhere (`init --dir NAME=PATH`).
+
 `partner` can list and upload, but not download, delete or overwrite; an
 upload over an existing name becomes a copy. See
 [configuration.md](configuration.md) for mounts, per-user home directories,

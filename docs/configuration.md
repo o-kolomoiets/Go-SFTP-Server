@@ -836,10 +836,13 @@ Under Landlock a restart is needed for (the reload names each in
 - a new `audit.output` outside the rules (the running output stays), and an
   audit log next to other files once it was rotated by rename;
 - an exec hook added by a reload: Landlock is applied only without exec
-  hooks, so the hook is left out;
+  hooks, so the hook is left out (with `server.landlock = "required"` such
+  a configuration is invalid, and the reload fails);
 - a key, CA or secret file in a shared directory replaced by rename, or a
-  re-pointed link to one. An include file or a revocation list that the
-  rules do not cover fails the reload instead.
+  re-pointed link to one. An include file, a revocation list or the
+  configuration file itself that the rules do not cover (in a shared
+  directory, replaced by rename: `sed -i`, most editors) fails the reload
+  instead, until a restart.
 
 `server.landlock = "off"` turns Landlock off, also for these cases; it takes
 effect at the next restart.
@@ -857,7 +860,9 @@ command-line flags and environment, and checks it like `config validate
   refused even for a client that was half-way through logging in.
 - **Open connections** keep the configuration they logged in under, for all
   their sessions, unless `disconnect_removed_users` closes them. A changed or
-  remounted mount directory is opened anew for new logins; old connections
+  remounted mount directory is opened anew for new logins (without
+  Landlock; under Landlock a recreated or remounted mount directory is
+  unavailable until a restart, see [Landlock](#landlock)); old connections
   keep the old directory until they end.
 - **Carried over:** bans (with the new `[auth.ban]` settings; turning bans off
   drops them), connection counts (connections above a lowered limit stay; new
@@ -878,7 +883,9 @@ command-line flags and environment, and checks it like `config validate
   fails its checks (missing, not executable, writable by others) is left
   out until a reload fixes it; one whose `secret_file` cannot be used keeps
   its running secret. Both give a warning, count in
-  `gosftpd_hooks_not_updated`, and do not fail the reload.
+  `gosftpd_hooks_not_updated`, and do not fail the reload. That gauge also
+  counts, under Landlock, the exec hooks a reload added and left out (see
+  below); for them the remedy is a restart.
 - **Trusted proxies** (`server.trusted_proxies`) apply to connections
   accepted after the reload; open connections keep the classification they
   got at accept (see [Turning it on](#turning-it-on-and-health-checks)).
@@ -888,14 +895,18 @@ command-line flags and environment, and checks it like `config validate
   `server.reload` audit event; the running value stays.
 - **Under Landlock** (Linux) the ruleset applied at start stays as it is,
   and a reload cannot reach beyond it ([Landlock](#landlock)). A mount, a
+  mount directory recreated or remounted since the start (unavailable), a
   mount's new rights, a new `audit.output` or an exec hook that the ruleset
   does not cover keeps its running value or is left out, and is named in
   `restart_required` (`mounts.NAME.path`, `mounts.NAME.read_only`,
-  `mounts.NAME.create`, `audit.output`, `hooks`). A key, CA or secret file
-  it does not cover is left out as an unreadable one is, and its key is
-  listed too; an include file or a revocation list it does not cover fails
-  the reload. Every such error in the log adds "outside the Landlock
-  ruleset applied at start; restart gosftpd".
+  `mounts.NAME.create`, `audit.output`, `hooks`); with `server.landlock =
+  "required"` a configuration with an exec hook is invalid, and the reload
+  fails. A key, CA or secret file it does not cover is left out as an
+  unreadable one is, and its key is listed too; an include file, a
+  revocation list or the configuration file itself that it does not cover
+  (in a shared directory, replaced by rename: `sed -i`, most editors)
+  fails the reload, until a restart. Every such error in the log adds
+  "outside the Landlock ruleset applied at start; restart gosftpd".
 
 Problems that concern one user or one mount do not stop a reload: an
 `authorized_keys_file` that is missing, unsafe, empty or not a regular file
