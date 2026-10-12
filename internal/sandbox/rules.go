@@ -463,9 +463,23 @@ func (p *planner) auditDedicated(dir, file string) verdict {
 	if why, ok := p.never(dir); ok {
 		return verdict{why: why}
 	}
+	audit := filepath.Join(dir, file)
 	stem := strings.TrimSuffix(file, filepath.Ext(file))
-	rotated := func(name string) bool {
-		return strings.HasPrefix(name, file) || stem != "" && strings.HasPrefix(name, stem)
+	// rotated reports whether the entry name of d is the audit file or a
+	// copy logrotate made of it. With extension, logrotate writes the
+	// name up to the last dot followed by a separator or a digit
+	// (audit.1.jsonl, audit-20261012.jsonl), never auditor.toml. A file
+	// the configuration names is no copy, also when its name looks like
+	// one: it would become writable.
+	rotated := func(d, name string) bool {
+		if full := filepath.Join(d, name); p.named[full] && full != audit {
+			return false
+		}
+		if strings.HasPrefix(name, file) {
+			return true
+		}
+		rest, ok := strings.CutPrefix(name, stem)
+		return ok && stem != "" && rest != "" && (strings.ContainsRune(".-_", rune(rest[0])) || '0' <= rest[0] && rest[0] <= '9')
 	}
 	names, err := p.fs.ReadDir(dir)
 	if err != nil {
@@ -475,7 +489,7 @@ func (p *planner) auditDedicated(dir, file string) verdict {
 	var other []string
 	for _, name := range names {
 		switch {
-		case rotated(name), name == "lost+found" && p.fsRoot(dir):
+		case rotated(dir, name), name == "lost+found" && p.fsRoot(dir):
 			continue
 		}
 		full := filepath.Join(dir, name)
@@ -483,7 +497,7 @@ func (p *planner) auditDedicated(dir, file string) verdict {
 		// that holds a named file, also while it is empty: the audit
 		// directory's write rights would reach it.
 		if info, err := p.fs.Stat(full); err == nil && info.IsDir() && !p.onPath(full) && !p.holdsNamed(full) {
-			if sub, err := p.fs.ReadDir(full); err == nil && !slices.ContainsFunc(sub, func(n string) bool { return !rotated(n) }) {
+			if sub, err := p.fs.ReadDir(full); err == nil && !slices.ContainsFunc(sub, func(n string) bool { return !rotated(full, n) }) {
 				continue
 			}
 		}

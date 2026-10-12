@@ -448,6 +448,26 @@ func TestAuditRow(t *testing.T) {
 		checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, "file /var/log/gosftpd/audit.jsonl " + wfile, inbox},
 			"audit.output: Landlock covers only the file audit.jsonl in /var/log/gosftpd, which holds old: ")
 	})
+	t.Run("names that only look like rotated copies", func(t *testing.T) {
+		t.Parallel()
+		m, c := base(t)
+		m.files("/srv/state/audit.log", "/srv/state/auditor.toml", "/srv/state/audit.log.keys")
+		addUser(c, "alice", "/srv/state/audit.log.keys")
+		c.Audit.Output = native("/srv/state/audit.log")
+		// auditor.toml is no copy logrotate writes, and the key file of
+		// alice would become writable: the audit file gets a rule of its
+		// own.
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "file /srv/state/audit.log " + wfile, "file /srv/state/audit.log.keys " + rfile, inbox,
+		},
+			"users.alice.authorized_keys_file: Landlock covers only the file audit.log.keys in /srv/state, which holds auditor.toml"+shared,
+			"audit.output: Landlock covers only the file audit.log in /srv/state, which holds audit.log.keys and auditor.toml: "+rotWarn)
+
+		m.remove("/srv/state/auditor.toml")
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "dir /srv/state " + rfile, "file /srv/state/audit.log " + wfile, inbox,
+		}, "audit.output: Landlock covers only the file audit.log in /srv/state, which holds audit.log.keys: "+rotWarn)
+	})
 	t.Run("an empty include directory is no olddir", func(t *testing.T) {
 		t.Parallel()
 		m, c := base(t)
