@@ -866,6 +866,7 @@ func TestProxySilentPeerDoesNotBlockAccept(t *testing.T) {
 		defer e.close()
 		ln := newPipeListener()
 		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel() // before e.close, also when the test fails early
 		served := make(chan error, 1)
 		go func() { served <- e.srv.Serve(ctx, ln) }()
 
