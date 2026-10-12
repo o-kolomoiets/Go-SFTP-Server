@@ -3,12 +3,18 @@
 package cli
 
 import (
+	"bytes"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/pires/go-proxyproto"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
@@ -128,9 +134,9 @@ func TestHealthcheckAddress(t *testing.T) {
 		{healthOptions{}, map[string]string{config.EnvConfig: cfg}, "127.0.0.1:" + port},
 		{healthOptions{}, nil, ":2022"},
 	} {
-		got, err := healthAddress(tt.o, getenv(tt.env))
-		if err != nil || got != tt.want {
-			t.Errorf("healthAddress(%+v, %v) = %q, %v; want %q", tt.o, tt.env, got, err, tt.want)
+		got, err := healthTargetFor(tt.o, getenv(tt.env))
+		if err != nil || got.addr != tt.want || got.note != "" || len(got.trusted) != 0 {
+			t.Errorf("healthTargetFor(%+v, %v) = %+v, %v; want %q", tt.o, tt.env, got, err, tt.want)
 		}
 	}
 	if code, stdout, _ := healthcheck(t, "--config", cfg); code != exitOK || !strings.Contains(stdout, addr) {
@@ -222,6 +228,123 @@ func TestBanner(t *testing.T) {
 	} {
 		if got := banner([]byte(in)); got != want {
 			t.Errorf("banner(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// recorder answers every connection with an SSH banner and sends what the
+// client sent before it closed on got.
+func recorder(t *testing.T) (string, <-chan []byte) {
+	t.Helper()
+	got := make(chan []byte, 16)
+	addr := fakeServer(t, func(c net.Conn) {
+		_, _ = c.Write([]byte("SSH-2.0-gosftpd\r\n"))
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		b, _ := io.ReadAll(c)
+		got <- b
+	})
+	return addr, got
+}
+
+// gosftpd healthcheck reads server.trusted_proxies leniently, also with
+// --address or $GOSFTPD_LISTEN, and sends a LOCAL header from a trusted
+// source; what it cannot use is named on its one line.
+func TestHealthcheckTrustedProxies(t *testing.T) {
+	isolate(t)
+	addr, got := recorder(t)
+	dir := t.TempDir()
+	cfg := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		writeFile(t, p, body)
+		return p
+	}
+	listen := "[server]\nlisten = [\"" + addr + "\"]\n"
+	trusted := cfg("trusted.toml", listen+"trusted_proxies = [\"127.0.0.1\"]\n")
+	other := cfg("other.toml", listen+"trusted_proxies = [\"10.0.0.5\"]\n")
+	str := cfg("string.toml", listen+"trusted_proxies = \"127.0.0.1\"\n")
+	mixed := cfg("mixed.toml", listen+"trusted_proxies = [\"bogus\", \"127.0.0.1\"]\n")
+	broken := cfg("broken.toml", "[server\n")
+	const local = " after a PROXY protocol LOCAL header"
+	for _, tt := range []struct {
+		name   string
+		args   []string
+		env    map[string]string
+		header bool
+		note   string
+	}{
+		{"trusted", []string{"--config", trusted}, nil, true, ""},
+		{"not trusted", []string{"--config", other}, nil, false, ""},
+		{"trusted, with --address", []string{"--address", addr, "--config", trusted}, nil, true, ""},
+		{"trusted, with $GOSFTPD_LISTEN", nil, map[string]string{config.EnvListen: addr, config.EnvConfig: trusted}, true, ""},
+		{"a string", []string{"--config", str}, nil, false, "(server.trusted_proxies: not a list of addresses but a string)"},
+		{"an invalid entry", []string{"--config", mixed}, nil, true, `(server.trusted_proxies: entry 1: "bogus" is not an IP address or CIDR block)`},
+		{"not TOML, with --address", []string{"--address", addr, "--config", broken}, nil, false, "(server.trusted_proxies: " + broken + ": toml: "},
+		{"a missing file, with --address", []string{"--address", addr, "--config", filepath.Join(dir, "missing.toml")}, nil, false, "(server.trusted_proxies: --config: "},
+		{"no file, with --address", []string{"--address", addr}, nil, false, ""},
+	} {
+		for k, v := range tt.env {
+			t.Setenv(k, v)
+		}
+		code, stdout, stderr := healthcheck(t, tt.args...)
+		for k := range tt.env {
+			t.Setenv(k, "")
+		}
+		sent := <-got
+		switch {
+		case code != exitOK || strings.Count(stdout, "\n") != 1 || !strings.HasPrefix(stdout, "ok: "+addr+" sent an SSH banner"):
+			t.Errorf("%s: exit %d: %q %q", tt.name, code, stdout, stderr)
+		case tt.header != bytes.Equal(sent, localHeader) || !tt.header && len(sent) > 0:
+			t.Errorf("%s: the probe sent %x", tt.name, sent)
+		case tt.header != strings.Contains(stdout, local):
+			t.Errorf("%s: %q", tt.name, stdout)
+		case tt.note == "" && strings.Contains(stdout, "server.trusted_proxies"), !strings.Contains(stdout, tt.note):
+			t.Errorf("%s: %q, want the note %q", tt.name, stdout, tt.note)
+		}
+	}
+	if want, err := (&proxyproto.Header{Version: 2, Command: proxyproto.LOCAL}).Format(); err != nil || len(localHeader) != 16 || !bytes.Equal(localHeader, want) {
+		t.Errorf("the LOCAL header is %x, want %x (%v)", localHeader, want, err)
+	}
+	// An unhealthy result keeps the note, on its one line.
+	code, _, stderr := healthcheck(t, "--config", cfg("closed.toml", "[server]\nlisten = [\"127.0.0.1:1\"]\ntrusted_proxies = 7\n"), "--timeout", "2s")
+	if code != exitFailure || !strings.HasPrefix(stderr, "unhealthy: ") || !strings.HasSuffix(stderr, "(server.trusted_proxies: not a list of addresses but a number)\n") {
+		t.Errorf("unhealthy: exit %d: %q", code, stderr)
+	}
+}
+
+// From a trusted address without a header the probe gets no banner: it is
+// unhealthy when its --timeout ends first, and when the server's header
+// deadline ends first the close reads as for a refused connection.
+func TestHealthcheckTrustedWithoutHeader(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gosftpd.toml")
+	// The header deadline is min(handshake_timeout, 10 s).
+	writeFile(t, path, proxyConfig(t, dir, "trusted_proxies = [\"127.0.0.1\"]\nhandshake_timeout = \"3s\"", newSigner(t)))
+	ts := startServe(t, "--config", path)
+
+	if code, _, stderr := healthcheck(t, "--address", ts.addr, "--timeout", "200ms"); code != exitFailure || !strings.Contains(stderr, "no SSH banner within 200ms") {
+		t.Errorf("the probe's timeout first: exit %d: %q", code, stderr)
+	}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if code, stdout, stderr := healthcheck(t, "--address", ts.addr, "--timeout", "20s"); code != exitOK || !strings.Contains(stdout, "closed it without a banner") {
+			t.Errorf("the server's header deadline first: exit %d: %q %q", code, stdout, stderr)
+		}
+	})
+	wg.Go(func() {
+		if code, _, stderr := healthcheck(t, "--address", ts.addr, "--timeout", "20s", "--ready"); code != exitFailure || !strings.Contains(stderr, "closed it without a banner") {
+			t.Errorf("the server's header deadline first, --ready: exit %d: %q", code, stderr)
+		}
+	})
+	wg.Wait()
+	// With the configuration the probe sends LOCAL and gets the banner.
+	if code, stdout, stderr := healthcheck(t, "--address", ts.addr, "--config", path); code != exitOK || !strings.Contains(stdout, "sent an SSH banner after a PROXY protocol LOCAL header") {
+		t.Errorf("with the configuration: exit %d: %q %q", code, stdout, stderr)
+	}
+	// None of the probes is audited.
+	for _, ev := range []string{"conn.accept", "conn.reject", "conn.close"} {
+		if evs := events(t, ts.stdout.String(), ev); len(evs) > 0 {
+			t.Errorf("a probe audited: %v", evs)
 		}
 	}
 }

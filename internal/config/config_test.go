@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1537,5 +1538,46 @@ func TestReadListen(t *testing.T) {
 	path = writeConfig(t, dir, "[server]\nlisten = \"127.0.0.1:1\"\n")
 	if _, err := ReadListen(path); err == nil {
 		t.Error("a string listen was accepted")
+	}
+}
+
+// gosftpd healthcheck reads server.trusted_proxies apart from
+// server.listen: what cannot be used of it is an error, while the entries
+// that parse are still returned.
+func TestReadTrustedProxies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		file string
+		want []string
+		err  string
+	}{
+		{"[server]\nlisten = [\":2022\"]\n", nil, ""},
+		{"[server]\ntrusted_proxies = [\"127.0.0.1\", \"10.0.1.7/28\"]\nbogus = 1\n[nonsense]\n", []string{"127.0.0.1/32", "10.0.1.0/28"}, ""},
+		{"[server]\ntrusted_proxies = \"127.0.0.1\"\n", nil, "not a list of addresses but a string"},
+		{"[server]\ntrusted_proxies = 5\n", nil, "not a list of addresses but a number"},
+		{
+			"[server]\ntrusted_proxies = [\"bogus\", \"127.0.0.1\", 7, \"0.0.0.0/0\"]\n",
+			[]string{"127.0.0.1/32"},
+			`entry 1: "bogus" is not an IP address or CIDR block` + "\n" + "entry 3 is a number, not an address" + "\n" + `entry 4: "0.0.0.0/0" holds every address`,
+		},
+		{"[server\n", nil, "toml:"},
+	} {
+		path := writeConfig(t, dir, tt.file)
+		prefixes, err := ReadTrustedProxies(path)
+		var got []string
+		for _, p := range prefixes {
+			got = append(got, p.String())
+		}
+		if !slices.Equal(got, tt.want) || (err == nil) != (tt.err == "") || err != nil && !strings.Contains(err.Error(), tt.err) {
+			t.Errorf("%q: %v, %v; want %v, %q", tt.file, got, err, tt.want, tt.err)
+		}
+	}
+	if _, err := ReadTrustedProxies(filepath.Join(dir, "missing.toml")); err == nil {
+		t.Error("a missing file read")
+	}
+	if p, err := ParseTrustedProxy("10.0.0.5"); err != nil || p != netip.MustParsePrefix("10.0.0.5/32") {
+		t.Errorf("ParseTrustedProxy = %v, %v", p, err)
 	}
 }
