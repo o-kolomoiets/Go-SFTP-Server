@@ -73,7 +73,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `handshake_timeout` | `"30s"` | Time a client has to finish the SSH handshake and authentication (1s–10m). |
 | `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
-| `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). |
+| `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). Under systemd, gosftpd extends `TimeoutStopSec` to this + 10 s when it stops (`EXTEND_TIMEOUT_USEC`), also after a reload raised it. |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.
@@ -161,6 +161,12 @@ links.
 
 A mount also takes every option from `[defaults]` below; a value set on the
 mount wins.
+
+A mount that is not `read_only` but whose directory is on a read-only file
+system gives a warning at start, at reload and in `config validate
+--check-fs` ("PATH is on a read-only file system; uploads will fail"):
+under systemd, the unit's `ProtectSystem=strict` makes every path outside
+`ReadWritePaths=` read-only (see [install.md](install.md#another-data-path)).
 
 **Home mounts.** With `path = "/srv/sftp/home/{user}"`, user `alice` gets
 `/srv/sftp/home/alice` (created as 0750 with `create = true`). The directory
@@ -685,7 +691,12 @@ file; a reload warns when the file says otherwise. With zero-config (`--dir`), a
 reads `--authorized-keys` again and reopens the audit log.
 
 Under systemd, gosftpd reports `RELOADING=1` and then `READY=1` with a status
-line that says whether the reload worked (`Type=notify-reload`).
+line that `systemctl status gosftpd` shows (`Type=notify-reload`):
+`configuration reloaded`, `configuration reloaded; restart needed for:
+KEYS` (the settings above that keep their running value, at most five,
+then "and N more; see the log") or `configuration reload failed, see the
+log`. `systemctl reload` itself succeeds either way; see
+[install.md](install.md#the-result-of-a-reload).
 
 ## Zero-config
 

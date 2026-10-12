@@ -8,6 +8,17 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Upgrading
+
+- A systemd unit with its own `SystemCallFilter=` must allow the three
+  system calls of Landlock: `landlock_create_ruleset`, `landlock_add_rule`
+  and `landlock_restrict_self` (`@system-service` has none of them, and
+  `@sandbox` exists only from systemd 254). Without them gosftpd runs
+  without Landlock and logs "landlock: not available: blocked by a seccomp
+  filter". The shipped unit allows them; to move to it from the interim
+  unit of the v0.3 hardening guide, see
+  [docs/install.md](docs/install.md#upgrade-from-the-quickstart-or-the-interim-unit).
+
 ### Added
 
 - Reload on SIGHUP (`systemctl reload`): the audit log file is reopened
@@ -114,6 +125,26 @@ Incompatible changes are prefixed with **BREAKING:**.
   hour, of a file whose upload closed ok: the rename that completes a
   temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
   upload renamed later. `fs.upload` hooks fire for it.
+- A systemd unit, `packaging/systemd/gosftpd.service`, with sysusers and
+  tmpfiles files and a drop-in for systemd before 253, in the Linux release
+  archives ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md)):
+  `Type=notify-reload`, a sandbox that `systemd-analyze security` scores
+  1.2 on systemd 255 (CI checks it), and no restart after a configuration
+  error (exit status 2). [docs/install.md](docs/install.md) installs it in
+  the layout of the coming packages and covers another data path, mounts
+  under `/home`, port 22, older systemd and the upgrade from the interim
+  unit.
+- After a reload, the status line of `systemctl status` names the settings
+  that need a restart (`configuration reloaded; restart needed for:
+  server.listen`, at most five), besides `configuration reloaded` and
+  `configuration reload failed, see the log`.
+- At stop, gosftpd asks systemd for `shutdown_timeout` + 10 s
+  (`EXTEND_TIMEOUT_USEC`), so that `TimeoutStopSec` does not cut off a
+  drain that a reload made longer.
+- A warning at start, at reload and in `config validate --check-fs` when a
+  writable mount is on a read-only file system (under systemd: outside
+  `ReadWritePaths=`). Uploads there failed with a bare "Failure" and
+  nothing in the log.
 
 ### Changed
 

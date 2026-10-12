@@ -332,10 +332,11 @@ mount and path, so that it can be replayed. A restart can drop up to rate ×
 `delay` events of a delayed hook.
 
 A stop then takes up to `shutdown_timeout` + 8 seconds. With hooks, keep
-`shutdown_timeout` at least 10 seconds below systemd's `TimeoutStopSec` and
-Docker's `stop_grace_period`. A systemd unit should set `KillMode=mixed`,
-so that only gosftpd gets SIGTERM and what hooks left is killed once it has
-exited.
+`shutdown_timeout` at least 10 seconds below Docker's `stop_grace_period`;
+under systemd, gosftpd extends `TimeoutStopSec` to `shutdown_timeout` + 10
+seconds when it stops, if that is longer. A systemd unit should set
+`KillMode=mixed`, as the shipped one does, so that only gosftpd gets
+SIGTERM and what hooks left is killed once it has exited.
 
 ## Reload
 
@@ -378,12 +379,18 @@ With the admin listener on ([metrics.md](metrics.md)):
 
 ## Sandboxes and containers
 
-An exec hook runs as gosftpd's user and inherits its sandbox. Under a
-systemd unit with `ProtectSystem=strict`, it can write only the paths the
-unit allows (`ReadWritePaths=`, the state and log directories); `PrivateTmp`
-gives it a private `/tmp`, `ProtectHome` hides `/home`,
-`MemoryDenyWriteExecute=yes` stops JIT runtimes such as node or java, and
-`NoNewPrivileges` stops sudo. A hook that writes elsewhere needs a drop-in:
+An exec hook runs as gosftpd's user and inherits its sandbox. Under the
+shipped systemd unit ([install.md](install.md)), with
+`ProtectSystem=strict`, it can write only the paths the unit allows
+(`ReadWritePaths=`, the state and log directories, so also the host keys
+and the audit log); `PrivateTmp` gives it a private `/tmp`, `ProtectHome`
+hides `/home`, `MemoryDenyWriteExecute=yes` stops JIT runtimes such as node
+or java, and `NoNewPrivileges` stops sudo. The unit's system call filter
+denies `@resources` and `@privileged`, so `nice`, `ionice`, `taskset`,
+`chown` and `chgrp` fail with "Operation not permitted", and so do
+`install -g`, `cp -p` and `rsync -a` where they keep a group. A hook never
+gets a capability, also not when the unit grants one for port 22. A hook
+that writes elsewhere needs a drop-in:
 
 ```ini
 # /etc/systemd/system/gosftpd.service.d/archive.conf

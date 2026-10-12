@@ -8,6 +8,9 @@ described in [configuration.md](../configuration.md).
 
 - [ ] A dedicated system user owns the served directories and runs gosftpd;
       never root (`serve` refuses without `--allow-root`).
+- [ ] On Linux with systemd: the shipped unit, installed as
+      [install.md](../install.md) describes, and no older unit in
+      `/etc/systemd/system`.
 - [ ] Served directories are written only by gosftpd: no other local users,
       no bind mounts or hard links inside them.
 - [ ] `config validate --check-fs` passes, without warnings you have not
@@ -26,65 +29,67 @@ described in [configuration.md](../configuration.md).
 
 ## Run as a dedicated user
 
+On Linux with systemd, install gosftpd as [install.md](../install.md)
+describes: the shipped unit runs it as the system user `gosftpd`, which
+`systemd-sysusers` creates, with the home `/`. Elsewhere, create such a
+user and its directories yourself:
+
 ```sh
-sudo useradd --system --home-dir /var/lib/gosftpd --create-home --shell /usr/sbin/nologin gosftpd
+sudo useradd --system --home-dir / --no-create-home --shell /usr/sbin/nologin gosftpd
 sudo install -d -o gosftpd -g gosftpd -m 0750 /srv/sftp /var/log/gosftpd
+sudo install -d -o gosftpd -g gosftpd -m 0700 /var/lib/gosftpd
 sudo install -d -o root -g gosftpd -m 0750 /etc/gosftpd
 ```
 
 The configuration, host keys (and their next and previous keys and
 certificates), `authorized_keys` files, the trusted CA keys
 and the revocation list must not be writable by group or others (gosftpd refuses them, like sshd's
-`StrictModes`). A systemd unit ships with v0.4; until then, this one adds
-sandboxing on top of `os.Root`:
+`StrictModes`).
 
-```ini
-[Unit]
-Description=gosftpd SFTP server
-After=network-online.target
-Wants=network-online.target
-RequiresMountsFor=/srv/sftp
+## The systemd unit
 
-[Service]
-User=gosftpd
-Group=gosftpd
-ExecStart=/usr/local/bin/gosftpd serve --config /etc/gosftpd/config.toml
-Restart=on-failure
-TimeoutStopSec=45s
-LimitNOFILE=65536
+The unit in the release archives,
+[packaging/systemd/gosftpd.service](../../packaging/systemd/gosftpd.service),
+adds sandboxing on top of `os.Root`; CI starts it under systemd 255 and
+fails when `systemd-analyze security` scores it above 1.2. It replaces the
+interim unit that this guide showed for v0.3: [install.md](../install.md#upgrade-from-the-quickstart-or-the-interim-unit)
+tells how to remove that one, which would override the shipped unit. What
+its settings do, and what they cost:
 
-NoNewPrivileges=yes
-CapabilityBoundingSet=
-ProtectSystem=strict
-ReadWritePaths=/srv/sftp /var/lib/gosftpd /var/log/gosftpd
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectHostname=yes
-ProtectClock=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
+| Settings | What they do | What they cost |
+|---|---|---|
+| `User=gosftpd`, `NoNewPrivileges=yes`, `CapabilityBoundingSet=` | No root, no capabilities, no setuid programs. | Port 22 needs a drop-in ([install.md](../install.md#port-22)); exec hooks cannot use `sudo`. |
+| `ProtectSystem=strict`, `ReadWritePaths=-/srv/sftp`, `StateDirectory=`, `LogsDirectory=` | The file system is read-only except the data, `/var/lib/gosftpd` (0700) and `/var/log/gosftpd` (0750). | Another data path needs a drop-in; a writable mount outside gets the warning "PATH is on a read-only file system". |
+| `ProtectHome=yes` | `/home`, `/root` and `/run/user` are hidden. | Mounts or key files under `/home` need `ProtectHome=read-only` or `tmpfs` ([install.md](../install.md#mounts-or-key-files-under-home)). |
+| `PrivateTmp=yes`, `PrivateDevices=yes` | A private `/tmp`; no device nodes but `/dev/null` and the like. | Exec hooks see the private `/tmp`. |
+| `SystemCallFilter=@system-service`, the three `landlock_*` calls, `~@privileged @resources`, `SystemCallErrorNumber=EPERM` | Only the system calls a service needs, and Landlock's; the others fail with `EPERM`. | Exec hooks cannot use `nice`, `ionice`, `taskset`, `chown` or `chgrp` ([hooks.md](../hooks.md#sandboxes-and-containers)). |
+| `MemoryDenyWriteExecute=yes`, `LockPersonality=yes` | No memory that is both writable and executable. | Exec hooks cannot run JIT runtimes such as node or java. |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` | Only Unix (`sd_notify`, journald) and Internet sockets. | None for gosftpd. |
+| `ProtectProc=invisible`, `ProcSubset=pid` | Other processes and most of `/proc` are hidden. | None for gosftpd (the process metrics read `/proc/self`). |
+| `ProtectKernelTunables=`, `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectControlGroups=`, `ProtectClock=`, `ProtectHostname=`, `RestrictNamespaces=`, `RestrictRealtime=`, `RestrictSUIDSGID=`, `RemoveIPC=`, `SystemCallArchitectures=native` | The kernel, clock, host name, namespaces and the other ABIs are off limits. | None for gosftpd. |
+| `UMask=0027` | Uploads are not readable by other users. | Members of the group `gosftpd` can read them. |
+| `KillMode=mixed`, `TimeoutStopSec=45` | Only gosftpd gets SIGTERM: running exec hooks finish during the drain, and what they leave is killed once gosftpd exits. | A stop takes up to `shutdown_timeout` + 10 s; gosftpd asks for more when a reload raised `shutdown_timeout`. |
+| `Restart=on-failure`, `RestartSec=2s`, `StartLimitBurst=5` in `StartLimitIntervalSec=60`, `RestartPreventExitStatus=2` | Restarts after a crash, but not after a configuration or file system error (exit status 2), and at most 5 times a minute. | A data disk that is mounted late is not retried ([install.md](../install.md#a-data-disk-mounted-later)). |
+| `RequiresMountsFor=/srv/sftp` | Starts after the data file system, and `systemctl stop` of it stops gosftpd first. | A manual `umount` does not stop gosftpd. |
+| `LimitNOFILE=131072` | Room for the default limits: 256 connections with 4 sessions and 64 handles each. | None. |
 
-[Install]
-WantedBy=multi-user.target
-```
+`systemd-analyze security gosftpd.service` scores the unit 1.2 on systemd
+255; other versions weigh some items differently. What remains is host
+networking (`PrivateNetwork=`,
+`RestrictAddressFamilies=`), which a server needs, the root directory, the
+clock device of `ProtectClock=`, `UMask=` and two settings that are left
+to you because they break common setups: `PrivateUsers=yes` (1.1) breaks
+port 22, and `IPAddressDeny=` breaks webhooks unless their receivers are
+allowed ([install.md](../install.md#more-hardening)).
 
-The unit is not tested in CI yet; check it on your system before you rely
-on it. Keep `TimeoutStopSec` above `server.shutdown_timeout` (30 s by
-default). To
-listen on port 22 without root, add `AmbientCapabilities=CAP_NET_BIND_SERVICE`
-and set `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`, or keep port 2022 and
-forward 22 in the firewall.
+**Your own system call filter.** If you write your own
+`SystemCallFilter=`, allow `landlock_create_ruleset`, `landlock_add_rule`
+and `landlock_restrict_self`: `@system-service` holds none of them, and
+the group `@sandbox` exists only from systemd 254 (252 warns that it does
+not know it). Without them, gosftpd runs without Landlock and logs
+"landlock: not available: blocked by a seccomp filter". It tests the calls
+in a child process first, so a filter that kills a process for them, as
+one without `SystemCallErrorNumber=` does, does not stop gosftpd.
 
 ## Filesystem
 
@@ -187,4 +192,4 @@ exchange (`kex-strict-s-v00@openssh.com`) protects against Terrapin
 - Watch the repository's releases and security advisories, and update when
   a release fixes a vulnerability that is reachable in your setup.
 - CI runs `govulncheck` on every change; run it against your binary too
-  (`govulncheck -mode=binary /usr/local/bin/gosftpd`).
+  (`govulncheck -mode=binary "$(command -v gosftpd)"`).
