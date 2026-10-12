@@ -360,8 +360,10 @@ stays connected for days.
 - A hook whose program fails its checks is left out until a reload fixes
   it. One whose `secret_file` cannot be used keeps its running secret. Both
   give a warning, are counted in `gosftpd_hooks_not_updated`, and do not
-  fail the reload. A hook file inside a mount fails the reload, as every
-  file gosftpd trusts does.
+  fail the reload. Under Landlock an exec hook that a reload adds is left
+  out and counted the same way, until a restart
+  ([Sandboxes and containers](#sandboxes-and-containers)). A hook file
+  inside a mount fails the reload, as every file gosftpd trusts does.
 
 ## Logs and metrics
 
@@ -377,7 +379,7 @@ With the admin listener on ([metrics.md](metrics.md)):
 | `gosftpd_hook_deliveries_total{type, result}` | Once per event and hook, at its final outcome: `type` is `exec` or `webhook`, `result` is `ok`, `failed`, `skipped` (exec: the file changed) or `dropped`. |
 | `gosftpd_hook_retries_total` | Webhook attempts after the first. |
 | `gosftpd_hook_queue_length` | Events queued or being delivered, of all hooks; with a delay, normally rate × delay. |
-| `gosftpd_hooks_not_updated` | Hooks the last reload left out or kept at their running secret. Alert when above 0. |
+| `gosftpd_hooks_not_updated` | Hooks the last reload left out (a program that fails its checks, or, under Landlock, an exec hook the reload added) or kept at their running secret. Alert when above 0; for an exec hook left out under Landlock the remedy is a restart. |
 
 ## Sandboxes and containers
 
@@ -410,8 +412,9 @@ configured: a hook needs the loader, its libraries and whatever it
 touches. With an exec hook the log says `landlock: not applied` with
 `reason="exec hooks configured"`, `server.start` records `not_applied`, and
 `server.landlock = "required"` is refused. A reload that adds an exec hook
-while Landlock is applied leaves the hook out, with a warning, and names
-`hooks` in `restart_required`; after a restart gosftpd runs it, without
+while Landlock is applied leaves the hook out, with a warning, counts it
+in `gosftpd_hooks_not_updated` and names `hooks` in `restart_required`, at
+every reload until a restart; after a restart gosftpd runs it, without
 Landlock. Webhooks work under
 Landlock: the TLS roots are loaded at start, and name resolution reads
 `/etc/hosts`, `/etc/nsswitch.conf` and `/etc/resolv.conf` through rules on

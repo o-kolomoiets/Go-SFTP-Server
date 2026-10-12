@@ -8,10 +8,11 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
-Before upgrading a server behind a load balancer that sends PROXY protocol
-headers, list the load balancer in `server.trusted_proxies` or turn PROXY
-protocol off there: headers from any other address are now refused (see
-Changed).
+When upgrading a server behind a load balancer that sends PROXY protocol
+headers, add the load balancer to `server.trusted_proxies` together with
+the new binary (v0.3 refuses the key), or turn PROXY protocol off on the
+load balancer before the upgrade: headers from any other address are now
+refused (see Changed).
 
 ### Upgrading
 
@@ -19,9 +20,12 @@ Changed).
   system calls of Landlock: `landlock_create_ruleset`, `landlock_add_rule`
   and `landlock_restrict_self` (`@system-service` has none of them, and
   `@sandbox` exists only from systemd 254). Without them gosftpd runs
-  without Landlock and logs "landlock: not available: blocked by a seccomp
-  filter". The shipped unit allows them; to move to it from the interim
-  unit of the v0.3 hardening guide, see
+  without Landlock and logs `landlock: not available` with the reason
+  "blocked by a seccomp filter" (with `SystemCallErrorNumber=`) or "killed
+  by a seccomp filter" (a filter that kills, such as the one of the
+  interim unit of the v0.3 hardening guide); `server.start` records
+  `landlock` = `blocked` in both cases. The shipped unit allows them; to
+  move to it from the interim unit, see
   [docs/install.md](docs/install.md#upgrade-from-the-quickstart-or-the-interim-unit).
 
 ### Added
@@ -36,7 +40,8 @@ Changed).
   configuration. A key file that is missing or unsafe on reload revokes its
   keys instead of failing the reload, and a mount that is unavailable is
   left out until the next reload. A remounted mount directory is opened
-  anew for new logins. See [docs/configuration.md](docs/configuration.md#reload)
+  anew for new logins (under Landlock: after a restart, see Changed). See
+  [docs/configuration.md](docs/configuration.md#reload)
   and [ADR 0005](docs/adr/0005-reload.md).
 - Audit event `server.reload`; `conn.close` result `revoked`.
 - `sd_notify`: `READY=1`, `RELOADING=1` with `MONOTONIC_USEC`, `STOPPING=1`
@@ -238,8 +243,9 @@ Changed).
   `audit.output` that the rules do not allow keep their running values; an
   exec hook added by the reload is left out; a key, CA or secret file in a
   shared directory replaced by rename is left out as an unreadable one is.
-  Each is named in `restart_required`; such an include file or revocation
-  list fails the reload instead. The log adds "outside the Landlock
+  Each is named in `restart_required`; such an include file, revocation
+  list or the configuration file itself (`sed -i`, most editors) fails the
+  reload instead, until a restart. The log adds "outside the Landlock
   ruleset applied at start; restart gosftpd". An audit log that shares its
   directory with other files cannot be rotated by rename without a
   restart: give it a directory of its own or use `copytruncate`. An

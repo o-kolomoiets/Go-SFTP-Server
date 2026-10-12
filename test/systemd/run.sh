@@ -193,6 +193,9 @@ fi
 
 phase "add a user, reload, upload"
 sudo /usr/bin/gosftpd user add alice --key "$WORK/alice.pub" --access inbox=full --write --config "$CONFIG" >/dev/null
+# A mount umask (reloadable) that lets the unit's UMask= show: an upload is
+# 0666 &^ 0002 = 0664 without it, and 0640 only with UMask=0027.
+sudo sed -i '/^create = true$/a umask = "0002"' "$CONFIG"
 sudo systemctl reload gosftpd
 check "status after a reload" status_is "configuration reloaded"
 printf 'put %s up.bin\nrename up.bin final.bin\ndf\nget final.bin %s\n' "$WORK/payload" "$WORK/back" >"$WORK/upload.batch"
@@ -419,11 +422,15 @@ start
 check "landlock applied after the upgrade" journal_has "$mark" 'landlock: ABI v[2-5] applied'
 # The state directory is gosftpd's own again: finishing the rotation is a
 # reload, not a restart.
+next_fp=$(sudo ssh-keygen -lf /var/lib/gosftpd/ssh_host_ed25519_key.next.pub | awk '{print $2}') ||
+	die "no next host key to finish the rotation with"
 as_gosftpd /usr/bin/gosftpd hostkey rotate --finish --config "$CONFIG" >/dev/null
 sudo systemctl reload gosftpd
 check "status after rotate --finish" status_is "configuration reloaded"
 check "server.reload after rotate --finish: ok, restart_required empty" last_reload_is "$reload_ok"
-check "alice logs in with the new host key" sftp_as alice 2022 "$WORK/ls.batch"
+check "the former next key is served" \
+	test "$(ssh-keyscan -p 2022 -t ed25519 127.0.0.1 2>/dev/null | ssh-keygen -lf - | awk '{print $2}')" = "$next_fp"
+check "alice logs in after rotate --finish" sftp_as alice 2022 "$WORK/ls.batch"
 
 phase "stop"
 stop_within_timeout

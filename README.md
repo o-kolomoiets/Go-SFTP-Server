@@ -478,6 +478,7 @@ configuration. To run v0.3.0 as a service under its own user, see its
 | Hooks: a signed webhook or a program when a file arrives, also for WinSCP and rclone temp-file uploads | | ✓ |
 | PROXY protocol behind HAProxy, nginx or a cloud load balancer: bans, limits and the audit log see the client, not the load balancer | | ✓ |
 | A sandboxed systemd unit (`systemd-analyze security` 1.2) with sysusers and tmpfiles files, [install guide](docs/install.md) | | ✓ |
+| Landlock on Linux, on by default without exec hooks: once started, gosftpd can open only its mounts, configuration, keys and audit log ([security model](docs/security.md#landlock)) | | ✓ |
 
 To try `main` today: `init` sets you up, and `user add --write` adds a
 partner and prints the host, port, host key fingerprint and `sftp` command to
@@ -524,7 +525,7 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 | Version | Status | What's in it |
 |---|---|---|
 | v0.3.0 | **released** 2026-10-09 | Connection limits and bans, password login, versions, atomic uploads, size limits, fuzzing, ssh-audit in CI |
-| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol, a systemd unit. To do: Landlock |
+| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol, a systemd unit, Landlock |
 | v0.5 | planned | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
 | v1.0 | planned | Compatibility freeze, benchmarks against OpenSSH, OpenSSF Best Practices badge |
 

@@ -831,3 +831,33 @@ covered.
   probe for the legacy drop-in, the corrected `@sandbox` note and the
   sysusers line with the home `/`; the M4 DoD notes the restart under
   Landlock.
+
+## Implementation notes (M4-08)
+
+- **Binary size**, measured on release builds (`CGO_ENABLED=0`,
+  `-trimpath -ldflags='-s -w'`) instead of the estimates under
+  Dependencies: the PROXY protocol support as a whole adds 72 KiB (73 728
+  bytes, linux/amd64, Go 1.26.5), of which go-proxyproto's own code is
+  about 9 KB.
+  Landlock adds 220 KiB on amd64 and 192 KiB on arm64, of which
+  go-landlock is about 15 KiB and psx less than 1 KiB; the rest is
+  gosftpd's own code (`internal/sandbox` and its use in `serve` and
+  reload). docs/DEPENDENCIES.md keeps these figures.
+- **Log messages are static** (sloglint's `static-msg`): what varies is an
+  attribute, not part of the message, so the sentences quoted under
+  Admission and Reporting are not logged as they stand. Landlock logs
+  `landlock: ABI vN applied` with `kernel_abi` = K (one message for each
+  of ABI 2 to 5); `landlock: not available` (no Landlock, disabled at
+  boot, a seccomp filter) or `landlock: not applied` (ABI 1, exec hooks, a
+  rule on `/`) with `reason` and, where they apply, `hint` (a seccomp
+  filter), `kernel_abi` and `key`; `landlock: failed` with `err`; and the
+  start and name-resolution warnings as `landlock` with `detail`. Only the
+  start error of `required` joins them into one sentence, such as
+  `landlock: not available: REASON (HINT); server.landlock is "required"`.
+  The PROXY protocol warnings are a fixed message ("refusing connection: a
+  peer in server.trusted_proxies sent no valid PROXY protocol header",
+  "refusing connection: PROXY protocol header from a peer not in
+  server.trusted_proxies", "refusing connection: a second PROXY protocol
+  header after a trusted proxy's") with `peer` (or `proxy_addr` and
+  `remote_addr`), `got` and `err` for what arrived instead, `hint`, and
+  `suppressed` for the warnings the once-a-minute limit held back.

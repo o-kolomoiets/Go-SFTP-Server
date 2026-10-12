@@ -618,7 +618,7 @@ flowchart LR
 - [ ] On Linux: Landlock (`go-landlock` v0.10.1, ADR 0011) after the listeners are bound, `server.landlock = "auto"` (default), `"off"` or `"required"`, restart-only:
   - gosftpd queries the ABI itself and, under a seccomp filter, tries the calls in a child first; it asks for ABI 5 with `BestEffort` and needs ABI 2 (`refer`); the restrictions are irreversible;
   - the rules come from the configuration at start: each mount through the descriptor it holds; the configuration, include, key, CA and secret files, by their directory only when it is dedicated to gosftpd (every entry in it is a named file), else by the file with a start warning (a rule on a file is lost when the file is replaced by rename); the audit log, its directory only when it holds nothing else; `/proc/self`, held open (the process collector in `/metrics`); `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/resolv.conf`. `/etc/ssl/certs`, `/etc/pki` and `/usr/share/zoneinfo` are not needed: the TLS roots and the local zone are loaded before;
-  - while exec hooks are configured, Landlock is not applied (`landlock: not applied: exec hooks configured`): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock leaves it out and lists `hooks` in `restart_required`. Webhooks need nothing more;
+  - while exec hooks are configured, Landlock is not applied (`landlock: not applied` with the reason "exec hooks configured"): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock leaves it out and lists `hooks` in `restart_required`. Webhooks need nothing more;
   - a reload checks what the new configuration uses against the rules kept from the start; what they do not cover needs a restart and is named in `restart_required`;
   - at startup, `landlock: ABI vN applied`, `landlock: not applied` or `landlock: not available` with the reason is written to the log, and `server.start` records `landlock`;
   - it does not cover hard links, bind mounts or the `chmod` race (§7.4 item 9);
@@ -865,6 +865,7 @@ idle_timeout = "15m"
 keepalive_interval = "30s"
 shutdown_timeout = "30s"
 trusted_proxies = []                    # load balancers that send a PROXY protocol header (ADR 0011)
+landlock = "auto"                       # Linux sandbox: auto | off | required; restart-only (ADR 0011)
 
 [limits]
 max_connections = 256
@@ -1465,7 +1466,7 @@ WantedBy=multi-user.target
 Notes on the unit file (ADR 0011; `systemd-analyze security` scores it 1.2 on systemd 255, the lint job checks it with `--offline=true --threshold=12`, and the `systemd` CI job runs it):
 - `Documentation=` points to `docs/install.md` until the man page exists (M5): `systemd-analyze verify` fails on a missing man page.
 - `~@resources` is denied too: Go raises `RLIMIT_NOFILE` with `prlimit64`, which is in `@default`, not with `setrlimit`, so the limit is not affected (`LimitNOFILE` is still set explicitly). Exec hooks then cannot use `nice`, `ionice`, `taskset`, `chown` or `chgrp` (`~@privileged` holds `@chown`).
-- Landlock requires its syscalls to be allowed explicitly: `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self` are not part of `@system-service`. The `@sandbox` group appeared only in systemd 254, and 252 (Debian 12, EL9) warns "Unknown system call group, ignoring: @sandbox", so the syscalls are listed by name. Without them gosftpd logs "landlock: not available: blocked by a seccomp filter".
+- Landlock requires its syscalls to be allowed explicitly: `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self` are not part of `@system-service`. The `@sandbox` group appeared only in systemd 254, and 252 (Debian 12, EL9) warns "Unknown system call group, ignoring: @sandbox", so the syscalls are listed by name. Without them gosftpd logs `landlock: not available` with the reason "blocked by a seccomp filter" (with `SystemCallErrorNumber=`) or "killed by a seccomp filter" (a filter that kills, such as the interim unit of v0.3), and `server.start` records `landlock` = `blocked` in both cases.
 - `StateDirectoryMode=0700` (host keys) and `LogsDirectoryMode=0750`; the defaults are 0755.
 - `RestartPreventExitStatus=2`: exit 2 is a configuration or file-system-state error (also a mount that cannot be opened), which a restart does not fix; a data disk mounted late is therefore not retried, which `docs/install.md` says. `RestartSec=2s` with at most 5 starts in 60 s stops a runtime failure from restarting forever.
 - `TimeoutStopSec=45` covers the default `shutdown_timeout` + 10 s; at stop gosftpd sends `EXTEND_TIMEOUT_USEC` with its `shutdown_timeout` + 10 s, since a reload can raise it.

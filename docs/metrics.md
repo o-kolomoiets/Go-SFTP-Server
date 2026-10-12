@@ -92,7 +92,7 @@ event.
 | `gosftpd_hook_deliveries_total` | counter | `type` (`exec`, `webhook`), `result` (`ok`, `failed`, `skipped`, `dropped`) | Once per event and hook, at its final outcome ([hooks.md](hooks.md)). `skipped`: an exec hook whose file changed before it ran; `dropped`: a full queue, a hook removed by a reload or no longer matching, shutdown. |
 | `gosftpd_hook_retries_total` | counter | | Webhook attempts after the first. |
 | `gosftpd_hook_queue_length` | gauge | | Hook events queued or being delivered, of all hooks; with a `delay`, normally the rate times the delay. |
-| `gosftpd_hooks_not_updated` | gauge | | Hooks the last reload left out (a program that fails its checks) or kept at their running secret. |
+| `gosftpd_hooks_not_updated` | gauge | | Hooks the last reload left out (a program that fails its checks, or, under Landlock, an exec hook the reload added: it runs after a restart, without Landlock) or kept at their running secret. |
 
 Go runtime and process metrics have the names of the Prometheus Go client,
 so existing dashboards work. None of them stops the world to be read.
@@ -158,6 +158,11 @@ groups:
         expr: gosftpd_hooks_not_updated > 0
         for: 5m
 ```
+
+`GosftpdHooksNotUpdated` clears once a reload fixes the hook's program or
+secret file. An exec hook that a reload added under Landlock is counted at
+every reload until a restart, which is the remedy then (the reload's
+warning names the hook, and `restart_required` has `hooks`).
 
 ## Kubernetes
 
