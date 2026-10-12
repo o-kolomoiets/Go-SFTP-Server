@@ -810,15 +810,18 @@ curl -fsS "$M/metrics" >"$C/metrics.txt" || true
 
 # --- hooks (ADR 0010) ----------------------------------------------------------
 # A webhook to a receiver that verifies every signature, and the archive
-# script of docs/hooks.md as an exec hook fed hostile names.
+# script of docs/hooks.md as an exec hook fed hostile names. The
+# configuration and the webhook's secret sit in $KE, a directory of their
+# own, although the exec hook keeps Landlock off here.
 K="$WORK/hooks"
+KE="$K/etc"
 if "$PYTHON" -c 'import hmac' 2>/dev/null; then
-	mkdir -p "$K/inbox" "$K/drop" "$K/archive" "$K/state" "$K/bin"
+	mkdir -p "$K/inbox" "$K/drop" "$K/archive" "$K/state" "$K/bin" "$KE"
 	KPORT=$((20000 + RANDOM % 20000))
 	while [ "$KPORT" = "$PORT" ] || [ "$KPORT" = "$MPORT" ] || [ "$KPORT" = "$HPORT" ] || [ "$KPORT" = "$OVERWRITE_PORT" ]; do KPORT=$((KPORT + 1)); done
-	"$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' >"$K/hook.secret"
-	chmod 600 "$K/hook.secret"
-	"$PYTHON" "$ROOT/test/interop/hook_receiver.py" "$K/hook.secret" "$K/receiver.port" "$K/deliveries.jsonl" 2>"$K/receiver.log" &
+	"$PYTHON" -c 'import secrets; print(secrets.token_hex(32))' >"$KE/hook.secret"
+	chmod 600 "$KE/hook.secret"
+	"$PYTHON" "$ROOT/test/interop/hook_receiver.py" "$KE/hook.secret" "$K/receiver.port" "$K/deliveries.jsonl" 2>"$K/receiver.log" &
 	PIDS+=($!)
 	for _ in $(seq 100); do [ -s "$K/receiver.port" ] && break; sleep 0.1; done
 	RPORT=$(cat "$K/receiver.port")
@@ -828,7 +831,7 @@ if "$PYTHON" -c 'import hmac' 2>/dev/null; then
 	chmod 755 "$K/bin/archive-upload"
 	grep -q 'mv -n --' "$K/bin/archive-upload" || fail "hooks: no archive script in docs/hooks.md"
 	printf 'bystander\n' >"$K/drop/keep.txt"
-	cat >"$K/gosftpd.toml" <<TOML
+	cat >"$KE/gosftpd.toml" <<TOML
 config_version = 1
 [server]
 listen = ["127.0.0.1:$KPORT"]
@@ -848,7 +851,7 @@ name = "notify"
 on = ["fs.upload"]
 mounts = ["inbox"]
 exclude = ["*.filepart", "*.partial"]
-webhook = { url = "http://127.0.0.1:$RPORT/hooks/secret-token?k=secret-query", secret_file = "$K/hook.secret" }
+webhook = { url = "http://127.0.0.1:$RPORT/hooks/secret-token?k=secret-query", secret_file = "$KE/hook.secret" }
 [[hooks]]
 name = "archive"
 on = ["fs.upload"]
@@ -857,10 +860,10 @@ exclude = ["*.filepart", "*.partial"]
 delay = "1s"
 exec = { argv = ["/bin/sh", "$K/bin/archive-upload"], timeout = "30s" }
 TOML
-	chmod 600 "$K/gosftpd.toml"
-	"$WORK/gosftpd" config validate --check-fs --config "$K/gosftpd.toml" >/dev/null 2>"$K/validate.err" &&
+	chmod 600 "$KE/gosftpd.toml"
+	"$WORK/gosftpd" config validate --check-fs --config "$KE/gosftpd.toml" >/dev/null 2>"$K/validate.err" &&
 		pass "hooks: config validate --check-fs" || fail "hooks: config validate: $(cat "$K/validate.err")"
-	"$WORK/gosftpd" serve --config "$K/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$K/server.log" &
+	"$WORK/gosftpd" serve --config "$KE/gosftpd.toml" "${ROOT_FLAG[@]}" 2>"$K/server.log" &
 	PIDS+=($!)
 	for _ in $(seq 100); do
 		if (exec 3<>"/dev/tcp/127.0.0.1/$KPORT") 2>/dev/null; then break; fi
