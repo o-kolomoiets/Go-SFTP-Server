@@ -514,6 +514,12 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	stop()            // a second signal terminates immediately
 	background.Wait() // no reload runs during the shutdown
 	timeout := r.shutdownTimeout()
+	// A reload can raise shutdown_timeout, while systemd's TimeoutStopSec
+	// is fixed: ask for the time this stop may take, from now, in a
+	// datagram of its own once the final value is known (ADR 0011).
+	if err := sdnotify.ExtendTimeout(timeout + stopSlack); err != nil {
+		log.DebugContext(ctx, "sd_notify", "err", err)
+	}
 	log.InfoContext(ctx, "shutting down", "timeout", timeout)
 	for range pending {
 		<-served
@@ -538,6 +544,11 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 
 // hookGrace is the least time hooks get after the SFTP drain.
 const hookGrace = 5 * time.Second
+
+// stopSlack is what a stop may take beyond shutdown_timeout: hookGrace,
+// the pipes of a killed hook program, closing the audit log. The packaged
+// unit's TimeoutStopSec is the default shutdown_timeout plus this, or more.
+const stopSlack = 10 * time.Second
 
 // serverConfig returns the reloadable part of the server configuration.
 func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table, keys hostKeys) server.Config {

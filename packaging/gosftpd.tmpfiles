@@ -1,0 +1,9 @@
+# Directories of gosftpd (tmpfiles.d(5)), installed as
+# /usr/lib/tmpfiles.d/gosftpd.conf. /srv/sftp must exist before the first
+# start: the unit's ReadWritePaths=-/srv/sftp is skipped without it, and
+# /srv stays read-only. /var/log/gosftpd lets config validate --check-fs
+# pass before the first start (LogsDirectory= creates it at start). For
+# another data path, override this file in /etc/tmpfiles.d/gosftpd.conf
+# (docs/install.md).
+d /srv/sftp 0750 gosftpd gosftpd -
+d /var/log/gosftpd 0750 gosftpd gosftpd -

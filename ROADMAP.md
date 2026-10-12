@@ -580,7 +580,7 @@ flowchart LR
 - [ ] **sd_notify** (about 30 lines of our own code on top of `$NOTIFY_SOCKET`, without `go-systemd`):
   - `READY=1`, `RELOADING=1` with `MONOTONIC_USEC`, `STOPPING=1`;
   - for systemd ≥ 253, `Type=notify-reload`;
-  - for Debian 12 and RHEL 9 (systemd 252), a `legacy-notify.conf` drop-in with `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID`, installed by postinstall (§9.4);
+  - for systemd without `Type=notify-reload` (Debian 12; EL9 before 252-21), a `legacy-notify.conf` drop-in with `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID`, installed where an offline probe finds the type unknown (§9.4);
   - we do **not** implement automatic reload via fsnotify: editors write files in parts.
 - [ ] **User management:**
   - `gosftpd user add NAME --key FILE|STRING --access mount=preset [--expires 72h] --write` writes the file `users.d/NAME.toml` (without `--write` the command, as in M2, only prints a snippet); the main config is not rewritten, and comments are preserved;
@@ -638,7 +638,7 @@ flowchart LR
 
 - [ ] A full `.goreleaser.yaml` (§9.3): linux, darwin, freebsd × amd64, arm64 (windows after M3b); `-trimpath`; `mod_timestamp`; `mtime` from the commit for files in archives and packages; `CGO_ENABLED=0`; ldflags `-s -w -X .../internal/version.Version=...`.
 - [ ] `dockers_v2` → `ghcr.io/o-kolomoiets/gosftpd`. The base image is `gcr.io/distroless/static-debian13:nonroot`, pinned by digest (updated by Dependabot). `USER 65532:65532`, `EXPOSE 2022 9090`, `HEALTHCHECK` in exec form (a TCP check without `--url`, §6.7). The host key is stored in the `/var/lib/gosftpd` volume. The config is not baked into the image: the Quickstart creates it with the `config example` command (minimal, `audit.output = "stdout"`, §6.7); without a mounted config, `serve` exits with code 2 and a hint.
-- [ ] nfpm: deb, rpm, apk, archlinux; man pages and completions included. The package installs its own minimal `packaging/config.toml`, not the reference config from §6.6 (that one goes to `/usr/share/doc/gosftpd/`), and a `tmpfiles.d` file that creates `/srv/sftp` for `gosftpd` (§9.4). Postinstall runs `systemd-sysusers`, `systemd-tmpfiles --create` and `chgrp gosftpd /etc/gosftpd/config.toml` (T18), and on systemd < 253 installs the `legacy-notify.conf` drop-in (§9.4); the config is declared as `config|noreplace`. The permissions of the packaged files (root:gosftpd, 0640) pass the §6.5 check.
+- [ ] nfpm: deb, rpm, apk, archlinux; man pages and completions included. The package installs its own minimal `packaging/config.toml`, not the reference config from §6.6 (that one goes to `/usr/share/doc/gosftpd/`), and a `tmpfiles.d` file that creates `/srv/sftp` for `gosftpd` (§9.4). Postinstall runs `systemd-sysusers`, `systemd-tmpfiles --create` and `chgrp gosftpd /etc/gosftpd/config.toml` (T18), and installs the `legacy-notify.conf` drop-in where the offline probe finds `Type=notify-reload` unknown (§9.4); the config is declared as `config|noreplace`. The permissions of the packaged files (root:gosftpd, 0640) pass the §6.5 check.
 - [ ] Signatures and provenance:
   - cosign v3 keyless: `sign-blob --bundle checksums.txt.sigstore.json`, `docker_signs` for the image;
   - SBOM via syft;
@@ -1396,19 +1396,21 @@ Later, the remaining `nfpms.contents` are added (sysusers, tmpfiles, the referen
   - GHCR is free for public packages.
 - **Packages (nfpm).**
   - Formats: deb, rpm, apk, archlinux.
-  - Contents: `/usr/lib/systemd/system/gosftpd.service`, `/usr/lib/sysusers.d/gosftpd.conf` (`u gosftpd - "gosftpd SFTP server" /var/lib/gosftpd`), `/usr/lib/tmpfiles.d/gosftpd.conf` (`d /srv/sftp 0750 gosftpd gosftpd -`), `/etc/gosftpd/config.toml` (`config|noreplace`, 0640), `/usr/share/doc/gosftpd/config.example.toml` (the reference config from §6.6), man1, completions.
+  - Contents: `/usr/lib/systemd/system/gosftpd.service`, `/usr/lib/sysusers.d/gosftpd.conf` (`u gosftpd - "gosftpd SFTP server" -`: the home is `/`, not `/var/lib/gosftpd`, since systemd sets `$HOME` from it and Landlock never treats the home as a dedicated directory, so host key rotation by reload would need a restart, ADR 0011), `/usr/lib/tmpfiles.d/gosftpd.conf` (`d /srv/sftp 0750 gosftpd gosftpd -` and `d /var/log/gosftpd 0750 gosftpd gosftpd -`, so that `config validate --check-fs` passes before the first start), `/etc/gosftpd/config.toml` (`config|noreplace`, 0640), `/usr/share/doc/gosftpd/config.example.toml` (the reference config from §6.6), man1, completions. The files live in `packaging/` and are in the Linux release archives from v0.4; `docs/install.md` installs them in this layout.
   - `/etc/gosftpd/config.toml` is a separate minimal `packaging/config.toml`, not the reference config: there are no users (they are added in `users.d/`; the server starts with the warning "no users configured"), one mount `[mounts.inbox] path = "/srv/sftp/inbox"` with `create = true`, and the audit log in `/var/log/gosftpd/audit.jsonl` (the directory is created by `LogsDirectory=`).
   - `/srv/sftp` is created by `systemd-tmpfiles`, not by nfpm: when the package is unpacked, the `gosftpd` user does not exist yet. Without this directory, `ReadWritePaths=-/srv/sftp` is silently ignored, `ProtectSystem=strict` leaves `/srv` read-only, and `create = true` will not work. The `d` line also changes the owner of an already existing `/srv/sftp` (verified on systemd 255). If an OpenSSH chroot lives there (it must be owned by root), `docs/install.md` warns about this: before installation, the line is overridden with an `/etc/tmpfiles.d/gosftpd.conf` file, and the data path is changed via a drop-in and the config.
-  - Postinstall: `systemd-sysusers ...; systemd-tmpfiles --create gosftpd.conf; chgrp gosftpd /etc/gosftpd/config.toml`; if `systemctl --version` < 253 (Debian 12, RHEL 9), it installs the drop-in `/etc/systemd/system/gosftpd.service.d/legacy-notify.conf` with `[Service]`, `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID` (postremove deletes it); then `systemctl daemon-reload`.
-- **systemd unit** (all directives are documented in man systemd; `Type=notify-reload` requires systemd ≥ 253):
+  - Postinstall: `systemd-sysusers ...; systemd-tmpfiles --create gosftpd.conf; chgrp gosftpd /etc/gosftpd/config.toml`; then it decides on the drop-in `/etc/systemd/system/gosftpd.service.d/legacy-notify.conf` (`packaging/systemd/legacy-notify.conf`: `[Service]`, `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID`) by testing the feature offline, not by `systemctl --version` (EL9 has `Type=notify-reload` since 252-21): a probe unit with `Type=notify-reload` run through `systemd-analyze verify --man=no` prints "Failed to parse service type" only where the type is unknown. The probe needs no systemd as PID 1 (image builds, chroots) and is not fooled by the drop-in itself. Postinstall installs the drop-in where the probe says so and removes it elsewhere (also after an upgrade of systemd); postremove deletes it; then `systemctl daemon-reload`. `docs/install.md` gives the same commands.
+- **systemd unit** (`packaging/systemd/gosftpd.service`, here without its comments; all directives are documented in man systemd; `Type=notify-reload` requires systemd ≥ 253, or EL9's 252-21):
 
 ```ini
 [Unit]
 Description=gosftpd SFTP server
-Documentation=man:gosftpd(1)
+Documentation=https://github.com/o-kolomoiets/go-sftp-server/blob/main/docs/install.md
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/srv/sftp
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=notify-reload
@@ -1416,10 +1418,14 @@ ExecStart=/usr/bin/gosftpd serve --config /etc/gosftpd/config.toml
 User=gosftpd
 Group=gosftpd
 StateDirectory=gosftpd
+StateDirectoryMode=0700
 LogsDirectory=gosftpd
+LogsDirectoryMode=0750
 ReadWritePaths=-/srv/sftp
 UMask=0027
 Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=2
 TimeoutStopSec=45
 KillMode=mixed
 LimitNOFILE=131072
@@ -1446,7 +1452,7 @@ RemoveIPC=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self
-SystemCallFilter=~@privileged
+SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 
@@ -1454,13 +1460,18 @@ CapabilityBoundingSet=
 WantedBy=multi-user.target
 ```
 
-Notes on the unit file:
-- We do not add `~@resources`: with `SystemCallErrorNumber=EPERM`, a `setrlimit` call would get EPERM, and Go would keep running with the old limit. That is why `LimitNOFILE` is set explicitly.
-- Landlock requires its syscalls to be allowed explicitly: `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self` are not part of `@system-service`, and without this line `BestEffort()` silently applies nothing. The `@sandbox` group appeared only in systemd 254, and on Debian 12 and RHEL 9 (252) it is silently ignored, so the syscalls are listed by name.
-- `ReadWritePaths=-/srv/sftp` with the `-` prefix: without it, the unit fails with 226/NAMESPACE if the directory does not exist. `RequiresMountsFor=` prevents the service from starting before the data disk is mounted (§6.1 item 9). If the data does not live in `/srv/sftp`, both paths are changed via a drop-in.
-- Port 22 requires `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
+Notes on the unit file (ADR 0011; `systemd-analyze security` scores it 1.2 on systemd 255, the lint job checks it with `--offline=true --threshold=12`, and the `systemd` CI job runs it):
+- `Documentation=` points to `docs/install.md` until the man page exists (M5): `systemd-analyze verify` fails on a missing man page.
+- `~@resources` is denied too: Go raises `RLIMIT_NOFILE` with `prlimit64`, which is in `@default`, not with `setrlimit`, so the limit is not affected (`LimitNOFILE` is still set explicitly). Exec hooks then cannot use `nice`, `ionice`, `taskset`, `chown` or `chgrp` (`~@privileged` holds `@chown`).
+- Landlock requires its syscalls to be allowed explicitly: `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self` are not part of `@system-service`. The `@sandbox` group appeared only in systemd 254, and 252 (Debian 12, EL9) warns "Unknown system call group, ignoring: @sandbox", so the syscalls are listed by name. Without them gosftpd logs "landlock: not available: blocked by a seccomp filter".
+- `StateDirectoryMode=0700` (host keys) and `LogsDirectoryMode=0750`; the defaults are 0755.
+- `RestartPreventExitStatus=2`: exit 2 is a configuration or file-system-state error (also a mount that cannot be opened), which a restart does not fix; a data disk mounted late is therefore not retried, which `docs/install.md` says. `RestartSec=2s` with at most 5 starts in 60 s stops a runtime failure from restarting forever.
+- `TimeoutStopSec=45` covers the default `shutdown_timeout` + 10 s; at stop gosftpd sends `EXTEND_TIMEOUT_USEC` with its `shutdown_timeout` + 10 s, since a reload can raise it.
+- `ReadWritePaths=-/srv/sftp` with the `-` prefix: without it, the unit fails with 226/NAMESPACE if the directory does not exist. `RequiresMountsFor=` prevents the service from starting before the data disk is mounted (§6.1 item 9). If the data does not live in `/srv/sftp`, both paths are changed via a drop-in, and a writable mount outside them gets a start warning (read-only file system).
+- Port 22 requires `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE` (a drop-in, `docs/install.md`); gosftpd clears the ambient set after binding, before any exec hook can run.
+- Not defaults: `PrivateUsers=yes` (1.1) breaks binding port 22, `IPAddressDeny=` breaks webhooks; `docs/install.md` shows them as options.
 - `AF_UNIX` is needed for sd_notify and journald.
-- For systemd < 253 (Debian 12 and RHEL 9 ship 252), `Type=notify-reload` is not supported; postinstall installs the `legacy-notify.conf` drop-in (see above).
+- For systemd < 253 without the backport (Debian 12, Ubuntu 22.04, EL9 before 252-21), `Type=notify-reload` is not supported; the `legacy-notify.conf` drop-in replaces it, installed where the offline probe says so (see above).
 
 ### 9.5 Signatures, SBOM, provenance
 

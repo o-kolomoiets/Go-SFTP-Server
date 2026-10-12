@@ -86,8 +86,11 @@ JSON audit log on stdout.
 ## Running it as a service
 
 Run gosftpd as an unprivileged user that owns the served directories, never as
-root. A systemd unit, packages and a Docker image are planned for v0.4–v0.5;
-until then any supervisor works: gosftpd stops cleanly on SIGTERM (running
-transfers get `shutdown_timeout`, 30 s by default) and applies its
+root. On Linux with systemd, [install.md](install.md) installs it as a
+service with the unit, user and directories from the release archive (from
+v0.4): the binary then goes to `/usr/bin` instead, and a copy left in
+`/usr/local/bin` should be removed. Packages and a Docker image follow in
+v0.5. Any other supervisor works too: gosftpd stops cleanly on SIGTERM
+(running transfers get `shutdown_timeout`, 30 s by default) and applies its
 configuration again on SIGHUP without dropping connections (see
 [Reload](configuration.md#reload)).

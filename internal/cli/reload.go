@@ -78,24 +78,24 @@ func (r *running) reloadLoop(ctx context.Context, hup <-chan os.Signal) {
 		if err := sdnotify.Reloading(); err != nil {
 			r.log.DebugContext(ctx, "sd_notify", "err", err)
 		}
-		status := "configuration reloaded"
-		if !r.reload(ctx) {
-			status = "configuration reload failed, see the log"
-		}
-		if err := sdnotify.Notify("READY=1\nSTATUS=" + status); err != nil {
+		// systemctl reload cannot fail under Type=notify-reload: the
+		// result is in the status line of systemctl status (ADR 0011).
+		ok, restart := r.reload(ctx)
+		if err := sdnotify.Reloaded(ok, restart); err != nil {
 			r.log.DebugContext(ctx, "sd_notify", "err", err)
 		}
 	}
 }
 
 // reload reopens the audit log, then applies the configuration file again.
-// Any error keeps the running configuration. It reports success.
-func (r *running) reload(ctx context.Context) bool {
+// Any error keeps the running configuration. It reports success, and the
+// settings that changed but need a restart (restart_required).
+func (r *running) reload(ctx context.Context) (ok bool, restartRequired []string) {
 	start := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.mounts == nil {
-		return false // shutting down
+		return false, nil // shutting down
 	}
 	// First, and whatever the result: logrotate moved the file.
 	if err := r.out.reopen(); err != nil {
@@ -121,7 +121,10 @@ func (r *running) reload(ctx context.Context) bool {
 	}
 	r.al.Event("server.reload", append(attrs, slog.Int64("duration_ms", time.Since(start).Milliseconds()))...)
 	r.metrics.Reloaded(err == nil, time.Now())
-	return err == nil
+	if err != nil {
+		return false, nil
+	}
+	return true, restart
 }
 
 // apply builds the new configuration and switches to it. Everything that
