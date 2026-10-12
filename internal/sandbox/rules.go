@@ -746,13 +746,14 @@ func (p *planner) includeRules() error {
 			if !rf.exists || p.special(rf.path) {
 				continue
 			}
-			// Beneath its own directory, wherever that resolves to: a
-			// linked directory gets its rule below.
+			// Beneath its own directory, wherever that resolves to (a
+			// linked directory gets its rule below), or beneath the
+			// leading directory, whose rule covers it.
 			rd, err := p.resolve(filepath.Dir(f))
 			if err != nil {
 				return fmt.Errorf("%s: %w", keyInclude, err)
 			}
-			if !beneath(rf.path, rd.path) {
+			if !beneath(rf.path, rd.path) && !beneath(rf.path, rl.path) {
 				p.addFile(rf, ReadFile, keyInclude)
 				p.noteLink(keyInclude, f, rf.path, filepath.Dir(f))
 			}

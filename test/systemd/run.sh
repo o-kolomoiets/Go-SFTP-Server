@@ -193,8 +193,8 @@ fi
 
 phase "add a user, reload, upload"
 sudo /usr/bin/gosftpd user add alice --key "$WORK/alice.pub" --access inbox=full --write --config "$CONFIG" >/dev/null
-# A mount umask (reloadable) that lets the unit's UMask= show: an upload is
-# 0666 &^ 0002 = 0664 without it, and 0640 only with UMask=0027.
+# A mount umask (reloadable) that lets the unit's UMask= show: without it
+# systemd's default umask 0022 gives 0644, and only UMask=0027 gives 0640.
 sudo sed -i '/^create = true$/a umask = "0002"' "$CONFIG"
 sudo systemctl reload gosftpd
 check "status after a reload" status_is "configuration reloaded"

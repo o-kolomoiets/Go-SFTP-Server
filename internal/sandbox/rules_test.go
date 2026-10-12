@@ -392,6 +392,18 @@ func TestIncludes(t *testing.T) {
 			link,
 			"include: Landlock covers only the include files found at start in /etc/gosftpd/teams, which holds README")
 	})
+	t.Run("an include file that is a link within the leading directory", func(t *testing.T) {
+		t.Parallel()
+		// The leading directory's rule covers the target, wherever in
+		// it the link points: no rule of its own, no warning.
+		m := newMemFS(t).
+			files("/etc/gosftpd/config.toml", "/etc/gosftpd/teams/b/users.toml", "/etc/gosftpd/teams/b/users.toml.v2").
+			symlink("/etc/gosftpd/teams/a/users.toml", "/etc/gosftpd/teams/b/users.toml.v2").
+			dirs("/srv/sftp/inbox")
+		c := newConfig("/etc/gosftpd/config.toml", "teams/*/users.toml")
+		loaded(c, "/etc/gosftpd/teams/a/users.toml", "/etc/gosftpd/teams/b/users.toml")
+		checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, inbox})
+	})
 	t.Run("a leading directory at the root", func(t *testing.T) {
 		t.Parallel()
 		m := newMemFS(t).files("/etc/gosftpd/config.toml").dirs("/srv/sftp/inbox")
