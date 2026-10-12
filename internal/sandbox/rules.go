@@ -479,7 +479,10 @@ func (p *planner) auditDedicated(dir, file string) verdict {
 			continue
 		}
 		full := filepath.Join(dir, name)
-		if info, err := p.fs.Stat(full); err == nil && info.IsDir() {
+		// An olddir; not one that an include pattern goes through or
+		// that holds a named file, also while it is empty: the audit
+		// directory's write rights would reach it.
+		if info, err := p.fs.Stat(full); err == nil && info.IsDir() && !p.onPath(full) && !p.holdsNamed(full) {
 			if sub, err := p.fs.ReadDir(full); err == nil && !slices.ContainsFunc(sub, func(n string) bool { return !rotated(n) }) {
 				continue
 			}

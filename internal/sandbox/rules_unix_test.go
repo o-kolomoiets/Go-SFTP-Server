@@ -110,8 +110,8 @@ func TestResolverWarnings(t *testing.T) {
 	}
 	m.replace("/etc/hosts").remove("/etc/resolv.conf").files("/etc/resolv.conf", "/etc/nsswitch.conf")
 	want := []string{
-		"landlock: /etc/hosts was replaced after start; webhooks resolve names again after a restart",
-		"landlock: /etc/resolv.conf was replaced after start; webhooks resolve names again after a restart",
+		"/etc/hosts was replaced after start; webhooks resolve names again after a restart",
+		"/etc/resolv.conf was replaced after start; webhooks resolve names again after a restart",
 	}
 	if w := rs.ResolverWarnings(); !slices.Equal(w, want) {
 		t.Errorf("ResolverWarnings = %q", w)
@@ -135,5 +135,26 @@ func TestCheckSkipsDev(t *testing.T) {
 	}
 	if !rs.KeepsOpen("/dev/stderr") || rs.KeepsOpen("/var/log/gosftpd/audit.jsonl") || (*Ruleset)(nil).KeepsOpen("/dev/stderr") {
 		t.Error("KeepsOpen")
+	}
+}
+
+// TestKeepsOpenAuditLink: an audit file that is a link to stderr, when
+// stderr is a pipe, gets no rule and is kept open at reloads; one that got
+// a rule is opened again.
+func TestKeepsOpenAuditLink(t *testing.T) {
+	t.Parallel()
+	m := linuxFS(t).symlink("/dev/stderr", "/proc/self/fd/2").symlink("/proc/self/fd/2", "pipe:[4242]").
+		symlink("/var/log/gosftpd/audit.jsonl", "/dev/stderr").files("/var/log/other/audit.jsonl")
+	c := newConfig("/etc/gosftpd/config.toml")
+	c.Audit.Output = "/var/log/gosftpd/audit.jsonl"
+	in := input(t, m, c)
+	in.Linux = true
+	rs := applied(t, in)
+	if !rs.KeepsOpen("/var/log/gosftpd/audit.jsonl") || rs.KeepsOpen("/var/log/other/audit.jsonl") {
+		t.Error("KeepsOpen")
+	}
+	c.Audit.Output = "/var/log/other/audit.jsonl"
+	if rs := applied(t, input(t, m, c)); rs.KeepsOpen("/var/log/other/audit.jsonl") {
+		t.Error("an audit file with a rule is kept open")
 	}
 }

@@ -3,6 +3,9 @@
 package sandbox
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"slices"
 	"strings"
 	"testing"
@@ -232,8 +235,74 @@ func TestCheckUnresolvable(t *testing.T) {
 func TestNilRuleset(t *testing.T) {
 	t.Parallel()
 	var rs *Ruleset
+	denied := &fs.PathError{Op: "open", Path: native("/etc/passwd"), Err: fs.ErrPermission}
 	if !rs.Covers(native("/etc/passwd"), ReadFile) || rs.Check([]Use{{Path: native("/x"), Need: ReadFile}}) != nil ||
-		rs.ResolverWarnings() != nil || rs.Rules() != nil {
+		rs.ResolverWarnings() != nil || rs.Rules() != nil || rs.Explain(denied, ReadFile).Error() != denied.Error() {
 		t.Error("a nil ruleset does not cover everything")
+	}
+}
+
+// TestExplain: a permission error carries the hint only where the ruleset
+// does not cover the path with what its use needs.
+func TestExplain(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).
+		files("/etc/gosftpd/config.toml", "/etc/gosftpd/users.d/a.toml", "/var/log/gosftpd/audit.jsonl", "/etc/shared/keys", "/etc/shared/notes").
+		dirs("/srv/sftp/inbox")
+	c := newConfig("/etc/gosftpd/config.toml", "users.d/*.toml")
+	loaded(c, "/etc/gosftpd/users.d/a.toml")
+	addUser(c, "alice", "/etc/shared/keys")
+	c.Audit.Output = native("/var/log/gosftpd/audit.jsonl")
+	rs := applied(t, input(t, m, c))
+	m.replace("/etc/shared/keys").files("/etc/elsewhere/x.toml")
+
+	denied := func(p string) error {
+		return fmt.Errorf("users.alice: %w", &fs.PathError{Op: "open", Path: native(p), Err: fs.ErrPermission})
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		need Rights
+		hint bool
+	}{
+		{"a covered file", denied("/etc/gosftpd/users.d/a.toml"), ReadFile, false},
+		{"a file replaced by rename", denied("/etc/shared/keys"), ReadFile, true},
+		{"a file outside", denied("/etc/elsewhere/x.toml"), ReadFile, true},
+		{"writing a covered file the rule does not let write", denied("/etc/gosftpd/config.toml"), WriteFile, true},
+		{"a directory that can be listed", denied("/etc/gosftpd/users.d"), ReadFile, false},
+		{"a directory outside", denied("/etc/elsewhere"), ReadFile, true},
+		{"a file to create in the audit directory", denied("/var/log/gosftpd/audit.jsonl.new"), WriteFile, false},
+		{"a file to create in the configuration directory", denied("/etc/gosftpd/audit.jsonl"), WriteFile, true},
+		{"another error", fmt.Errorf("x: %w", &fs.PathError{Op: "open", Path: native("/etc/elsewhere/x.toml"), Err: fs.ErrNotExist}), ReadFile, false},
+		{"a relative path", &fs.PathError{Op: "openat", Path: "a/b", Err: fs.ErrPermission}, ReadFile, false},
+		{"joined, the second outside", errors.Join(denied("/etc/gosftpd/users.d/a.toml"), denied("/etc/elsewhere/x.toml")), ReadFile, true},
+		{"no path", fs.ErrPermission, ReadFile, false},
+	} {
+		got := rs.Explain(tc.err, tc.need)
+		if hinted := strings.HasSuffix(got.Error(), " ("+Hint+")"); hinted != tc.hint {
+			t.Errorf("%s: %v", tc.name, got)
+		}
+		if !errors.Is(got, tc.err) {
+			t.Errorf("%s: the error does not wrap %v", tc.name, tc.err)
+		}
+	}
+}
+
+// TestMountUse: a mount's use, as Uses lists it.
+func TestMountUse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		m    config.Mount
+		want string
+	}{
+		{config.Mount{Path: native("/srv/a")}, "mounts.x.path /srv/a " + rw + " create=false"},
+		{config.Mount{Path: native("/srv/a"), ReadOnly: true, Create: true}, "mounts.x.path /srv/a " + ro + " create=true"},
+		{config.Mount{Path: native("/srv/h/{user}"), ReadOnly: true}, "mounts.x.path /srv/h " + ro + " create=false"},
+		{config.Mount{Path: native("/srv/h/{user}"), ReadOnly: true, Create: true}, "mounts.x.path /srv/h read_file,read_dir,make_dir create=true"},
+	} {
+		u := MountUse("x", &tc.m)
+		if got := fmt.Sprintf("%s %s %s create=%v", u.Key, slash(u.Path), u.Need, u.Create == CreateDir); got != tc.want {
+			t.Errorf("MountUse(%+v) = %s, want %s", tc.m, got, tc.want)
+		}
 	}
 }

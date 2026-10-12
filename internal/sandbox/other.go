@@ -31,5 +31,8 @@ func (noLandlock) releaseTerminal() error            { return errNoLandlock }
 // probeChild is never started on systems without Landlock.
 func probeChild(io.Writer) int { return 1 }
 
+// previewInput: Start computes no rules here.
+func previewInput() (Input, bool) { return Input{}, false }
+
 // ClearAmbient does nothing: ambient capabilities exist only on Linux.
 func ClearAmbient() (uint64, error) { return 0, nil }

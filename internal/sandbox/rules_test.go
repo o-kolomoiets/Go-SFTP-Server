@@ -448,6 +448,17 @@ func TestAuditRow(t *testing.T) {
 		checkPlan(t, compute(t, input(t, m, c)), []string{"dir /etc/gosftpd " + ro, "file /var/log/gosftpd/audit.jsonl " + wfile, inbox},
 			"audit.output: Landlock covers only the file audit.jsonl in /var/log/gosftpd, which holds old: ")
 	})
+	t.Run("an empty include directory is no olddir", func(t *testing.T) {
+		t.Parallel()
+		m, c := base(t)
+		m.files("/var/log/gosftpd/audit.jsonl").dirs("/var/log/gosftpd/users.d")
+		c.Include = []string{native("/var/log/gosftpd/users.d/*.toml")}
+		c.Audit.Output = native("/var/log/gosftpd/audit.jsonl")
+		// Write rights on the directory would let gosftpd add users.
+		checkPlan(t, compute(t, input(t, m, c)), []string{
+			"dir /etc/gosftpd " + ro, "dir /var/log/gosftpd/users.d " + ro, "file /var/log/gosftpd/audit.jsonl " + wfile, inbox,
+		}, "audit.output: Landlock covers only the file audit.jsonl in /var/log/gosftpd, which holds users.d: ")
+	})
 	t.Run("next to the configuration", func(t *testing.T) {
 		t.Parallel()
 		m, c := base(t)

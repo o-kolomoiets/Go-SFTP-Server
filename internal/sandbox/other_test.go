@@ -38,4 +38,9 @@ func TestStartWithoutLandlock(t *testing.T) {
 	if probeChild(nil) != 1 {
 		t.Error("the probe child ran")
 	}
+	c := config.Default()
+	c.Audit.Output = "audit.jsonl"
+	if warns, err := Preview(c); warns != nil || err != nil {
+		t.Errorf("Preview = %q, %v", warns, err)
+	}
 }

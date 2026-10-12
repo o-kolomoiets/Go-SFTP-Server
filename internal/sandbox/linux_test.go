@@ -176,6 +176,48 @@ func TestUnsandboxed(t *testing.T) {
 	}
 }
 
+// TestPreview: config validate --check-fs gets the start warnings from the
+// real file system, without a mount table; nothing where the
+// configuration keeps Start from computing rules.
+func TestPreview(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	for _, d := range []string{"conf", "data"} {
+		if err := os.Mkdir(filepath.Join(base, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(base, "conf", "config.toml")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := config.Default()
+	c.File, c.Files = file, []string{file}
+	c.AddMount("data", filepath.Join(base, "data"))
+	c.AddMount("later", filepath.Join(base, "later")) // created at start
+	c.Audit.Output = filepath.Join(base, "conf", "audit.jsonl")
+	warns, err := Preview(c)
+	if err != nil || len(warns) != 1 || !strings.Contains(warns[0], "audit.output: Landlock covers only the file audit.jsonl in "+filepath.Join(base, "conf")) ||
+		!strings.HasSuffix(warns[0], auditRotationWarning) {
+		t.Errorf("Preview = %q, %v", warns, err)
+	}
+
+	c.Server.Landlock = config.LandlockOff
+	if warns, err := Preview(c); warns != nil || err != nil {
+		t.Errorf("off: %q, %v", warns, err)
+	}
+	c.Server.Landlock = config.LandlockAuto
+	c.Hooks = []*config.Hook{{Exec: &config.HookExec{Argv: []string{"/bin/true"}}}}
+	if warns, err := Preview(c); warns != nil || err != nil {
+		t.Errorf("exec hooks: %q, %v", warns, err)
+	}
+	c.Hooks = nil
+	c.AddMount("root", "/")
+	if _, err := Preview(c); !errors.As(err, new(*RootError)) {
+		t.Errorf("a mount at /: %v", err)
+	}
+}
+
 // TestProbeChild: without a seccomp filter the probe child makes all four
 // calls and Landlock can be used.
 func TestProbeChild(t *testing.T) {

@@ -24,6 +24,9 @@ type Ruleset struct {
 	fs       FS
 	linux    bool
 	resolver []string // the name-resolution files that got a rule
+	// audit is the audit file of the start when the rules do not let
+	// gosftpd write it: a link to a pipe, as a path under /dev does.
+	audit string
 }
 
 func newRuleset(rules []Rule, in Input) *Ruleset {
@@ -32,6 +35,9 @@ func newRuleset(rules []Rule, in Input) *Ruleset {
 		if rs.grants(f) != 0 {
 			rs.resolver = append(rs.resolver, f)
 		}
+	}
+	if out := in.Config.Audit.Output; out != "" && out != "stdout" && !rs.Covers(out, WriteFile) {
+		rs.audit = filepath.Clean(out)
 	}
 	return rs
 }
@@ -106,25 +112,32 @@ func Uses(c *config.Config) []Use {
 		uses = append(uses, Use{Key: keyAudit, Path: out, Need: WriteFile, Create: CreateFile})
 	}
 	for _, name := range sortedKeys(c.Mounts) {
-		m := c.Mounts[name]
-		dir := filepath.Clean(m.Path)
-		home := filepath.Base(dir) == vfs.UserPlaceholder
-		if home {
-			dir = filepath.Dir(dir)
-		}
-		u := Use{Key: toml.Key{"mounts", name, "path"}.String(), Path: dir, Need: MountRW}
-		if m.ReadOnly {
-			u.Need = MountRO
-			if home && m.Create {
-				u.Need |= MakeDir
-			}
-		}
-		if m.Create {
-			u.Create = CreateDir
-		}
-		uses = append(uses, u)
+		uses = append(uses, MountUse(name, c.Mounts[name]))
 	}
 	return uses
+}
+
+// MountUse is the use of mount name's directory, for a {user} mount the
+// parent of {user}, with the rights of ADR 0011's table. A reload checks
+// it again with the running read_only and create when the new ones are
+// not covered.
+func MountUse(name string, m *config.Mount) Use {
+	dir := filepath.Clean(m.Path)
+	home := filepath.Base(dir) == vfs.UserPlaceholder
+	if home {
+		dir = filepath.Dir(dir)
+	}
+	u := Use{Key: toml.Key{"mounts", name, "path"}.String(), Path: dir, Need: MountRW}
+	if m.ReadOnly {
+		u.Need = MountRO
+		if home && m.Create {
+			u.Need |= MakeDir
+		}
+	}
+	if m.Create {
+		u.Create = CreateDir
+	}
+	return u
 }
 
 // Check returns the uses that the ruleset does not cover. A use is covered
@@ -246,7 +259,8 @@ func (rs *Ruleset) Covers(path string, need Rights) bool {
 // start but is no longer covered: replaced by rename (NetworkManager or
 // dhclient rewriting /etc/resolv.conf, sed -i on /etc/hosts), Go's resolver
 // cannot read it and silently asks 127.0.0.1:53. A systemd-resolved stub
-// replaced inside its /run directory stays covered.
+// replaced inside its /run directory stays covered. The caller logs each
+// warning under the message "landlock", as Start logs the start warnings.
 func (rs *Ruleset) ResolverWarnings() []string {
 	if rs == nil {
 		return nil
@@ -254,18 +268,75 @@ func (rs *Ruleset) ResolverWarnings() []string {
 	var warns []string
 	for _, f := range rs.resolver {
 		if _, err := rs.fs.Lstat(f); err == nil && !rs.Covers(f, ReadFile) {
-			warns = append(warns, "landlock: "+f+" was replaced after start; webhooks resolve names again after a restart")
+			warns = append(warns, f+" was replaced after start; webhooks resolve names again after a restart")
 		}
 	}
 	return warns
 }
 
+// Explain adds Hint to err when err holds a permission error on a path
+// that the ruleset does not cover with need: read_dir for a directory, and
+// make_reg on the directory of a path that does not exist yet, where it
+// would be created. Any other error, and every error without a ruleset,
+// comes back as it is.
+func (rs *Ruleset) Explain(err error, need Rights) error {
+	if rs == nil || err == nil {
+		return err
+	}
+	for _, pe := range pathErrors(err, nil) {
+		if !errors.Is(pe.Err, fs.ErrPermission) || !filepath.IsAbs(pe.Path) {
+			continue
+		}
+		path, want := filepath.Clean(pe.Path), need
+		switch info, serr := rs.fs.Stat(path); {
+		case errors.Is(serr, fs.ErrNotExist):
+			path, want = filepath.Dir(path), MakeReg
+		case serr == nil && info.IsDir():
+			want = ReadDir
+		}
+		if !rs.Covers(path, want) {
+			return &hintError{err}
+		}
+	}
+	return err
+}
+
+// pathErrors collects the *fs.PathError values in err's tree, those of
+// joined errors too.
+func pathErrors(err error, found []*fs.PathError) []*fs.PathError {
+	switch e := err.(type) { //nolint:errorlint // it walks the tree itself, joined errors too
+	case nil:
+		return found
+	case *fs.PathError:
+		return append(found, e)
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			found = pathErrors(inner, found)
+		}
+		return found
+	}
+	return pathErrors(errors.Unwrap(err), found)
+}
+
+// hintError is an error that follows from the ruleset applied at start:
+// a restart cures it.
+type hintError struct{ err error }
+
+func (e *hintError) Error() string { return e.err.Error() + " (" + Hint + ")" }
+
+func (e *hintError) Unwrap() error { return e.err }
+
 // KeepsOpen reports whether a file that gosftpd opened at start must stay
-// open: it lies under /dev or /proc, which never get a rule, so opening it
-// again (audit.output on /dev/stderr, at a reload) would be refused.
-// Without Landlock nothing has to.
+// open, since opening it again would be refused: it lies under /dev or
+// /proc, which never get a rule (audit.output on /dev/stderr), or it is
+// the audit file of the start, which got no rule (a link to stderr when
+// that is a pipe). Without Landlock nothing has to.
 func (rs *Ruleset) KeepsOpen(path string) bool {
-	return rs != nil && rs.special(filepath.Clean(path))
+	if rs == nil {
+		return false
+	}
+	path = filepath.Clean(path)
+	return rs.special(path) || rs.audit != "" && path == rs.audit
 }
 
 func (rs *Ruleset) special(path string) bool {

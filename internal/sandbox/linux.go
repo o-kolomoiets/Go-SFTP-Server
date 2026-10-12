@@ -175,6 +175,11 @@ func (linuxKernel) input() (Input, error) {
 	return Input{FS: osFS{}, Home: homeDir(), Linux: true, ProcSelfFD: procSelfFD, CoverDir: coverDir()}, nil
 }
 
+// previewInput is input for Preview, which opens nothing.
+func previewInput() (Input, bool) {
+	return Input{FS: osFS{}, Home: homeDir(), Linux: true, ProcSelfFD: -1}, true
+}
+
 // homeDir returns the home directory of the user running gosftpd: $HOME,
 // which systemd sets from the user database, else the database's.
 func homeDir() string {

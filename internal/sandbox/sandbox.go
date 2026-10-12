@@ -171,6 +171,22 @@ type RequiredError struct{ skip skip }
 
 func (e *RequiredError) Error() string { return e.skip.text() + `; server.landlock is "required"` }
 
+// Preview returns the start warnings that Start would log for c, for
+// config validate --check-fs. The rules are computed without the mount
+// table: a mount directory is found by its path. Nothing is returned where
+// Start would not compute rules because of the configuration (off, exec
+// hooks) or on systems without Landlock; a rule that would be placed on /
+// is a *RootError. The kernel is not asked.
+func Preview(c *config.Config) ([]string, error) {
+	in, ok := previewInput()
+	if !ok || c.Server.Landlock == config.LandlockOff || c.ExecHook() >= 0 {
+		return nil, nil
+	}
+	in.Config = c
+	plan, err := Compute(in)
+	return plan.Warnings, err
+}
+
 // Start applies Landlock as server.landlock says: "off" never, "auto"
 // where it can be used (it logs why not elsewhere), "required" or fail
 // with a *RequiredError. Every failure once Landlock can be used fails the
@@ -380,13 +396,12 @@ func failed(ctx context.Context, log *slog.Logger, err error) (Result, error) {
 }
 
 // logProbe logs, in a binary built with -tags landlockprobe, the result of
-// opening /etc/passwd once the ruleset is applied: "permission denied".
+// opening /etc/passwd once the ruleset is applied: "permission denied",
+// which the systemd CI job looks for in the journal.
 func logProbe(ctx context.Context, log *slog.Logger) {
 	f, err := os.Open("/etc/passwd")
 	if err == nil {
 		_ = f.Close()
-		log.ErrorContext(ctx, "landlock probe", "err", "none: /etc/passwd can be opened")
-		return
 	}
 	log.InfoContext(ctx, "landlock probe", "err", err)
 }
