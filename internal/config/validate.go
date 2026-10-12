@@ -75,6 +75,7 @@ func (c *Config) Validate() (warnings []string, err error) {
 	c.validateLogs(p)
 	c.validateMetrics(p)
 	c.validateHooks(p)
+	c.validateLandlock(p)
 	return p.result()
 }
 

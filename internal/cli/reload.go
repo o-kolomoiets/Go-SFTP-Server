@@ -258,6 +258,9 @@ func keepRestartOnly(cur, next *config.Config) []string {
 		func() { next.Server.HostKeyAutoGenerate = cur.Server.HostKeyAutoGenerate })
 	keep("server.crypto_policy", cur.Server.CryptoPolicy != next.Server.CryptoPolicy,
 		func() { next.Server.CryptoPolicy = cur.Server.CryptoPolicy })
+	// The ruleset applied at start cannot be lifted or replaced (ADR 0011).
+	keep("server.landlock", cur.Server.Landlock != next.Server.Landlock,
+		func() { next.Server.Landlock = cur.Server.Landlock })
 	keep("metrics.listen", cur.Metrics.Listen != next.Metrics.Listen,
 		func() { next.Metrics.Listen = cur.Metrics.Listen })
 	keep("log.format", cur.Log.Format != next.Log.Format,

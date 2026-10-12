@@ -74,6 +74,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `idle_timeout` | `"15m"` | Close a connection that has moved no SFTP data for this long; `"0s"` turns it off (otherwise 1s–168h). |
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
 | `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below systemd's `TimeoutStopSec` or Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). |
+| `landlock` | `"auto"` | Linux only: after binding its listeners, gosftpd confines itself with Landlock to its mounts, its configuration and key files, its audit log, `/proc/self` and the name-resolution files. `auto` applies it where the kernel allows it and logs why not elsewhere; `required` makes that an error at start (exit status 2); `off` never applies it. Landlock is not applied while exec hooks are configured, and `required` with an exec hook is an error. Changes only at restart; see [Landlock](security.md#landlock). |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.
@@ -660,8 +661,8 @@ command-line flags and environment, and checks it like `config validate
   its running secret. Both give a warning, count in
   `gosftpd_hooks_not_updated`, and do not fail the reload.
 - **Restart only:** `server.listen`, `server.host_key_auto_generate`,
-  `server.crypto_policy`, `log.format`, `audit.events`, `audit.on_error`
-  and `metrics.listen`. A change is logged as a warning and listed in the
+  `server.crypto_policy`, `server.landlock`, `log.format`, `audit.events`,
+  `audit.on_error` and `metrics.listen`. A change is logged as a warning and listed in the
   `server.reload` audit event; the running value stays.
 
 Problems that concern one user or one mount do not stop a reload: an

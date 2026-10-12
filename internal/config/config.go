@@ -80,6 +80,9 @@ type Server struct {
 	IdleTimeout       Duration `toml:"idle_timeout"`
 	KeepaliveInterval Duration `toml:"keepalive_interval"`
 	ShutdownTimeout   Duration `toml:"shutdown_timeout"`
+	// Landlock is "auto", "off" or "required" (ADR 0011); it changes
+	// only at restart.
+	Landlock string `toml:"landlock"`
 }
 
 // Reload is the [reload] table: what a reload on SIGHUP does besides
@@ -275,6 +278,7 @@ func Default() *Config {
 			IdleTimeout:       Duration(15 * time.Minute),
 			KeepaliveInterval: Duration(30 * time.Second),
 			ShutdownTimeout:   Duration(30 * time.Second),
+			Landlock:          LandlockAuto,
 		},
 		Limits: Limits{
 			MaxConnections:        256,
