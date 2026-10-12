@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	mrand "math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -95,7 +96,7 @@ func (r *runner) runWebhook(s *Spec, it *item) string {
 			r.d.metrics.HookRetry()
 		}
 		s = r.spec.Load() // a reload may change the URL or the secret between attempts
-		status, retryAfter, reason := r.attempt(s, it, id)
+		status, retryAfter, reason, unresolved := r.attempt(s, it, id)
 		if status/100 == 2 {
 			log.Debug("webhook delivered", "status", status, "attempts", attempt, "delivery", id)
 			return resultOK
@@ -107,6 +108,9 @@ func (r *runner) runWebhook(s *Spec, it *item) string {
 		retry := status == 0 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 		if !retry || attempt == maxAttempts {
 			log.Warn("webhook failed", "reason", reason, "attempts", attempt, "delivery", id)
+			if unresolved {
+				r.d.warnNames()
+			}
 			return resultFailed
 		}
 		log.Debug("webhook attempt failed", "reason", reason, "attempt", attempt, "delivery", id)
@@ -129,14 +133,15 @@ func (r *runner) runWebhook(s *Spec, it *item) string {
 }
 
 // attempt posts once. It returns the status (0 for no response), the
-// wait the receiver asked for, and a reason for the log that never holds
-// the URL's path or query, which may be a token.
-func (r *runner) attempt(s *Spec, it *item, id string) (status int, retryAfter time.Duration, reason string) {
+// wait the receiver asked for, a reason for the log that never holds the
+// URL's path or query, which may be a token, and whether the receiver's
+// name could not be resolved.
+func (r *runner) attempt(s *Spec, it *item, id string) (status int, retryAfter time.Duration, reason string, unresolved bool) {
 	ctx, cancel := context.WithTimeout(r.d.killCtx, s.Webhook.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Webhook.URL, bytes.NewReader(it.ev.Line))
 	if err != nil {
-		return 0, 0, "invalid request"
+		return 0, 0, "invalid request", false
 	}
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	req.Header.Set("Content-Type", "application/json")
@@ -147,11 +152,23 @@ func (r *runner) attempt(s *Spec, it *item, id string) (status int, retryAfter t
 	req.Header.Set("X-Gosftpd-Signature", Sign(s.Webhook.Secret, id, ts, it.ev.Line))
 	resp, err := r.d.client.Do(req)
 	if err != nil {
-		return 0, 0, scrub(err, req.URL)
+		_, dns := errors.AsType[*net.DNSError](err)
+		return 0, 0, scrub(err, req.URL), dns
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, bodyCap))
 	_ = resp.Body.Close()
-	return resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After")), "status " + strconv.Itoa(resp.StatusCode)
+	return resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After")), "status " + strconv.Itoa(resp.StatusCode), false
+}
+
+// warnNames logs, after a webhook failed on name resolution, the
+// name-resolution files that Landlock no longer lets gosftpd read.
+func (d *Dispatcher) warnNames() {
+	if d.nameWarnings == nil {
+		return
+	}
+	for _, w := range d.nameWarnings() {
+		d.log.Warn("landlock", "detail", w)
+	}
 }
 
 // scrub returns the cause of a failed request without the URL: net/http

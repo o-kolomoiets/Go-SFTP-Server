@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -1366,6 +1367,27 @@ access = { m = "read" }
 	a, _, warns, err = zero.BuildAuthenticator(AuthOptions{Reload: true})
 	if err != nil || a.Len() != 0 || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "nobody can log in") }) {
 		t.Errorf("zero-config reload without keys = %d keys, %q, %v", a.Len(), warns, err)
+	}
+
+	// Explain rewrites what keeps a key or CA file from being used: the
+	// Landlock hint of a reload.
+	c.Auth.TrustedUserCAKeysFile = filepath.Join(dir, "missing-ca.pub")
+	explain := func(err error) error { return fmt.Errorf("%w (explained)", err) }
+	_, _, warns, err = c.BuildAuthenticator(AuthOptions{Reload: true, Explain: explain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(warns, func(w string) bool {
+		return strings.Contains(w, "missing-ca.pub") && strings.HasSuffix(w, "(explained); its CAs are not trusted")
+	}) {
+		t.Errorf("warnings = %q", warns)
+	}
+	if err := os.Remove(bob); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	_, _, warns, _ = c.BuildAuthenticator(AuthOptions{Reload: true, Explain: explain})
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "(explained); its keys are not used") }) {
+		t.Errorf("warnings = %q", warns)
 	}
 }
 
