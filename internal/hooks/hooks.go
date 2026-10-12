@@ -149,15 +149,21 @@ type Options struct {
 	RootCAs *x509.CertPool
 	// Transport replaces the HTTP transport (tests).
 	Transport http.RoundTripper
+	// NameWarnings returns what to log, under the message "landlock",
+	// when a webhook fails on name resolution: under Landlock a
+	// name-resolution file replaced after start cannot be read, and Go's
+	// resolver then silently asks 127.0.0.1:53 (ADR 0011). It may be nil.
+	NameWarnings func() []string
 }
 
 // Dispatcher queues events for the configured hooks. Its methods are safe
 // for concurrent use, and Wants and Notify on a nil *Dispatcher do
 // nothing.
 type Dispatcher struct {
-	log     *slog.Logger
-	metrics *obs.Metrics
-	client  *http.Client
+	log          *slog.Logger
+	metrics      *obs.Metrics
+	client       *http.Client
+	nameWarnings func() []string
 
 	set atomic.Pointer[[]*runner] // the current hooks, in configuration order
 
@@ -184,12 +190,13 @@ func New(opts Options) *Dispatcher {
 		log = slog.New(slog.DiscardHandler)
 	}
 	d := &Dispatcher{
-		log:        log,
-		metrics:    opts.Metrics,
-		runners:    map[string]*runner{},
-		all:        map[*runner]struct{}{},
-		closing:    make(chan struct{}),
-		retryDelay: retryDelay,
+		log:          log,
+		metrics:      opts.Metrics,
+		nameWarnings: opts.NameWarnings,
+		runners:      map[string]*runner{},
+		all:          map[*runner]struct{}{},
+		closing:      make(chan struct{}),
+		retryDelay:   retryDelay,
 	}
 	d.killCtx, d.kill = context.WithCancel(context.Background())
 	d.client = newClient(opts)

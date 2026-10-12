@@ -34,7 +34,9 @@ func newConfigValidateCmd() *cobra.Command {
 configuration is invalid. With --check-fs, also check that mount directories,
 host keys (with their next and previous keys and certificates),
 authorized_keys files, the trusted CA keys and the revocation list exist
-and have safe permissions, and read the keys, as serve does at startup.`,
+and have safe permissions, and read the keys, as serve does at startup. On
+Linux it also prints the warnings serve gives when it applies Landlock:
+files that need a restart once they are replaced by rename.`,
 		Example: `  gosftpd config validate
   gosftpd config validate --check-fs --config /etc/gosftpd/config.toml`,
 		Args: noArgs,
@@ -55,6 +57,13 @@ and have safe permissions, and read the keys, as serve does at startup.`,
 				}
 				if err != nil {
 					err = configError{err}
+				}
+				if err == nil {
+					// What serve would warn about once it applies
+					// Landlock (ADR 0011).
+					var llWarns []string
+					llWarns, err = previewLandlock(c)
+					warns = append(warns, llWarns...)
 				}
 			}
 			for _, w := range warns {

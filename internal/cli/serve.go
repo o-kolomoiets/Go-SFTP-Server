@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hostkey"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
+	"github.com/o-kolomoiets/go-sftp-server/internal/sandbox"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/version"
@@ -406,17 +408,20 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if c.Metrics.Listen != "" {
 		metrics = obs.NewMetrics(version.Get().Version)
 	}
-	hookSpecs, _, _, err := buildHooks(c, nil)
+	hookSpecs, _, _, err := buildHooks(c, nil, nil)
 	if err != nil {
 		_ = mounts.Close()
 		return configError{err}
 	}
 	// It always exists, so that a reload can add the first hook; it loads
-	// the TLS roots now, before a sandbox could hide them.
-	dispatcher := hooks.New(hooks.Options{Log: log, Metrics: metrics})
+	// the TLS roots now, before the sandbox hides them. Its hooks, and with
+	// them its workers, come after the sandbox step.
+	var ruleset atomic.Pointer[sandbox.Ruleset] // set by the sandbox step
+	dispatcher := hooks.New(hooks.Options{
+		Log: log, Metrics: metrics,
+		NameWarnings: func() []string { return ruleset.Load().ResolverWarnings() },
+	})
 	defer dispatcher.Close(time.Now()) // on early returns; a no-op after the drain
-	dispatcher.Update(hookSpecs)
-	warnOrphans(ctx, log, hookSpecs)
 	cfg := serverConfig(c, authn, mounts, keys)
 	cfg.Audit, cfg.Log, cfg.Metrics, cfg.CryptoPolicy, cfg.Hooks = al, log, metrics, c.Server.CryptoPolicy, dispatcher
 	srv, err := server.New(cfg)
@@ -467,6 +472,24 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 			return err
 		}
 	}
+
+	// The sandbox step (ADR 0011): everything gosftpd opens at start is
+	// open, and no hook, background goroutine or connection runs yet.
+	sb, err := applySandbox(ctx, c, mounts, log)
+	if err != nil {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+		if admin != nil {
+			admin.stop(ctx)
+		}
+		return err
+	}
+	r.ruleset = sb.Ruleset
+	ruleset.Store(sb.Ruleset)
+	dispatcher.Update(hookSpecs)
+	warnOrphans(ctx, log, hookSpecs)
+
 	printBanner(stderr, bannerInfo{c: c, listeners: listeners, admin: admin, keys: keys, auth: authn, mounts: mounts})
 	addrs := make([]string, len(listeners))
 	for i, ln := range listeners {
@@ -477,6 +500,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		startAttrs = append(startAttrs, slog.String("metrics_listen", admin.addr()))
 	}
 	startAttrs = append(startAttrs, trustedProxiesAttr(c)...)
+	if sb.Status != "" { // only on Linux
+		startAttrs = append(startAttrs, slog.String("landlock", sb.Status))
+	}
 	al.Event("server.start", startAttrs...)
 
 	serveCtx, cancel := context.WithCancel(ctx)

@@ -141,6 +141,18 @@ func runInit(w io.Writer, o initOptions) error {
 	if err := writeNew(o.out, []byte(b.String()), o.force); err != nil {
 		return err
 	}
+	// users.d exists from the start, with the mode user add --write gives
+	// it: under Landlock, an include directory that is missing at start
+	// needs a restart for its first file (ADR 0011).
+	cfg, err := os.Stat(o.out)
+	if err != nil {
+		return err
+	}
+	usersDir := filepath.Join(filepath.Dir(o.out), "users.d")
+	madeUsersDir, err := makeUsersDir(usersDir, cfg)
+	if err != nil {
+		return err
+	}
 
 	k, generated, err := hostkey.LoadOrGenerate(keyPath)
 	if err != nil {
@@ -155,6 +167,9 @@ func runInit(w io.Writer, o initOptions) error {
 	fmt.Fprintf(w, "  user %s, full access to %d mount(s)\n", name, len(mounts))
 	for _, m := range mounts {
 		fmt.Fprintf(w, "  mount %s -> %s\n", m.name, m.path)
+	}
+	if madeUsersDir {
+		fmt.Fprintf(w, "Created %s%c for gosftpd user add --write\n", usersDir, filepath.Separator)
 	}
 	fmt.Fprintf(w, "Host key (%s): %s\n  %s\n", state, keyPath, hostkey.Fingerprint(k.PublicKey()))
 	if keysFile == "" {

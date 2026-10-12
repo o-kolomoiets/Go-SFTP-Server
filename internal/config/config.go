@@ -84,6 +84,9 @@ type Server struct {
 	// PROXY protocol header that names the client (ADR 0011): addresses
 	// or CIDR blocks, as allow_from takes them. Reloadable.
 	TrustedProxies []string `toml:"trusted_proxies"`
+	// Landlock is "auto", "off" or "required" (ADR 0011); it changes
+	// only at restart.
+	Landlock string `toml:"landlock"`
 }
 
 // Reload is the [reload] table: what a reload on SIGHUP does besides
@@ -279,6 +282,7 @@ func Default() *Config {
 			IdleTimeout:       Duration(15 * time.Minute),
 			KeepaliveInterval: Duration(30 * time.Second),
 			ShutdownTimeout:   Duration(30 * time.Second),
+			Landlock:          LandlockAuto,
 		},
 		Limits: Limits{
 			MaxConnections:        256,

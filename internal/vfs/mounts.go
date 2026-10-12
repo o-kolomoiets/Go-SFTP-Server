@@ -334,7 +334,12 @@ type dir struct {
 	path string
 	home bool
 	root *os.Root
-	refs int // guarded by registry.dmu
+	// held is the directory as Landlock gets it (ADR 0011): on Linux an
+	// O_PATH descriptor opened through root, nil elsewhere. dev and ino
+	// are its identity.
+	held     *os.File
+	dev, ino uint64
+	refs     int // guarded by registry.dmu
 }
 
 // current reports whether d.path still names the directory d opened, and
@@ -476,7 +481,12 @@ func (t *Table) openMount(s MountSpec) (*Mount, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &dir{path: path, home: m.home, root: root, refs: 1}
+	held, dev, ino, err := holdDir(root)
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	d := &dir{path: path, home: m.home, root: root, held: held, dev: dev, ino: ino, refs: 1}
 	t.dmu.Lock()
 	t.dirs[path] = d
 	t.dmu.Unlock()
@@ -513,10 +523,39 @@ func (t *Table) releaseDir(d *dir) error {
 	if t.dirs[d.path] == d {
 		delete(t.dirs, d.path)
 	}
+	if d.held != nil {
+		_ = d.held.Close()
+	}
 	return d.root.Close()
 }
 
 func isHomePath(p string) bool { return filepath.Base(p) == UserPlaceholder }
+
+// HeldDir is the directory a mount holds open, for its Landlock rule (ADR
+// 0011): for a {user} mount, the parent of {user}.
+type HeldDir struct {
+	Mount string
+	// FD is an O_PATH|O_DIRECTORY descriptor of the directory on Linux,
+	// opened through the mount's os.Root and checked to be the directory
+	// it holds; -1 elsewhere. It stays open while the table does.
+	FD int
+	// Dev and Ino are the descriptor's device and inode (0 elsewhere).
+	Dev, Ino uint64
+}
+
+// HeldDirs returns the directory each mount holds open, sorted by mount
+// name. The caller holds a reference to t while it uses the descriptors.
+func (t *Table) HeldDirs() []HeldDir {
+	held := make([]HeldDir, 0, len(t.mounts))
+	for _, m := range t.mounts {
+		h := HeldDir{Mount: m.name, FD: -1, Dev: m.dir.dev, Ino: m.dir.ino}
+		if m.dir.held != nil {
+			h.FD = int(m.dir.held.Fd())
+		}
+		held = append(held, h)
+	}
+	return held
+}
 
 // ValidateSpecs checks names, paths and options without touching the
 // filesystem.

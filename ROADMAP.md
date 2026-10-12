@@ -223,7 +223,7 @@ go-sftp-server/
 │   ├── audit/                   # event schema on top of log/slog
 │   ├── obs/                     # admin listener: /metrics, /healthz, /readyz, Prometheus text format (M4)
 │   ├── hooks/                   # exec and webhook (M4)
-│   ├── sandbox/                 # Landlock, sd_notify (M4)
+│   ├── sandbox/                 # Landlock, ambient capabilities (M4, ADR 0011)
 │   ├── testutil/                # AsyncConn, log sink with mutex (tests only)
 │   └── version/                 # Version/Commit/Date
 ├── test/
@@ -574,7 +574,7 @@ flowchart LR
   - validation first, then an atomic swap via `atomic.Pointer[snapshot]`; new sessions get the new snapshot, existing ones continue with the old one;
   - users, keys, `authorized_keys_file`, mounts, permissions, limits and the log level are reread, and the audit log file is reopened (for logrotate);
   - a mount is reopened if the (dev, inode) pair of its path has changed: a disk was mounted after startup or the directory was recreated (§6.1 item 9);
-  - changing `listen` requires a restart, and the server logs a warning about it; with Landlock enabled, new mounts also require a restart (a warning in the log);
+  - changing `listen` requires a restart, and the server logs a warning about it; with Landlock applied, new mounts, a remounted mount and files outside the ruleset also require a restart, named in `restart_required` (ADR 0011);
   - the `reload.disconnect_removed_users` option;
   - the `server.reload` event.
 - [ ] **sd_notify** (about 30 lines of our own code on top of `$NOTIFY_SOCKET`, without `go-systemd`):
@@ -615,11 +615,13 @@ flowchart LR
   - `proxy_addr` in the audit log, `conn.reject` reasons `proxy_header` and `untrusted_proxy`, the same values in the metrics; `gosftpd healthcheck` sends `LOCAL` from a trusted address;
   - interop with OpenSSH, paramiko and rclone through HAProxy (v1, v2, TLVs, Unix socket front ends) and nginx.
 - [ ] `packaging/systemd/gosftpd.service` (§9.4), `packaging/gosftpd.sysusers` and `packaging/gosftpd.tmpfiles`.
-- [ ] Optional on Linux: Landlock (`go-landlock` v0.10.1) after the listeners are bound, `landlock.V5.BestEffort().RestrictPaths(landlock.RWDirs(rw...), landlock.RODirs(ro...), landlock.ROFiles(cfg...))`:
-  - the restrictions are irreversible: new mounts on SIGHUP require a restart;
-  - the RO list includes `/etc/gosftpd` (including `users.d`), `/etc/ssl/certs`, `/etc/pki` (on RHEL the CA bundle lives there, and Landlock rules are bound to the inode after symlink resolution), `/etc/resolv.conf`, `/etc/hosts`, `/usr/share/zoneinfo`, `/proc/self` (the process collector in `/metrics`); while exec hooks are configured, Landlock is not applied (`landlock: not applied: exec hooks configured`): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock is reported in `restart_required`. Webhooks need nothing more: the TLS roots are loaded at start, before the ruleset;
-  - the RW list includes all mounts, `/var/lib/gosftpd` and the audit log directory (`/var/log/gosftpd`);
-  - at startup, `landlock: ABI vN applied` or `landlock: not available` is written to the log;
+- [ ] On Linux: Landlock (`go-landlock` v0.10.1, ADR 0011) after the listeners are bound, `server.landlock = "auto"` (default), `"off"` or `"required"`, restart-only:
+  - gosftpd queries the ABI itself and, under a seccomp filter, tries the calls in a child first; it asks for ABI 5 with `BestEffort` and needs ABI 2 (`refer`); the restrictions are irreversible;
+  - the rules come from the configuration at start: each mount through the descriptor it holds; the configuration, include, key, CA and secret files, by their directory only when it is dedicated to gosftpd (every entry in it is a named file), else by the file with a start warning (a rule on a file is lost when the file is replaced by rename); the audit log, its directory only when it holds nothing else; `/proc/self`, held open (the process collector in `/metrics`); `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/resolv.conf`. `/etc/ssl/certs`, `/etc/pki` and `/usr/share/zoneinfo` are not needed: the TLS roots and the local zone are loaded before;
+  - while exec hooks are configured, Landlock is not applied (`landlock: not applied: exec hooks configured`): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock leaves it out and lists `hooks` in `restart_required`. Webhooks need nothing more;
+  - a reload checks what the new configuration uses against the rules kept from the start; what they do not cover needs a restart and is named in `restart_required`;
+  - at startup, `landlock: ABI vN applied`, `landlock: not applied` or `landlock: not available` with the reason is written to the log, and `server.start` records `landlock`;
+  - it does not cover hard links, bind mounts or the `chmod` race (§7.4 item 9);
   - under systemd, the unit allows the `landlock_*` syscalls: they are not part of `@system-service`, and the `@sandbox` group does not exist before systemd 254 (§9.4).
 - [ ] Documents `docs/operations.md` (reload, shutdown and interrupted uploads, log rotation, backups, upgrades, a stale `os.Root` after remounting), `docs/metrics.md` and `docs/recipes/` (retention via `systemd-tmpfiles` or hooks, volume encryption).
 
@@ -627,7 +629,7 @@ flowchart LR
 - Add a user, send `kill -HUP`, and the user logs in without a restart, while a concurrent 1 GiB upload completes. An invalid config on HUP keeps the old one in place and increments `gosftpd_config_reloads_total{result="error"}`.
 - A certificate with the correct principal lets the user in. An expired or revoked certificate, one with someone else's principal, or one from an untrusted CA does not.
 - A webhook on `fs.upload` arrives with `final_path` and `mount` (also for a flattened single-mount user) and a signature that a receiver verifies independently; a WinSCP- or rclone-style temp-file upload gives exactly one delivery, with the final name. An exec hook given the names `*`, `a b`, a newline, `-rf`, `$(touch pwned)` and a backtick name acts on exactly the uploaded file, and nothing else runs or moves.
-- After `mount` of a new disk onto a mount's directory and SIGHUP, new files land on the new disk.
+- After `mount` of a new disk onto a mount's directory and SIGHUP, new files land on the new disk. Under Landlock (ADR 0011) this needs a restart: the reload leaves the remounted mount out as unavailable and names it in `restart_required`; after the restart new files land on the new disk.
 - `systemd-analyze security gosftpd.service` gives ≤ 2.0. The check is done specifically under `gosftpd.service`: the log shows `landlock: ABI vN applied`, and an `os.Open("/etc/passwd")` call added to a test build gets `EACCES`.
 
 **Estimate:** 14–20 pd. **Dependencies:** M3. **Risks:** different systemd versions across distributions; reload complexity. Mitigation for reload: immutable config snapshots.
@@ -707,7 +709,7 @@ flowchart LR
 6. **Path mapping.** A client path is a virtual POSIX path. Relative paths are resolved from `/` (`WithStartDirectory`). `REALPATH` returns only virtual paths. `cd ..` stops at `/`, because `pkg/sftp` cleans paths via `cleanPathWithBase`. A path of the form `/<mount>/<rest>` is turned into `(mount.root *os.Root, rest)`.
 7. **Rename between mounts** is forbidden: `SSH_FX_OP_UNSUPPORTED`.
 8. **Host paths** never appear in any response, listing or error message.
-9. **A mount is opened once.** `os.Root` holds the directory fd from startup. If a disk or NFS is mounted on the mount path after startup, or the directory is recreated, the server keeps writing to the old inode, for example to the mount point directory on the root partition. Protection: `RequiresMountsFor=` in the unit (§9.4); the mount option `require_mountpoint = true` prevents startup if the path is on the same filesystem as its parent; from M4, on SIGHUP the mount is reopened if the (dev, inode) pair has changed. Described in `docs/operations.md`.
+9. **A mount is opened once.** `os.Root` holds the directory fd from startup. If a disk or NFS is mounted on the mount path after startup, or the directory is recreated, the server keeps writing to the old inode, for example to the mount point directory on the root partition. Protection: `RequiresMountsFor=` in the unit (§9.4); the mount option `require_mountpoint = true` prevents startup if the path is on the same filesystem as its parent; from M4, on SIGHUP the mount is reopened if the (dev, inode) pair has changed. Under Landlock (ADR 0011) the mount's rule stays with the directory opened at start and does not follow a file system mounted on it later, so on SIGHUP such a mount is left out as unavailable and named in `restart_required` instead: it needs a restart. Described in `docs/operations.md`.
 
 ### 6.2 Upload conflict policy
 
@@ -1151,7 +1153,7 @@ The currently pinned `x/crypto v0.0.0-20211215153901` is affected by **23** advi
 
    var errExists = sftpStatus{code: sftp.ErrSSHFxFailure, msg: "file already exists"}
    ```
-9. **What `os.Root` does not cover** (this must be documented and compensated for): bind mounts, `/proc`, device files, the `Chmod`/`Chown`/`Chtimes` race on Unix when a file is swapped for a symlink, hardlinks pointing outside that a local user created in advance, and a stale fd if the mount directory was remounted or recreated after startup (§6.1 item 9). Compensation: running as an unprivileged user, the systemd sandbox (`RequiresMountsFor=`), Landlock, `require_mountpoint`, not sharing such trees.
+9. **What `os.Root` does not cover** (this must be documented and compensated for): bind mounts, `/proc`, device files, the `Chmod`/`Chown`/`Chtimes` race on Unix when a file is swapped for a symlink, hardlinks pointing outside that a local user created in advance, and a stale fd if the mount directory was remounted or recreated after startup (§6.1 item 9). Compensation: running as an unprivileged user, the systemd sandbox (`RequiresMountsFor=`), `require_mountpoint`, not sharing such trees. Landlock (ADR 0011) does not close these gaps: it checks paths, so a hard link or a bind mount inside a mount reaches what it points to, and it does not check `chmod`, `chown`, `utimes` or `stat`, so the race stays; it limits what a compromised process can open outside the mounts.
 
 ### 7.5 Resource limits and defaults
 
@@ -1273,7 +1275,7 @@ Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run on
 | v0.2.0 | ≥ 60% | ≥ 80% | ≥ 70% |
 | v1.0.0 | ≥ 80% | ≥ 90% | ≥ 90% |
 
-Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd` and `hooks` (M4, ADR 0010) ≥ 85%, `internal/auth` ≥ 90%.
+Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd`, `hooks` (M4, ADR 0010) and `sandbox` (M4, ADR 0011) ≥ 85%, `internal/auth` ≥ 90%.
 
 ### 8.6 Benchmarks
 
@@ -1580,7 +1582,8 @@ Go runtime and process metrics with the names of the Prometheus Go client are ad
 | A stream of advisories in `x/crypto/ssh` (16 in 2026 alone) | high / high | x/crypto as a direct dependency, weekly Dependabot, govulncheck in PRs and on a schedule, a patch release within ≤ 7 days for a reachable vulnerability (§9.6), a golang-announce subscription; ≈ 0.5 pd/mo is built into the estimate |
 | Reliance on undocumented `pkg/sftp` behavior (T2: remapping `r.Filepath`), the global `SetSFTPExtensions` | medium / high | Regression tests on every `pkg/sftp` upgrade; all work with the library is confined to `internal/sftpd` |
 | `pkg/sftp/v2` changes the API and v1 gets frozen | medium / medium | An adapter; ADR 0003; a trial migration in a separate branch once v2.0.0 is released |
-| Gaps in `os.Root` (bind mounts, `/proc`, the chmod race) and new CVEs in the stdlib (GO-2026-4970) | medium / high | Floor go1.26.5, releases built on the latest patch, systemd sandbox, Landlock, symlink and hardlink ban, documentation |
+| Gaps in `os.Root` (bind mounts, `/proc`, the chmod race) and new CVEs in the stdlib (GO-2026-4970) | medium / high | Floor go1.26.5, releases built on the latest patch, systemd sandbox, symlink and hardlink ban, documentation; Landlock (ADR 0011) limits a compromised process to its mounts and files, but does not cover hard links, bind mounts or the chmod race |
+| Landlock turns reloads into restarts: a file in a shared directory replaced by rename, a new or remounted mount, an audit log rotated by rename next to other files | medium / medium | Dedicated directories in the packaged layout, `gosftpd init` creates `users.d`, start warnings and `config validate --check-fs`, `restart_required` and `STATUS=` after a reload, `server.landlock = "off"` (ADR 0011) |
 | Client diversity: `rename` mode breaks sync tools (rclone, paramiko) | high / medium | Stat redirect, append-only resume, `version` mode, interop matrix, honest "known limitations" |
 | Scope creep toward "yet another SFTPGo" | high / high | An ADR with non-goals; issues are closed with a link to the ADR |
 | A single maintainer: time and bus factor | high / high | Small scope, automation (CI, Dependabot, GoReleaser), realistic estimates, decision D17 on the time budget |

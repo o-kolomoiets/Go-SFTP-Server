@@ -75,6 +75,7 @@ check follows symlinks and, on Linux, bind mounts.
 | `keepalive_interval` | `"30s"` | Send `keepalive@openssh.com` this often and close the connection after 3 unanswered ones; `"0s"` turns it off (otherwise 1s–1h). |
 | `shutdown_timeout` | `"30s"` | On SIGTERM/SIGINT, how long running transfers may finish before connections are closed (1s–1h). Keep it below Docker's `stop_grace_period`; with hooks, at least 10 s below, since hooks get up to 5 s more after the drain (see [Hooks](hooks.md#shutdown)). Under systemd, gosftpd extends `TimeoutStopSec` to this + 10 s when it stops (`EXTEND_TIMEOUT_USEC`), also after a reload raised it. |
 | `trusted_proxies` | `[]` | Load balancers that send a PROXY protocol header (v1 or v2), as addresses or CIDR blocks such as `["10.0.0.5", "10.0.1.0/28"]`; `/0` is refused. A connection from one of them must begin with a header, which names the client for bans, limits, `allow_from` and the audit log; a header from any other peer is refused. Reloadable. See [Behind a load balancer](#behind-a-load-balancer). |
+| `landlock` | `"auto"` | Linux only: after binding its listeners, gosftpd confines itself with Landlock to its mounts, its configuration and key files, its audit log, `/proc/self` and the name-resolution files. `auto` applies it where the kernel allows it and logs why not elsewhere; `required` makes that an error at start (exit status 2); `off` never applies it. Landlock is not applied while exec hooks are configured, and `required` with an exec hook is an error. Changes only at restart; see [Landlock](#landlock) for the directory layout it needs. |
 
 The crypto policies offer these algorithms; there is no way to list
 algorithms one by one.
@@ -774,6 +775,75 @@ file and, when its own address is trusted, sends a `LOCAL` header before it
 waits for the banner. A probe from a trusted address that sends no header
 gets no banner; see [metrics.md](metrics.md#gosftpd-healthcheck).
 
+## Landlock
+
+On Linux, `serve` confines itself with Landlock once its listeners are bound
+(`server.landlock`; what it protects against is in
+[security.md](security.md#landlock)). The rules are computed once, at start,
+from the configuration, and a reload cannot widen them. So the way the files
+are laid out decides what a reload can change without a restart.
+
+A directory gets a rule of its own only when it is dedicated to gosftpd: at
+start it can be listed, and every entry in it is a file the configuration
+names (the configuration and included files, `authorized_keys` files, the CA
+file, the revocation list, host keys with their `.pub`, `.next`, `.old` and
+certificate files, webhook `secret_file`s), a name derived from one (a
+backup such as `config.toml~`, an editor's swap file, the temporary files of
+`user add --write` and `hostkey rotate`), or a subdirectory such as
+`users.d` that is dedicated itself. The full rule is in
+[security.md](security.md#which-files-are-covered). In a dedicated directory
+files may be replaced by rename (editors, `sed -i`, `user add --write`,
+`hostkey rotate --finish`) and added later: a reload reads them. Elsewhere
+each file gets a rule of its own, which belongs to the file, not to its
+name: replaced by rename, the file cannot be read until a restart.
+
+Keep in directories of their own, as the packaged layout does:
+
+- the configuration file, `users.d/` (or the other include directories),
+  the CA file, the revocation list and webhook secret files:
+  `/etc/gosftpd`;
+- the host keys: `/var/lib/gosftpd`;
+- the audit log with its rotated copies: `/var/log/gosftpd`. Its directory
+  gets write rights only when it holds nothing else, so that no
+  configuration or key file is ever writable; next to other files, the
+  audit log cannot be rotated by rename (logrotate's `create`) without a
+  restart. Use a directory of its own or `copytruncate` (see
+  [Rotation](audit-log.md#rotation)).
+
+A `.ssh` directory, `/` and the home directory of the user running gosftpd
+are never dedicated: in zero-config mode the default
+`~/.ssh/authorized_keys` gets a rule on the file only, and the private keys
+next to it stay unreadable. Create `users.d/` before the first start
+(`gosftpd init` does): an include directory that does not exist at start
+needs a restart for its first file. Files created later in a dedicated
+directory are readable to gosftpd, so keep nothing else there.
+
+At start gosftpd warns about each file that got a rule of its own, naming
+its directory and up to three of the entries that make the directory
+shared, or the symlink whose target lies in another directory (a NixOS
+generation, an `ln -sfn` deployment: re-pointed, the link cannot be read
+until a restart). `gosftpd config validate --check-fs` prints the same
+warnings before the first start; run it as the user that runs gosftpd.
+
+Under Landlock a restart is needed for (the reload names each in
+`restart_required`, see [Reload](#reload)):
+
+- a new mount, a mount moved outside the rules, and a mount directory that
+  was recreated or had a disk mounted on it since the start; the mount is
+  unavailable until then;
+- `read_only = false` or `create = true` that the rules do not allow; the
+  mount keeps its running value;
+- a new `audit.output` outside the rules (the running output stays), and an
+  audit log next to other files once it was rotated by rename;
+- an exec hook added by a reload: Landlock is applied only without exec
+  hooks, so the hook is left out;
+- a key, CA or secret file in a shared directory replaced by rename, or a
+  re-pointed link to one. An include file or a revocation list that the
+  rules do not cover fails the reload instead.
+
+`server.landlock = "off"` turns Landlock off, also for these cases; it takes
+effect at the next restart.
+
 ## Reload
 
 On SIGHUP gosftpd first reopens the audit log file (for logrotate), then
@@ -813,9 +883,19 @@ command-line flags and environment, and checks it like `config validate
   accepted after the reload; open connections keep the classification they
   got at accept (see [Turning it on](#turning-it-on-and-health-checks)).
 - **Restart only:** `server.listen`, `server.host_key_auto_generate`,
-  `server.crypto_policy`, `log.format`, `audit.events`, `audit.on_error`
-  and `metrics.listen`. A change is logged as a warning and listed in the
+  `server.crypto_policy`, `server.landlock`, `log.format`, `audit.events`,
+  `audit.on_error` and `metrics.listen`. A change is logged as a warning and listed in the
   `server.reload` audit event; the running value stays.
+- **Under Landlock** (Linux) the ruleset applied at start stays as it is,
+  and a reload cannot reach beyond it ([Landlock](#landlock)). A mount, a
+  mount's new rights, a new `audit.output` or an exec hook that the ruleset
+  does not cover keeps its running value or is left out, and is named in
+  `restart_required` (`mounts.NAME.path`, `mounts.NAME.read_only`,
+  `mounts.NAME.create`, `audit.output`, `hooks`). A key, CA or secret file
+  it does not cover is left out as an unreadable one is, and its key is
+  listed too; an include file or a revocation list it does not cover fails
+  the reload. Every such error in the log adds "outside the Landlock
+  ruleset applied at start; restart gosftpd".
 
 Problems that concern one user or one mount do not stop a reload: an
 `authorized_keys_file` that is missing, unsafe, empty or not a regular file
@@ -868,8 +948,8 @@ is given: run it as a dedicated user.
 
 | Command | What it does |
 |---|---|
-| `gosftpd init` | Writes `./gosftpd.toml` (0600) and a host key; never overwrites without `--force`. |
-| `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions. |
+| `gosftpd init` | Writes `./gosftpd.toml` (0600), a host key and an empty `users.d/` next to the file, for `user add --write`; never overwrites without `--force`. |
+| `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions, and on Linux it prints the warnings serve gives when it applies Landlock (files that need a restart once replaced by rename, an audit log that cannot be rotated by rename). |
 | `gosftpd config show` | Prints the effective configuration. |
 | `gosftpd config example [--full]` | Prints an example. |
 | `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, `--expires` an expiry (`720h` or a date). `--principal` sets `principals`. With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name), and the `ssh-keygen` command to sign a certificate when CAs are trusted. A user that could not log in (disabled, expired, no key, password or certificate principal that `auth.methods` allows) is refused unless `--force`; with trusted CAs, a user needs no key. |

@@ -1,0 +1,6 @@
+# actionlint configuration.
+self-hosted-runner:
+  # GitHub-hosted runner labels newer than actionlint's own list (v1.7.12):
+  # ubuntu-26.04 runs the sandboxed tests on kernel 7.0 (ADR 0011).
+  labels:
+    - ubuntu-26.04

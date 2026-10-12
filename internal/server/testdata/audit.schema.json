@@ -4,7 +4,7 @@
   "common": ["time", "level", "msg", "schema", "event"],
   "context": ["conn_id", "remote_addr", "local_addr", "proxy_addr", "user", "session_id"],
   "events": {
-    "server.start": {"required": ["version", "listen"], "optional": ["metrics_listen", "trusted_proxies"]},
+    "server.start": {"required": ["version", "listen"], "optional": ["metrics_listen", "trusted_proxies", "landlock"]},
     "server.reload": {"required": ["result", "duration_ms"], "optional": ["reason", "restart_required", "disconnected", "trusted_proxies"]},
     "server.stop": {},
     "server.audit_recovered": {},
