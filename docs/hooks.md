@@ -391,6 +391,27 @@ gives it a private `/tmp`, `ProtectHome` hides `/home`,
 ReadWritePaths=/srv/archive
 ```
 
+With `AmbientCapabilities=CAP_NET_BIND_SERVICE` (to bind port 22) a hook
+would inherit the capability: gosftpd clears its ambient capabilities, on
+every thread, once its listeners are bound and before any hook can run.
+
+On Linux gosftpd confines itself with Landlock
+([security.md](security.md#landlock)) only while no exec hook is
+configured: a hook needs the loader, its libraries and whatever it
+touches. A reload that adds an exec hook while Landlock is applied leaves
+the hook out, with a warning, and names `hooks` in `restart_required`;
+after a restart gosftpd runs it, without Landlock. Webhooks work under
+Landlock: the TLS roots are loaded at start, and name resolution reads
+`/etc/hosts`, `/etc/nsswitch.conf` and `/etc/resolv.conf` through rules on
+these files. One of them replaced by rename after the start
+(NetworkManager or dhclient rewriting `/etc/resolv.conf`, `sed -i` on
+`/etc/hosts`) cannot be read any more, and Go's resolver then quietly asks
+127.0.0.1:53 instead. Every reload, and every webhook that fails on name
+resolution, then logs the warning `landlock` with "/etc/resolv.conf was
+replaced after start; webhooks resolve names again after a restart". A
+systemd-resolved stub (`/etc/resolv.conf` a link into
+`/run/systemd/resolve`) replaced in its own directory stays readable.
+
 In a container without an init, gosftpd is PID 1 and does not reap what an
 exec hook leaves; it warns about it. Run the container with `docker run
 --init` (or `init: true` in Compose).

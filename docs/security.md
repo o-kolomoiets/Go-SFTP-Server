@@ -189,20 +189,51 @@ copies, so that no configuration or key file is ever writable.
 Elsewhere each file gets a rule of its own, and a warning at start names
 it and why its directory is shared. Such a file replaced by rename, or a
 symlink to a file outside its directory re-pointed, cannot be read until a
-restart. Keep the configuration, `users.d` and key files in directories of
-their own, as the packaged layout does (`/etc/gosftpd`, `/var/lib/gosftpd`,
-`/var/log/gosftpd`). Dedication is decided at start: a file created later in
-a dedicated directory is readable to gosftpd.
+restart. An include directory that does not exist at start and that no
+rule covers gets a warning too: the first file added there needs a
+restart (`gosftpd init` therefore creates `users.d/`). Keep the
+configuration, `users.d` and key files in directories of their own, as the
+packaged layout does (`/etc/gosftpd`, `/var/lib/gosftpd`,
+`/var/log/gosftpd`). `gosftpd config validate --check-fs` prints the same
+warnings before the first start (run it as the user that runs gosftpd).
+Dedication is decided at start: a file created later in a dedicated
+directory is readable to gosftpd.
+
+A mount's rule is added through the directory the mount holds open, so a
+mount directory swapped for a symlink before the rules are added cannot
+redirect it: the start fails instead.
+
+### Reload
 
 A reload checks what the new configuration uses against the rules applied
-at start; it does not compute them again. A new or moved mount, a mount
-remounted or recreated since the start, a new audit directory or an exec
-hook added by the reload needs a restart, and `server.reload` names it in
-`restart_required`. A configuration or key file that the rules do not cover
-fails as an unreadable file does, and the log adds "outside the Landlock
-ruleset applied at start; restart gosftpd". When `/etc/resolv.conf` or
-`/etc/hosts` was replaced after start, webhooks resolve names again only
-after a restart; the reload warns about it.
+at start; it does not compute them again, since a directory may have
+become shared or dedicated since. What the rules do not cover needs a
+restart, and `server.reload` names its key in `restart_required`
+([configuration.md](configuration.md#reload)):
+
+- a new or moved mount outside the rules is unavailable, and so is a mount
+  directory recreated, or with a file system mounted on it, since the start
+  (gosftpd does not write to the directory below);
+- a mount whose new `read_only = false` or `create = true` the rules do not
+  allow keeps its running value;
+- a new `audit.output` outside the rules keeps the running one; an audit
+  log next to other files, rotated by rename, cannot be created again
+  ([audit-log.md](audit-log.md#rotation));
+- an exec hook added by the reload is left out;
+- a key or CA file the rules do not cover is left out as an unreadable file
+  is, a host key keeps the running host keys, and a webhook's
+  `secret_file` keeps the running secret (a new hook is left out); an
+  include file or the revocation list the rules do not cover fails the
+  reload, without `restart_required`.
+
+Every permission error on a path the rules do not cover adds "outside the
+Landlock ruleset applied at start; restart gosftpd" in the operational log,
+also when the configuration file itself is read. An audit log on `stderr`
+(`/dev/stderr`) has no rule and is not opened again at reload: the
+descriptor opened at start stays. When `/etc/resolv.conf` or `/etc/hosts`
+was replaced by rename after the start, webhooks resolve names again only
+after a restart; each reload, and each webhook that fails on name
+resolution, warns about it ([hooks.md](hooks.md#sandboxes-and-containers)).
 
 ### What Landlock does not stop
 

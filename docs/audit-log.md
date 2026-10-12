@@ -36,8 +36,8 @@ never host paths. Strings from clients are JSON-escaped.
 
 | Event | Category | Fields |
 |---|---|---|
-| `server.start` | server | `version`, `listen`; `metrics_listen` with an admin listener ([metrics.md](metrics.md)) |
-| `server.reload` | server | `result` (`ok` or `error`), `duration_ms`; on error `reason`: `config` (the configuration cannot be read or is invalid), `mounts` or `audit_output` (the new `audit.output` cannot be opened); on success `restart_required` (comma-separated keys that changed but apply only at restart) and `disconnected` (connections closed by `reload.disconnect_removed_users`). The error itself goes to the operational log, since it can name host paths |
+| `server.start` | server | `version`, `listen`; `metrics_listen` with an admin listener ([metrics.md](metrics.md)); on Linux `landlock`: `v2` to `v5` (the Landlock ABI applied), `off`, `unavailable` (no Landlock in the kernel, or disabled at boot), `blocked` (a seccomp filter) or `not_applied` (ABI 1, exec hooks, a rule on `/`); see [Landlock](security.md#landlock) |
+| `server.reload` | server | `result` (`ok` or `error`), `duration_ms`; on error `reason`: `config` (the configuration cannot be read or is invalid), `mounts` or `audit_output` (the new `audit.output` cannot be opened); on success `restart_required` (comma-separated keys that changed but apply only at restart, and under Landlock the keys whose files or directories the ruleset applied at start does not cover, see [Landlock](security.md#landlock)) and `disconnected` (connections closed by `reload.disconnect_removed_users`). The error itself goes to the operational log, since it can name host paths |
 | `server.stop` | server | |
 | `server.audit_recovered` | server | written when the log works again after a failure |
 | `conn.reject` | conn | `reason`: `banned`, `max_connections`, `max_connections_per_ip` or `max_preauth_connections`; `suppressed` (see below) |
@@ -114,3 +114,15 @@ until the file can be opened: with `on_error = "fail-closed"` it refuses
 connections and changes, and the events go to stderr. It retries every 5
 seconds and recovers on its own. `copytruncate` works too: the file is opened
 with `O_APPEND`, so truncating it leaves no hole.
+
+Under Landlock (Linux, [security.md](security.md#landlock)) gosftpd may
+create files only in an audit directory that holds nothing but the audit log
+and its rotated copies, as `/var/log/gosftpd` in the packaged layout does.
+Elsewhere, for example next to the configuration file, only the file itself
+has a rule, and it does not recover on its own: once logrotate has renamed
+it, gosftpd cannot create the new file until a restart. The reload names
+`audit.output` in `restart_required`, the operational log adds "outside the
+Landlock ruleset applied at start; restart gosftpd", and with `on_error =
+"fail-closed"` every new connection is refused meanwhile. Give the audit log
+a directory of its own, or use `copytruncate`. `gosftpd config validate
+--check-fs` and the start warn about this layout.

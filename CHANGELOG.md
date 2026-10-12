@@ -124,10 +124,25 @@ Incompatible changes are prefixed with **BREAKING:**.
   rename cannot be read until a restart. `auto` says in the log why it does
   not apply Landlock (no Landlock in the kernel, a seccomp filter that
   blocks it, ABI 1, exec hooks, a mount at `/`); `required` makes that an
-  error at start. `config validate` refuses `required` with exec hooks.
+  error at start. `config validate` refuses `required` with exec hooks,
+  and `config validate --check-fs` prints the start warnings.
+  `server.start` records `landlock` (`v2` to `v5`, `off`, `unavailable`,
+  `blocked`, `not_applied`). A reload checks the new configuration against
+  the rules applied at start: a new or moved mount outside them, or a
+  mount directory recreated since the start, is unavailable; new rights of
+  a mount (`read_only = false`, `create = true`) and a new `audit.output`
+  outside them keep their running values; an exec hook added by the reload
+  is left out; each is named in `restart_required`. A key file the rules no
+  longer cover is left out as an unreadable one is, and every such error
+  in the log says "outside the Landlock ruleset applied at start; restart
+  gosftpd". An `audit.output` on `/dev/stderr` is not reopened at reload.
   `gosftpd init` creates `users.d/`, since under Landlock an include
   directory that is missing at start needs a restart for its first file.
   New dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
+- Once its listeners are bound, before any hook can run, `serve` clears
+  its ambient capabilities on every thread: with
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` (port 22) an exec hook would
+  inherit the capability.
 
 ### Changed
 

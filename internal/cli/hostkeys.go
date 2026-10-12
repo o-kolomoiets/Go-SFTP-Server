@@ -52,6 +52,9 @@ type hostKeyOptions struct {
 	// inspect needs only public keys: "<file>.pub" when the private key is
 	// not readable, and nothing for a key that serve would generate.
 	inspect bool
+	// explain, if set, rewrites the error of a file left out (lenient):
+	// a reload adds the Landlock hint (ADR 0011).
+	explain func(error) error
 }
 
 // loadHostKeys reads the host keys at paths with their next and previous
@@ -64,6 +67,9 @@ func loadHostKeys(paths []string, o hostKeyOptions) (hostKeys, []string, error) 
 	)
 	problem := func(err error) {
 		if o.lenient {
+			if o.explain != nil {
+				err = o.explain(err)
+			}
 			warns = append(warns, err.Error()+"; left out")
 		} else {
 			errs = append(errs, err)

@@ -664,6 +664,20 @@ command-line flags and environment, and checks it like `config validate
   `server.crypto_policy`, `server.landlock`, `log.format`, `audit.events`,
   `audit.on_error` and `metrics.listen`. A change is logged as a warning and listed in the
   `server.reload` audit event; the running value stays.
+- **Under Landlock** (Linux, see [Landlock](security.md#landlock)) the
+  ruleset applied at start stays as it is, and a reload cannot reach
+  beyond it. A new or moved mount outside it, and a mount directory
+  recreated or remounted since the start, are unavailable; a mount whose
+  new `read_only = false` or `create = true` the ruleset does not allow
+  keeps its running value; a new `audit.output` outside it keeps the
+  running one; an exec hook added by the reload is left out (Landlock is
+  applied only without exec hooks). Each is named in `restart_required`
+  (`mounts.NAME.path`, `mounts.NAME.read_only`, `mounts.NAME.create`,
+  `audit.output`, `hooks`). A key or CA file the ruleset does not cover
+  (replaced by rename in a shared directory, a re-pointed link) is left out
+  as an unreadable one is, also listed; an include file or a revocation
+  list it does not cover fails the reload. Every such error in the log adds
+  "outside the Landlock ruleset applied at start; restart gosftpd".
 
 Problems that concern one user or one mount do not stop a reload: an
 `authorized_keys_file` that is missing, unsafe, empty or not a regular file
@@ -712,7 +726,7 @@ is given: run it as a dedicated user.
 | Command | What it does |
 |---|---|
 | `gosftpd init` | Writes `./gosftpd.toml` (0600), a host key and an empty `users.d/` next to the file, for `user add --write`; never overwrites without `--force`. |
-| `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions. |
+| `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions, and on Linux it prints the warnings serve gives when it applies Landlock (files that need a restart once replaced by rename, an audit log that cannot be rotated by rename). |
 | `gosftpd config show` | Prints the effective configuration. |
 | `gosftpd config example [--full]` | Prints an example. |
 | `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, `--expires` an expiry (`720h` or a date). `--principal` sets `principals`. With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name), and the `ssh-keygen` command to sign a certificate when CAs are trusted. A user that could not log in (disabled, expired, no key, password or certificate principal that `auth.methods` allows) is refused unless `--force`; with trusted CAs, a user needs no key. |
