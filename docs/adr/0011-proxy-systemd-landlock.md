@@ -1,8 +1,9 @@
 # ADR 0011: PROXY protocol, the systemd unit and Landlock
 
-- **Status:** draft 3, 2026-10-12; amends ADR 0005 (restart-only list,
-  `STATUS=` after a reload), ADR 0009 (connection metrics), the audit
-  schema (additive) and ROADMAP §4.5, §6.1, §7.4 and §9.4
+- **Status:** accepted, 2026-10-12; amends ADR 0005 (restart-only list,
+  `STATUS=` after a reload), ADR 0009 (connection metrics; the health check
+  reads two keys), the audit schema (additive) and ROADMAP §4.5, §6.1,
+  §7.4 and §9.4
 - **Context:** ROADMAP M4 (M4-08) asks for three things that together make
   gosftpd fit for production behind a load balancer and under systemd:
   PROXY protocol v2 from `server.trusted_proxies`
@@ -18,8 +19,10 @@
   HAProxy 2.8 and nginx 1.24, systemd 255 and EL9's 252 in containers and
   Landlock ABI 7 in a VM; a second researcher re-checked each track. Three
   reviews of draft 1 (operations, security, implementability) confirmed 32
-  findings, and three reviews of draft 2 (coverage of those, new risks,
-  implementability) 25 more, each checked by a second reviewer.
+  findings, three reviews of draft 2 (coverage of those, new risks,
+  implementability) 25 more, and three reviews of draft 3 (coverage,
+  real installation layouts, a final pass) 15 more, each checked by a
+  second reviewer.
 
 ## Decision
 
@@ -107,7 +110,9 @@ trusted_proxies = ["10.0.0.5", "10.0.1.0/28"]   # load balancers; reloadable
   version only from the server). This is a behaviour change for every
   deployment, not an opt-in: a proxy that sends headers to a gosftpd that
   was not told about it now gets its connections refused instead of
-  silently mis-attributed (CHANGELOG, Changed).
+  silently mis-attributed (CHANGELOG, Changed, marked **BREAKING:** with
+  the migration: list the proxy in `server.trusted_proxies` or turn PROXY
+  off on the load balancer; the v0.4.0 preamble names it).
 
 ### Admission
 
@@ -179,7 +184,8 @@ Admission runs in two phases, so that per-address rules see the client.
 - Metrics carry no addresses (ADR 0009):
   `gosftpd_connections_refused_total` gains `reason="proxy_header"`,
   `gosftpd_connections_total` gains `result="untrusted_proxy"`.
-- `server.start` and `server.reload` record `trusted_proxies`.
+- `server.start` and `server.reload` record `trusted_proxies`,
+  comma-separated as `listen` is.
 
 ### Reload and the health check
 
@@ -191,12 +197,17 @@ Admission runs in two phases, so that per-address rules see the client.
   so.
 - `gosftpd healthcheck` reads `server.trusted_proxies` from the
   configuration file (found as today), also when the address comes from
-  `--address` or `$GOSFTPD_LISTEN`; there a configuration file that is
-  missing, unreadable or invalid makes the probe send no header, never a
-  failure (`--address` stays the way around an unreadable file); the reason
-  is appended to the one line the check prints ("... (server.trusted_proxies
-  not read: ERR; no PROXY header sent)"), keeping ADR 0009's one-line
-  output. When its own source address is trusted it sends a v2
+  `--address` or `$GOSFTPD_LISTEN`. It reads the key leniently and apart
+  from `server.listen` in every case (ADR 0009 read only `server.listen`,
+  so that a value a reload refused never fails the check): a wrong type or
+  an entry that does not parse never fails the check or hides the address;
+  the entries that parse are used, and the others are named in a reason
+  appended to the one line the check prints ("... (server.trusted_proxies:
+  ERR)"), keeping ADR 0009's one-line output. With `--address` or
+  `$GOSFTPD_LISTEN`, a configuration file that is missing, unreadable or
+  not TOML means no entries, never a failure (`--address` stays the way
+  around an unreadable file), with the reason appended the same way. When
+  its own source address is trusted it sends a v2
   `LOCAL` header after connecting (16 bytes) and then waits for the banner.
   Without a header, a probe from a trusted address gets no banner: it is
   unhealthy when its `--timeout` ends first, and when the server's header
@@ -245,8 +256,12 @@ M5 packages:
   (image builds) and is not fooled by the drop-in itself. docs/install.md
   gives the commands; the M5 postinstall uses the same probe and removes
   the drop-in when it is no longer needed.
-- `packaging/gosftpd.sysusers`:
-  `u gosftpd - "gosftpd SFTP server" /var/lib/gosftpd`.
+- `packaging/gosftpd.sysusers`: `u gosftpd - "gosftpd SFTP server" -`,
+  a user whose home is `/` (`StateDirectory=` creates `/var/lib/gosftpd`).
+  §9.4 made `/var/lib/gosftpd` the home, but systemd sets `$HOME` from it,
+  and the user's home is never a dedicated directory (see Rules): host key
+  rotation and certificate renewal by reload (ADR 0008) would then need a
+  restart.
 - `packaging/gosftpd.tmpfiles`: `d /srv/sftp 0750 gosftpd gosftpd -` and
   `d /var/log/gosftpd 0750 gosftpd gosftpd -` (so that
   `config validate --check-fs` passes before the first start).
@@ -268,7 +283,10 @@ docs/install.md. docs/install.md removes a `/usr/local/bin/gosftpd` left
 by the Quickstart or the interim unit (PATH would run the stale one for
 `user add`), and, when upgrading from the interim unit in
 docs/security/hardening.md, the old unit in `/etc/systemd/system` (it
-overrides the shipped one; checked with `systemctl cat`). It also covers:
+overrides the shipped one; checked with `systemctl cat`), and gives the
+user created by the interim `useradd --home-dir /var/lib/gosftpd
+--create-home` the home `/` (`usermod --home / gosftpd`) and removes the
+`/etc/skel` files that copied into `/var/lib/gosftpd`. It also covers:
 the legacy drop-in; validating as the service user
 (`runuser -u gosftpd -- gosftpd config validate --check-fs`: as root the
 check refuses the host key that belongs to gosftpd, and it runs outside the
@@ -342,7 +360,13 @@ landlock = "auto"   # "auto" (default), "off", "required"; restart-only
   output opened and the TLS roots loaded (ADR 0010), and before any
   background goroutine starts and before `READY=1`. `time.Local` is
   initialised before (a later first use falls back to UTC silently:
-  `expiry-time` in `authorized_keys` uses it).
+  `expiry-time` in `authorized_keys` uses it). After restricting, when
+  fd 0, 1 or 2 is gosftpd's controlling terminal and gosftpd is not a
+  session leader, it gives the terminal up (`ioctl` `TIOCNOTTY`): a
+  descriptor opened before the ruleset is not checked by Landlock, and
+  `TIOCSTI` on it would type commands into the shell that started
+  `serve`; it then fails with `EPERM`, and Ctrl-C still reaches the
+  process group.
 - **ABI.** gosftpd queries the ABI itself (`landlock_create_ruleset` with
   the version flag, through `golang.org/x/sys/unix`), because go-landlock's
   `BestEffort` silently applies nothing in four cases (no Landlock,
@@ -362,7 +386,10 @@ landlock = "auto"   # "auto" (default), "off", "required"; restart-only
   exit status (a `SECCOMP_RET_TRAP` filter makes Go exit 2), the time limit
   (a filter that kills only the calling thread, as systemd before 243 and
   EL8's 239 install, leaves a Go process hanging) or missing output mean
-  `blocked`. The update of hardening.md and a CHANGELOG "Upgrading" note
+  `blocked`. `ENOSYS` or `EOPNOTSUPP` from the child's ABI query means
+  `unavailable` (no Landlock, or disabled at boot; securityfs is not
+  mounted in containers), as for the parent's own query, logged at info.
+  The update of hardening.md and a CHANGELOG "Upgrading" note
   list the three calls. ABI 1 is not used: without `refer` every rename
   between directories (versions, client renames) fails with `EXDEV`.
   gosftpd asks go-landlock for ABI 5 with `BestEffort` (truncate from
@@ -380,10 +407,11 @@ landlock = "auto"   # "auto" (default), "off", "required"; restart-only
   `landlock` = `v2` … `v5`. Otherwise `server.start` records `off`,
   `unavailable` (no Landlock, disabled at boot), `blocked` (a seccomp
   filter or a probe that did not finish) or `not_applied` (ABI 1, exec
-  hooks, a rule on `/`), and the log says why: "landlock: not available:
-  blocked by a seccomp filter (allow landlock_create_ruleset,
-  landlock_add_rule and landlock_restrict_self in SystemCallFilter=, or set
-  server.landlock = \"off\")" (or "killed by a seccomp filter", "did not
+  hooks, a rule on `/`); on other systems it has no `landlock` field. The
+  log says why: "landlock: not available: blocked by a seccomp filter
+  (allow landlock_create_ruleset, landlock_add_rule and
+  landlock_restrict_self in SystemCallFilter=, or set server.landlock =
+  \"off\")" (or "killed by a seccomp filter", "did not
   finish within 5 s: a filter that kills the calling thread") at warn, the
   other reasons at info. docs/security.md says to alert on values other
   than `vN` and `off`, and lists what ABI 2 to 4 leave out (truncate by
@@ -398,33 +426,51 @@ directory gets a read rule only when it is dedicated to gosftpd, and its
 files get file rules otherwise.
 
 - **Named entries** are what the configuration names or uses: the main
-  file; each include pattern's leading directory, the subdirectories on its
-  path and its matches; `authorized_keys` files and the zero-configuration
-  `--authorized-keys` file; CA files and the revocation list; host keys
-  with their `.next`, `.old`, `-cert.pub` and `.next-cert.pub` files; hook
-  `secret_file`s; the audit file. Also named are names derived from a named
-  file's name (beginning with it, as `config.toml~` or `users.toml.bak`;
-  `.NAME.swp` and the other `.NAME.sw?` of vim, `.NAME.*.tmp` of
-  `user add --write`, `.#NAME` and `#NAME#` of emacs) and the entries of a
-  Kubernetes ConfigMap or Secret volume (`..data`, `..data_tmp`, `..`
-  followed by a timestamp).
+  file; each include pattern's matches; `authorized_keys` files and the
+  zero-configuration `--authorized-keys` file; CA files and the revocation
+  list; host keys with their `.next`, `.old`, `-cert.pub` and
+  `.next-cert.pub` files; hook `secret_file`s; the audit file. A
+  subdirectory counts as named only when it is dedicated itself (decided
+  the same way, recursively, with the same never-dedicated exceptions) and
+  it is an include pattern's leading directory, lies on an include
+  pattern's path, or holds a named entry (`keys/` for
+  `/etc/gosftpd/keys/alice.pub`); a directory rule covers the whole tree,
+  so a subdirectory with other files makes its parent shared. Also named
+  are names derived from a named file's name (beginning with it, as
+  `config.toml~` or `users.toml.bak`; `.NAME.swp` and the other `.NAME.sw?`
+  of vim, `.NAME.*.tmp` of `user add --write`, `.NAME.tmp-*` of gosftpd's
+  own writes of host keys, `.pub` files and host certificates, `.#NAME`
+  and `#NAME#` of emacs), the entries of a Kubernetes ConfigMap or Secret
+  volume (`..data`, `..data_tmp`, `..` followed by a timestamp) and a
+  `lost+found` directory at the root of a file system (a volume of its
+  own).
 - **A directory is dedicated** when, at start, it can be listed and every
-  entry in it is named. A directory named `.ssh`, the home directory of the
-  user running gosftpd and `/` are never dedicated. A directory that cannot
-  be listed (0710 root:gosftpd) is not dedicated; this never fails the
-  start. Dedication is decided at start only: files created later in a
-  dedicated directory are readable to gosftpd, which docs/security.md says
-  (keep key and configuration files in a directory of their own).
+  entry in it is named. A directory named `.ssh`, `/` and the home
+  directory of the user running gosftpd are never dedicated (the packaged
+  user's home is `/`). A directory that cannot be listed (0710
+  root:gosftpd) is not dedicated; this never fails the start. Dedication is
+  decided at start only: files created later in a dedicated directory are
+  readable to gosftpd, which docs/security.md says (keep key and
+  configuration files in a directory of their own).
 - **A file rule** goes on the file and, when it is a symlink, on its
   resolved target. In a dedicated directory too, a named entry that is a
   symlink resolving outside the directory gets a rule on its target (a file
   rule; a directory rule for an include directory): a directory rule covers
-  only what resolves beneath it.
-- **A start warning** names each key whose file got a file rule and the
-  directory that is shared: such a file replaced by rename is not readable
-  any more until a restart. So in zero-configuration mode the default
+  only what resolves beneath it. Re-pointing such a link (a NixOS
+  generation switch, `ln -sfn` deployments) makes the file unreadable until
+  a restart.
+- **A start warning** names each key whose file got a file rule and why:
+  the directory that is shared, with up to three of the entries that made
+  it shared (or that it is `.ssh`, `/` or the home directory), or the
+  symlink whose target lies outside its directory. Such a file replaced by
+  rename, or such a link re-pointed, is not readable any more until a
+  restart. So in zero-configuration mode the default
   `~/.ssh/authorized_keys` gets a rule on the file only, and the user's
-  private keys next to it stay unreadable.
+  private keys next to it stay unreadable. An include pattern's leading
+  directory that does not exist at start and that no rule covers gives the
+  warning "DIR does not exist: the first file added there needs a
+  restart"; `gosftpd init` therefore creates `users.d/` (with the mode
+  `user add --write` gives it).
 
 | What | Path | Rights |
 |---|---|---|
@@ -433,7 +479,7 @@ files get file rules otherwise.
 | Configuration | the main file's directory if dedicated, else the main file | read file, read dir (on a file: read file) |
 | Includes | each pattern's leading directory without `*`, `?` or `[` (a relative pattern joined to the main file's directory), never `/`, whether or not the main file's directory is dedicated: if dedicated the directory, else read dir on it and file rules on its matches, with the warning (a new or renamed include file then needs a restart) | read file, read dir |
 | Trusted files | `authorized_keys` files and the zero-configuration file, CA files, the revocation list, host keys with their siblings, hook `secret_file`s: their directory if dedicated, else the file | read file |
-| Audit log | the directory of `audit.output` only when every entry in it is the audit file or a rotated copy (a name beginning with the file's name, or with its name up to the last dot as logrotate's `extension` writes it; a subdirectory holding only such names, as `olddir` writes it); else the file | write file, make reg (on a file: write file) |
+| Audit log | the directory of `audit.output` only when every entry in it is the audit file or a rotated copy (a name beginning with the file's name, or with its name up to the last dot as logrotate's `extension` writes it; a subdirectory holding only such names, as `olddir` writes it; `lost+found` at a file system's root); else the file | write file, make reg (on a file: write file) |
 | Process metrics, mountinfo | `/proc/self`, held open with an `O_PATH` descriptor (a rule on it is lost when the kernel reclaims the dentry) | read file, read dir |
 | Name resolution (webhooks) | `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/resolv.conf` and its target's directory when that is under `/run` | read file |
 | Coverage data (`-cover` builds only) | `$GOCOVERDIR`, or `-test.gocoverdir` in a test child | read file, read dir, write file, make reg, remove file |
@@ -445,8 +491,8 @@ files get file rules otherwise.
   create, as in docs/audit-log.md) makes the audit log unwritable until a
   restart; with on_error = fail-closed every new connection is refused; use
   copytruncate or a directory of its own". docs/audit-log.md's "recovers
-  on its own" gets this exception. The packaged `/var/log/gosftpd` is
-  dedicated.
+  on its own" gets this exception. The packaged `/var/log/gosftpd` and
+  `/var/lib/gosftpd` are dedicated.
 - Mount directories and home parents get their rules through the
   directory the mount holds open: gosftpd opens an `O_PATH|O_DIRECTORY`
   descriptor with the `os.Root`, checks that it is the same directory as
@@ -459,7 +505,10 @@ files get file rules otherwise.
   on a directory that gets another rule.
 - Paths under `/dev` and `/proc` other than `/proc/self` never get a rule
   (an `authorized_keys` link to `/dev/null`, a pipe, `audit.output` on
-  stderr); such files stay usable through descriptors opened before.
+  stderr); such files stay usable through descriptors opened before. An
+  `audit.output` that gets no rule (a path under `/dev` or `/proc`, such
+  as `/dev/stderr`) is therefore not reopened at reload: the descriptor
+  opened at start stays.
 - The name-resolution files are file rules (a rule on `/etc` would open
   it). A file replaced by rename after start (NetworkManager or dhclient
   rewriting `/etc/resolv.conf`, `sed -i` on `/etc/hosts`) is no longer
@@ -481,9 +530,14 @@ reach what they point to; `stat`, `chmod`, `chown`, `utimes` and
 does not follow a file system mounted on the mount directory later;
 connecting to pathname Unix sockets (an `ssh-agent` or a user's session bus
 in zero-configuration mode would let a compromised process act outside the
-ruleset); the network; signals to processes of the same user; files
-created later in a dedicated directory; and on ABI 2 kernels (Debian 12)
-truncating files.
+ruleset) and to abstract ones (scoping is not used: X11's, a
+`dbus-launch` bus); descriptors opened before the ruleset, which
+Landlock checks only at open (an inherited terminal accepted `TIOCSTI`
+where that needs no `CAP_SYS_ADMIN`, on kernels before 6.2 such as
+Debian 12's and with `dev.tty.legacy_tiocsti = 1`, until gosftpd gives up
+its controlling terminal, see When); the network; signals to processes of
+the same user; files created later in
+a dedicated directory; and on ABI 2 kernels (Debian 12) truncating files.
 
 **Exec hooks.** While exec hooks are configured, Landlock is not applied
 (ADR 0010): a hook needs the loader, libraries and whatever it touches. A
@@ -498,11 +552,15 @@ new configuration makes: each configuration and include file it reads,
 each include pattern's leading directory it lists, each trusted file, the
 audit file (its directory when the file must be created), each mount
 directory (with `create = true` its nearest existing ancestor). It
-resolves each the same way. A use is covered when an applied rule's path is
-the resolved path or an ancestor of it, with the rights the use needs and
-the recorded (device, inode). A path that does not exist is skipped (the
-next reload checks it once it exists); one that exists but cannot be
-resolved is not covered.
+resolves each the same way. A use is covered when the resolved file's
+(device, inode) is that of an applied file rule, wherever that file now
+lies (Landlock binds a file rule to the inode, so it follows the links and
+renames of `hostkey rotate --finish` and `--rollback`), or when an applied
+directory rule's recorded path is the resolved path or an ancestor of it
+and still has its recorded (device, inode); in both cases with the rights
+the use needs. A path that does not exist is skipped (the next reload
+checks it once it exists); one that exists but cannot be resolved is not
+covered.
 
 - A new or moved mount that is not covered is left out as unavailable,
   with `restart_required` naming `mounts.NAME.path`. A mount whose
@@ -516,11 +574,16 @@ resolved is not covered.
   `read_only` and `create`, with `restart_required` naming
   `mounts.NAME.read_only` or `mounts.NAME.create`.
 - A new `audit.output` that is not covered keeps the running audit output,
-  with `restart_required` (`audit.output`).
+  with `restart_required` (`audit.output`). An unchanged `audit.output`
+  whose file is no longer covered (rotated by rename while it has a file
+  rule) is listed in `restart_required` as `audit.output` too, and the
+  reopen error carries the hint below.
 - A configuration file, include or trusted file that is not covered fails
-  as an unreadable file does today: an `authorized_keys`, CA, host key or
-  secret file is left out with a warning, and the successful reload lists
-  its key in `restart_required`; a revocation list or an include fails the
+  as an unreadable file does today: an `authorized_keys` or CA file is left
+  out with a warning, a host key keeps the running host keys (ADR 0008), a
+  hook secret keeps the running secret (a new hook is left out; ADR 0010),
+  and the successful reload lists the key in `restart_required`; a
+  revocation list or an include fails the
   reload (`result=error`, `reason=config`, no `restart_required`). In
   every case a permission error on a path the start's rules do not cover
   carries the hint "outside the Landlock ruleset applied at start; restart
@@ -584,9 +647,11 @@ resolved is not covered.
 
 - PROXY, on every platform (a connection wrapper presents any peer
   address; the existing pipe and synctest harness gives fake time): v2 and
-  v1 headers (TCP4, TCP6, mapped addresses) and the audit fields; `LOCAL`
-  and `UNKNOWN`, which share the proxy's ban entry; refused families,
-  lengths, split v1 headers and loopback sources from a remote peer; a
+  v1 headers (TCP4, TCP6, mapped addresses, a `TCP6` line with IPv4
+  addresses) and the audit fields; `LOCAL` and `UNKNOWN`, which share the
+  proxy's ban entry; refused families, lengths, split v1 headers and
+  loopback sources from a remote peer, and a loopback source from a peer
+  that is the connection's own local address accepted; a
   header and the client's first bytes arriving together beyond the
   256-byte buffer; a trusted peer that closes with FIN, one that closes
   with RST and one that stays silent, all before a byte (no audit,
@@ -601,8 +666,12 @@ resolved is not covered.
   banner; a client that sends exactly its version line is not held back;
   `connections_active` returns to 0 after each ending and each adds
   exactly one counter; `/0`, `::ffff:0:0/96` and invalid prefixes refused;
-  reload of `trusted_proxies`; healthcheck with both orders of the two
-  timeouts and an unreadable file with `--address`. `FuzzProxyHeader`
+  reload of `trusted_proxies`; the `config validate` warnings for a
+  `handshake_timeout` below 3 s and for an overlap with `auth.ban.exempt`;
+  healthcheck with both orders of the two timeouts, an unreadable file with
+  `--address`, a string-valued `trusted_proxies` (the address is still
+  found and the probe healthy) and a list with one invalid prefix next to
+  the probe's trusted source (`LOCAL` is still sent). `FuzzProxyHeader`
   joins the fuzz targets (CI smoke and nightly). On Linux, real sockets
   with 127.0.0.2 as the trusted source. Interop (ubuntu-24.04): OpenSSH
   sftp, paramiko and rclone through HAProxy (`send-proxy`,
@@ -615,18 +684,33 @@ resolved is not covered.
   home mounts; relative includes with `users.d` present at start, an
   absolute pattern with a wildcard directory; dedicated and shared
   directories: the packaged `/etc/gosftpd` with `users.d` and `ca.pub`,
-  the zero-configuration `~/.ssh`, a configuration in `$HOME`, an
-  unlistable 0710 directory, a Kubernetes ConfigMap volume, editor and
-  `user add` temporary files; named entries that are symlinks into another
-  tree; `/dev` trusted files; host key siblings; audit on a file, in a
+  the reference layout with `users.d/` and `keys/alice.pub` (dedicated),
+  a `users.d` holding an unnamed file (`/etc/gosftpd` shared), a wildcard
+  include whose team directory holds an unnamed file (read dir on the
+  leading directory, file rules on the matches), the packaged
+  `/var/lib/gosftpd` with a host key, its `.pub` and a stale
+  `.ssh_host_ed25519_key.tmp-1` (dedicated), a state and an audit
+  directory that are each the root of an ext4 file system with
+  `lost+found` (dedicated), the zero-configuration `~/.ssh`, a
+  configuration in `$HOME`, an unlistable 0710 directory, a Kubernetes
+  ConfigMap volume, editor and `user add` temporary files; the start
+  warning naming up to three entries; an include directory missing at
+  start; named entries that are symlinks into another tree; `/dev`
+  trusted files; host key siblings; audit on a file, in a
   dedicated directory with logrotate's `extension` and `olddir` layouts,
   next to the configuration and on stderr; the coverage rule only in
-  `-cover` builds; deduplication; reload uses that do not exist, and a
-  directory that became dedicated after the start); mode and reporting with
-  an injected ABI query and probe result (no Landlock, disabled, seccomp
-  `EPERM`, kill and trap, a probe that hangs, ABI 1, ABI 7, a rule on `/`,
-  a `Restrict` error and a failed self-check in `auto`; exit status 2 for
-  `required` skip reasons, 1 for failures). On Linux the test
+  `-cover` builds; deduplication; reload uses that do not exist, a
+  directory that became dedicated after the start, and host keys in a
+  shared directory after `hostkey rotate --finish`, where the key and its
+  `.old` stay covered through their inodes and only a certificate rewritten
+  by rename is reported); mode and reporting with an injected ABI query and
+  probe result (no Landlock, disabled, a probe child reporting `ENOSYS` or
+  `EOPNOTSUPP` (`unavailable`), seccomp `EPERM`, kill and trap, a probe
+  that hangs, ABI 1, ABI 7, a rule on `/`, a `Restrict` error and a failed
+  self-check in `auto`; exit status 2 for `required` skip reasons, 1 for
+  failures). The read-only file system warning, the name-resolution
+  warning and `EXTEND_TIMEOUT_USEC` after a reload changed
+  `shutdown_timeout` each get a unit test. On Linux the test
   binary re-executes itself for each sandboxed test (coverage builds pass
   `-test.gocoverdir` on, which gets its rule; children never use
   `t.TempDir`): under the real ruleset every vfs operation works (upload,
@@ -638,7 +722,14 @@ resolved is not covered.
   the start; a sibling of an audit file in a shared directory; with the
   audit file next to the configuration, neither the configuration nor a
   host key can be opened for writing and nothing can be created in
-  `users.d`); a mount swapped for a symlink before the rules are added;
+  `users.d`; `users.d/archive/x` when `users.d` holds an unnamed file; a
+  team directory's unnamed file under a wildcard include); a mount
+  swapped for a symlink before the rules are added; after restricting and
+  `echo 2 > /proc/sys/vm/drop_caches` (through `sudo -n`, as the ambient
+  test), `/proc/self/statm`, `/proc/self/fd` and `/proc/self/mountinfo`
+  stay readable, and a reload still refuses a trusted file reached through
+  a bind mount of a mount; under a pty, `TIOCSTI` on fd 2 fails after the
+  sandbox step and SIGINT from the pty still arrives;
   the hard-link limitation is asserted as a documented gap; reload
   coverage (a new mount, one that is a symlink out of a covered directory,
   a recreated mount, `read_only` turned off, a replaced `users.d` file, a
@@ -647,9 +738,20 @@ resolved is not covered.
   ok with `restart_required` and the hint, a revocation list replaced the
   same way: `result=error`, `reason=config`, no `restart_required`, the
   hint; a configuration and CA file reached through symlinks into another
-  tree reload); the README flow (`init`, `user add --write`, serve,
-  reload) and the packaged layout restarted with `users.d` present, then a
-  user added and reloaded; a seccomp filter that kills
+  tree reload, while a re-pointed configuration link fails the reload with
+  the hint and a re-pointed CA link is left out with `restart_required`;
+  `sed -i` on the main file of the reference layout reloads; an audit file
+  next to the configuration rotated as docs/audit-log.md does: reload ok,
+  `restart_required` names `audit.output`, the hint is logged;
+  `audit.output = "/dev/stderr"` with stderr redirected to a regular file
+  and to a FIFO is still written after a reload; a reload that adds an
+  exec hook leaves it out, warns and lists `hooks`); the README flow
+  (`init`, `user add --write`, serve, reload), also in the order `init`,
+  serve, `user add --write`, reload; the packaged layout restarted with
+  `users.d` present, then a user added and reloaded; the packaged layout
+  with host certificates through `hostkey rotate`, reload, `rotate
+  --finish` and reload with an empty `restart_required` and the
+  certificate still served; a seccomp filter that kills
   `landlock_create_ruleset` with `SECCOMP_RET_KILL_PROCESS`, with
   `SECCOMP_RET_KILL_THREAD` and with `SECCOMP_RET_TRAP` is survived within
   the probe's limit; the ambient capability set is empty in every thread
@@ -664,7 +766,14 @@ resolved is not covered.
   path). CI fails instead of skipping when these kernels report no
   Landlock. The interop binary is built with `CGO_ENABLED=0`, and every
   server's log is checked for `landlock: ABI v[2-5] applied` (the hooks
-  server: `not applied: exec hooks configured`). An internal/cli test
+  server: `not applied: exec hooks configured`). The interop layouts change
+  so that their existing steps hold under Landlock: each configuration
+  server's file, its `users.d` (created before serve), CA file and
+  revocation list sit in a directory of their own; scratch files
+  (`typo.toml`, `known_hosts`, `*.out`) and `server.log` live elsewhere;
+  each audit log rotated by `mv` gets a directory of its own. One step
+  keeps a shared layout and asserts the documented outcome: a `sed -i` of
+  the main file fails the reload with the restart hint. An internal/cli test
   checks every audit line of a serve run with a reload (`server.start`,
   `server.reload`, `server.stop`) against the audit schema.
 - systemd: the lint job runs `systemd-analyze security --offline=true
@@ -677,7 +786,8 @@ resolved is not covered.
   `os.Open("/etc/passwd")` after applying), starts the unit, checks the
   journal for `landlock: ABI v[2-5] applied` and the probe's `permission
   denied`, uploads with sftp, restarts once (so that `users.d` exists at
-  start), adds a user and reloads, checks the
+  start), adds a user and reloads, runs `hostkey rotate` and a reload that
+  announces the next key with an empty `restart_required`, checks the
   `Status:` line after a failed reload and after one that needs a restart,
   runs an exec hook whose `setsid` child systemd kills at stop, checks
   `CapEff`, `NoNewPrivs` and seccomp, and stops within `TimeoutStopSec`. A
@@ -686,7 +796,7 @@ resolved is not covered.
   "blocked by a seccomp filter" with `SystemCallErrorNumber=EPERM`, and the
   unit stays active with the kill action too. The old hardening.md unit
   starts the new binary. The legacy drop-in's probe is checked against a
-  unit with an unknown type.
+  unit with an unknown type. The job joins `ci-ok`'s needs.
 
 ## Consequences
 
@@ -699,16 +809,18 @@ resolved is not covered.
   enabled), a compromised gosftpd cannot open files outside its mounts,
   its configuration and trusted-file rules, its audit rule, `/proc/self`
   and the name-resolution files, unless exec hooks are configured. It can
-  still use pathname Unix sockets, the network and signals, change modes,
-  owners and times of files its user may change, and on ABI 2 truncate
-  them.
+  still use pathname and abstract Unix sockets, descriptors opened before
+  the ruleset, the network and signals, change modes, owners and times of
+  files its user may change, and on ABI 2 truncate them.
 - Under Landlock a reload cannot add mounts or directories that the
   ruleset does not cover, and a remounted mount needs a restart; the
   server says so in `restart_required` and in `systemctl status`. A
   configuration or key file in a shared directory, replaced by rename,
-  needs a restart too, and so does audit log rotation by rename when the
-  audit file shares its directory. Files created later in a dedicated
-  directory are readable to gosftpd.
+  needs a restart too, and so do audit log rotation by rename when the
+  audit file shares its directory and re-pointing a symlinked
+  configuration, include or key file whose target lies outside its
+  directory. Files created later in a dedicated directory are readable to
+  gosftpd.
 - Two new dependencies (nine direct in total, within the budget of ten).
 - The unit is stricter than the one docs/security/hardening.md shows
   today; docs/install.md replaces it and tells how to remove an old unit
@@ -716,5 +828,6 @@ resolved is not covered.
 - ROADMAP: §4.5 notes v1 and the parser-only use; §6.1 item 9, §7.4 item 9
   and the risk table no longer claim that Landlock covers hard links, bind
   mounts or the chmod race; §9.4 takes the unit's changes, the offline
-  probe for the legacy drop-in, and the corrected `@sandbox` note; the M4
-  DoD notes the restart under Landlock.
+  probe for the legacy drop-in, the corrected `@sandbox` note and the
+  sysusers line with the home `/`; the M4 DoD notes the restart under
+  Landlock.
