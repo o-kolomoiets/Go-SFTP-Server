@@ -40,6 +40,12 @@ jobs:
         run: go tool -modfile=tools/go.mod actionlint
       - name: FreeBSD cross-build (Tier 2)
         run: GOOS=freebsd go vet ./... && GOOS=freebsd go build ./...
+      # Offline: systemd-analyze security --offline=true --threshold=12 (the
+      # score differs between systemd versions, hence the pinned runner),
+      # verify --man=no against a controlled root (any output fails), and
+      # systemd-sysusers and systemd-tmpfiles --root (ADR 0011).
+      - name: systemd unit, sysusers and tmpfiles
+        run: test/systemd/lint.sh
 
   test:
     strategy:
@@ -167,6 +173,23 @@ jobs:
           path: coverage/e2e
           retention-days: 7
 
+  # The packaged unit under the runner's systemd 255 (PID 1 on the VM):
+  # Landlock, reloads and their status line, hooks, capabilities, seccomp
+  # filters, the legacy drop-in and the upgrade from the interim unit
+  # (ADR 0011). The script changes the system; it runs only in CI.
+  systemd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: gosftpd under systemd
+        run: test/systemd/run.sh
+
   coverage:
     needs: [test, interop]
     runs-on: ubuntu-24.04
@@ -261,10 +284,23 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
+      - name: Only the Linux archives hold the systemd files (ADR 0011)
+        run: |
+          status=0
+          for f in dist/*_linux_*.tar.gz; do
+            for p in packaging/config.toml packaging/gosftpd.sysusers packaging/gosftpd.tmpfiles \
+              packaging/systemd/gosftpd.service packaging/systemd/legacy-notify.conf; do
+              if ! tar -tzf "$f" | grep -qx "$p"; then echo "::error file=$f::$p is missing"; status=1; fi
+            done
+          done
+          for f in dist/*_darwin_*.tar.gz; do
+            if tar -tzf "$f" | grep -q '^packaging/'; then echo "::error file=$f::has the systemd files"; status=1; fi
+          done
+          exit $status
       - name: Release binaries stay within 12 MiB (ROADMAP §11.1, D21)
         run: |
           status=0
-          for f in dist/gosftpd_*/gosftpd; do
+          for f in dist/gosftpd*/gosftpd; do
             size=$(stat -c %s "$f")
             echo "$f: $size bytes"
             if [ "$size" -gt 12582912 ]; then echo "::error file=$f::$size bytes is over the 12 MiB budget"; status=1; fi
@@ -283,7 +319,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed
