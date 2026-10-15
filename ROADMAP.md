@@ -223,7 +223,7 @@ go-sftp-server/
 │   ├── audit/                   # event schema on top of log/slog
 │   ├── obs/                     # admin listener: /metrics, /healthz, /readyz, Prometheus text format (M4)
 │   ├── hooks/                   # exec and webhook (M4)
-│   ├── sandbox/                 # Landlock, sd_notify (M4)
+│   ├── sandbox/                 # Landlock, ambient capabilities (M4, ADR 0011)
 │   ├── testutil/                # AsyncConn, log sink with mutex (tests only)
 │   └── version/                 # Version/Commit/Date
 ├── test/
@@ -303,7 +303,7 @@ The `sftpd.fileHandler` type, a wrapper around `*vfs.Session`, implements `sftp.
 | — (own code, `internal/obs`) | Prometheus text format 0.0.4 | metrics (opt-in, ADR 0009; D12: no library) | M4 |
 | — (own code) | about 30 lines on top of `$NOTIFY_SOCKET` | `sd_notify`; `github.com/coreos/go-systemd/v22` is not used, to stay within the dependency limit | M4 |
 | `github.com/landlock-lsm/go-landlock` | v0.10.1 (MIT) | optional Linux sandbox | M4 |
-| `github.com/pires/go-proxyproto` | v0.15.0 | PROXY protocol v2 behind a load balancer (persona U2, opt-in) | M4 |
+| `github.com/pires/go-proxyproto` | v0.15.0 (minimum: earlier versions return a nil address for undefined v2 families) | PROXY protocol v1 and v2 behind a load balancer (persona U2; v1 because nginx sends only v1). Used as a parser only (`proxyproto.Read`): its `Listener` and `Conn` read the header lazily and would stall the accept loop; its `x/net` requirement does not enter the build (ADR 0011) | M4 |
 | `go.uber.org/goleak` | v1.3.0 (tests) | goroutine leak detection | M1 |
 
 This adds up to 9 direct runtime dependencies (`goleak` is test-only). Every new dependency requires removing another one or revisiting principle 8.
@@ -574,13 +574,13 @@ flowchart LR
   - validation first, then an atomic swap via `atomic.Pointer[snapshot]`; new sessions get the new snapshot, existing ones continue with the old one;
   - users, keys, `authorized_keys_file`, mounts, permissions, limits and the log level are reread, and the audit log file is reopened (for logrotate);
   - a mount is reopened if the (dev, inode) pair of its path has changed: a disk was mounted after startup or the directory was recreated (§6.1 item 9);
-  - changing `listen` requires a restart, and the server logs a warning about it; with Landlock enabled, new mounts also require a restart (a warning in the log);
+  - changing `listen` requires a restart, and the server logs a warning about it; with Landlock applied, new mounts, a remounted mount and files outside the ruleset also require a restart, named in `restart_required` (ADR 0011);
   - the `reload.disconnect_removed_users` option;
   - the `server.reload` event.
 - [ ] **sd_notify** (about 30 lines of our own code on top of `$NOTIFY_SOCKET`, without `go-systemd`):
   - `READY=1`, `RELOADING=1` with `MONOTONIC_USEC`, `STOPPING=1`;
   - for systemd ≥ 253, `Type=notify-reload`;
-  - for Debian 12 and RHEL 9 (systemd 252), a `legacy-notify.conf` drop-in with `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID`, installed by postinstall (§9.4);
+  - for systemd without `Type=notify-reload` (Debian 12; EL9 before 252-21), a `legacy-notify.conf` drop-in with `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID`, installed where an offline probe finds the type unknown (§9.4);
   - we do **not** implement automatic reload via fsnotify: editors write files in parts.
 - [ ] **User management:**
   - `gosftpd user add NAME --key FILE|STRING --access mount=preset [--expires 72h] --write` writes the file `users.d/NAME.toml` (without `--write` the command, as in M2, only prints a snippet); the main config is not rewritten, and comments are preserved;
@@ -608,13 +608,20 @@ flowchart LR
   - `exec`: argv without a shell, env `GOSFTPD_EVENT/USER/MOUNT/PATH/FINAL_PATH/TARGET_PATH/HOST_PATH/CONN_ID`, the file's identity checked before each run, a timeout that kills the process group;
   - `webhook`: POST of the audit line, `X-Gosftpd-Signature` (HMAC-SHA256 over delivery ID, timestamp and body), retries with backoff, at least once while running;
   - asynchronous, with a bounded queue per hook; one process-wide dispatcher that a reload updates in place.
-- [ ] PROXY protocol v2 (`go-proxyproto` v0.15.0), opt-in `server.trusted_proxies = [CIDR]`; a PROXY header from any other address drops the connection.
+- [ ] **PROXY protocol** v1 and v2, `server.trusted_proxies = [CIDR]` (ADR 0011, after three rounds of design reviews):
+  - trust is decided by the TCP peer: a connection from a trusted address must begin with a header, one from any other address must not (it is refused after the banner, also when no proxy is trusted: a breaking change); reloadable, read at accept; `/0` is refused;
+  - `go-proxyproto` v0.15.0 as a parser only: the header is read in the connection's goroutine within `min(handshake_timeout, 10 s)`, never in the accept loop;
+  - admission in two phases: bans and `max_connections_per_ip` apply to the client the header names, never to the proxy for its clients; `LOCAL` and `UNKNOWN` are the proxy's own connections;
+  - `proxy_addr` in the audit log, `conn.reject` reasons `proxy_header` and `untrusted_proxy`, the same values in the metrics; `gosftpd healthcheck` sends `LOCAL` from a trusted address;
+  - interop with OpenSSH, paramiko and rclone through HAProxy (v1, v2, TLVs, Unix socket front ends) and nginx.
 - [ ] `packaging/systemd/gosftpd.service` (§9.4), `packaging/gosftpd.sysusers` and `packaging/gosftpd.tmpfiles`.
-- [ ] Optional on Linux: Landlock (`go-landlock` v0.10.1) after the listeners are bound, `landlock.V5.BestEffort().RestrictPaths(landlock.RWDirs(rw...), landlock.RODirs(ro...), landlock.ROFiles(cfg...))`:
-  - the restrictions are irreversible: new mounts on SIGHUP require a restart;
-  - the RO list includes `/etc/gosftpd` (including `users.d`), `/etc/ssl/certs`, `/etc/pki` (on RHEL the CA bundle lives there, and Landlock rules are bound to the inode after symlink resolution), `/etc/resolv.conf`, `/etc/hosts`, `/usr/share/zoneinfo`, `/proc/self` (the process collector in `/metrics`); while exec hooks are configured, Landlock is not applied (`landlock: not applied: exec hooks configured`): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock is reported in `restart_required`. Webhooks need nothing more: the TLS roots are loaded at start, before the ruleset;
-  - the RW list includes all mounts, `/var/lib/gosftpd` and the audit log directory (`/var/log/gosftpd`);
-  - at startup, `landlock: ABI vN applied` or `landlock: not available` is written to the log;
+- [ ] On Linux: Landlock (`go-landlock` v0.10.1, ADR 0011) after the listeners are bound, `server.landlock = "auto"` (default), `"off"` or `"required"`, restart-only:
+  - gosftpd queries the ABI itself and, under a seccomp filter, tries the calls in a child first; it asks for ABI 5 with `BestEffort` and needs ABI 2 (`refer`); the restrictions are irreversible;
+  - the rules come from the configuration at start: each mount through the descriptor it holds; the configuration, include, key, CA and secret files, by their directory only when it is dedicated to gosftpd (every entry in it is a named file), else by the file with a start warning (a rule on a file is lost when the file is replaced by rename); the audit log, its directory only when it holds nothing else; `/proc/self`, held open (the process collector in `/metrics`); `/etc/hosts`, `/etc/nsswitch.conf`, `/etc/resolv.conf`. `/etc/ssl/certs`, `/etc/pki` and `/usr/share/zoneinfo` are not needed: the TLS roots and the local zone are loaded before;
+  - while exec hooks are configured, Landlock is not applied (`landlock: not applied` with the reason "exec hooks configured"): a hook needs the loader, libraries and whatever it touches, which a fixed ruleset cannot know (ADR 0010); a reload that adds an exec hook under Landlock leaves it out and lists `hooks` in `restart_required`. Webhooks need nothing more;
+  - a reload checks what the new configuration uses against the rules kept from the start; what they do not cover needs a restart and is named in `restart_required`;
+  - at startup, `landlock: ABI vN applied`, `landlock: not applied` or `landlock: not available` with the reason is written to the log, and `server.start` records `landlock`;
+  - it does not cover hard links, bind mounts or the `chmod` race (§7.4 item 9);
   - under systemd, the unit allows the `landlock_*` syscalls: they are not part of `@system-service`, and the `@sandbox` group does not exist before systemd 254 (§9.4).
 - [ ] Documents `docs/operations.md` (reload, shutdown and interrupted uploads, log rotation, backups, upgrades, a stale `os.Root` after remounting), `docs/metrics.md` and `docs/recipes/` (retention via `systemd-tmpfiles` or hooks, volume encryption).
 
@@ -622,7 +629,7 @@ flowchart LR
 - Add a user, send `kill -HUP`, and the user logs in without a restart, while a concurrent 1 GiB upload completes. An invalid config on HUP keeps the old one in place and increments `gosftpd_config_reloads_total{result="error"}`.
 - A certificate with the correct principal lets the user in. An expired or revoked certificate, one with someone else's principal, or one from an untrusted CA does not.
 - A webhook on `fs.upload` arrives with `final_path` and `mount` (also for a flattened single-mount user) and a signature that a receiver verifies independently; a WinSCP- or rclone-style temp-file upload gives exactly one delivery, with the final name. An exec hook given the names `*`, `a b`, a newline, `-rf`, `$(touch pwned)` and a backtick name acts on exactly the uploaded file, and nothing else runs or moves.
-- After `mount` of a new disk onto a mount's directory and SIGHUP, new files land on the new disk.
+- After `mount` of a new disk onto a mount's directory and SIGHUP, new files land on the new disk. Under Landlock (ADR 0011) this needs a restart: the reload leaves the remounted mount out as unavailable and names it in `restart_required`; after the restart new files land on the new disk.
 - `systemd-analyze security gosftpd.service` gives ≤ 2.0. The check is done specifically under `gosftpd.service`: the log shows `landlock: ABI vN applied`, and an `os.Open("/etc/passwd")` call added to a test build gets `EACCES`.
 
 **Estimate:** 14–20 pd. **Dependencies:** M3. **Risks:** different systemd versions across distributions; reload complexity. Mitigation for reload: immutable config snapshots.
@@ -633,7 +640,7 @@ flowchart LR
 
 - [ ] A full `.goreleaser.yaml` (§9.3): linux, darwin, freebsd × amd64, arm64 (windows after M3b); `-trimpath`; `mod_timestamp`; `mtime` from the commit for files in archives and packages; `CGO_ENABLED=0`; ldflags `-s -w -X .../internal/version.Version=...`.
 - [ ] `dockers_v2` → `ghcr.io/o-kolomoiets/gosftpd`. The base image is `gcr.io/distroless/static-debian13:nonroot`, pinned by digest (updated by Dependabot). `USER 65532:65532`, `EXPOSE 2022 9090`, `HEALTHCHECK` in exec form (a TCP check without `--url`, §6.7). The host key is stored in the `/var/lib/gosftpd` volume. The config is not baked into the image: the Quickstart creates it with the `config example` command (minimal, `audit.output = "stdout"`, §6.7); without a mounted config, `serve` exits with code 2 and a hint.
-- [ ] nfpm: deb, rpm, apk, archlinux; man pages and completions included. The package installs its own minimal `packaging/config.toml`, not the reference config from §6.6 (that one goes to `/usr/share/doc/gosftpd/`), and a `tmpfiles.d` file that creates `/srv/sftp` for `gosftpd` (§9.4). Postinstall runs `systemd-sysusers`, `systemd-tmpfiles --create` and `chgrp gosftpd /etc/gosftpd/config.toml` (T18), and on systemd < 253 installs the `legacy-notify.conf` drop-in (§9.4); the config is declared as `config|noreplace`. The permissions of the packaged files (root:gosftpd, 0640) pass the §6.5 check.
+- [ ] nfpm: deb, rpm, apk, archlinux; man pages and completions included. The package installs its own minimal `packaging/config.toml`, not the reference config from §6.6 (that one goes to `/usr/share/doc/gosftpd/`), and a `tmpfiles.d` file that creates `/srv/sftp` for `gosftpd` (§9.4). Postinstall runs `systemd-sysusers`, `systemd-tmpfiles --create` and `chgrp gosftpd /etc/gosftpd/config.toml` (T18), and installs the `legacy-notify.conf` drop-in where the offline probe finds `Type=notify-reload` unknown (§9.4); the config is declared as `config|noreplace`. The permissions of the packaged files (root:gosftpd, 0640) pass the §6.5 check.
 - [ ] Signatures and provenance:
   - cosign v3 keyless: `sign-blob --bundle checksums.txt.sigstore.json`, `docker_signs` for the image;
   - SBOM via syft;
@@ -702,7 +709,7 @@ flowchart LR
 6. **Path mapping.** A client path is a virtual POSIX path. Relative paths are resolved from `/` (`WithStartDirectory`). `REALPATH` returns only virtual paths. `cd ..` stops at `/`, because `pkg/sftp` cleans paths via `cleanPathWithBase`. A path of the form `/<mount>/<rest>` is turned into `(mount.root *os.Root, rest)`.
 7. **Rename between mounts** is forbidden: `SSH_FX_OP_UNSUPPORTED`.
 8. **Host paths** never appear in any response, listing or error message.
-9. **A mount is opened once.** `os.Root` holds the directory fd from startup. If a disk or NFS is mounted on the mount path after startup, or the directory is recreated, the server keeps writing to the old inode, for example to the mount point directory on the root partition. Protection: `RequiresMountsFor=` in the unit (§9.4); the mount option `require_mountpoint = true` prevents startup if the path is on the same filesystem as its parent; from M4, on SIGHUP the mount is reopened if the (dev, inode) pair has changed. Described in `docs/operations.md`.
+9. **A mount is opened once.** `os.Root` holds the directory fd from startup. If a disk or NFS is mounted on the mount path after startup, or the directory is recreated, the server keeps writing to the old inode, for example to the mount point directory on the root partition. Protection: `RequiresMountsFor=` in the unit (§9.4); the mount option `require_mountpoint = true` prevents startup if the path is on the same filesystem as its parent; from M4, on SIGHUP the mount is reopened if the (dev, inode) pair has changed. Under Landlock (ADR 0011) the mount's rule stays with the directory opened at start and does not follow a file system mounted on it later, so on SIGHUP such a mount is left out as unavailable and named in `restart_required` instead: it needs a restart. Described in `docs/operations.md`.
 
 ### 6.2 Upload conflict policy
 
@@ -792,6 +799,7 @@ Two streams. The **operational log** is written to stderr in text or JSON format
 | `conn_id`, `session_id` | hex(64 bit) | after accept / session | `9f3c2a17d0b4e6a1` |
 | `user` | string ≤ 64 | after auth | `alice` |
 | `remote_addr`, `local_addr` | string | always | `203.0.113.7:53122` |
+| `proxy_addr` | string | behind a trusted load balancer (ADR 0011) | `10.0.0.5:41022` |
 | `client_version` | string ≤ 128 | after KEX | `SSH-2.0-OpenSSH_9.6p1 ...` |
 | `auth_method`, `key_fp` | string | auth.* | `publickey`, `SHA256:...` |
 | `cert_key_id`, `cert_serial`, `cert_ca_fp` | string (the serial as a decimal string: CAs use random 64-bit serials) | with a certificate | `alice-laptop`, `"42"`, `SHA256:...` |
@@ -856,6 +864,8 @@ handshake_timeout = "30s"
 idle_timeout = "15m"
 keepalive_interval = "30s"
 shutdown_timeout = "30s"
+trusted_proxies = []                    # load balancers that send a PROXY protocol header (ADR 0011)
+landlock = "auto"                       # Linux sandbox: auto | off | required; restart-only (ADR 0011)
 
 [limits]
 max_connections = 256
@@ -1077,7 +1087,7 @@ output = "stdout"
 
 **P2 (M4–M6)**
 - [ ] Landlock (Linux); host certificates and key rotation; signed releases, SBOM, provenance.
-- [ ] PROXY protocol v2 (`github.com/pires/go-proxyproto` v0.15.0) only from `trusted_proxies`, if the server sits behind a load balancer.
+- [ ] PROXY protocol v1 and v2 (`github.com/pires/go-proxyproto` v0.15.0, as a parser only) only from `trusted_proxies`, if the server sits behind a load balancer; headers from every other peer refused (ADR 0011).
 - [ ] Recommendation in the documentation: `fs.protected_hardlinks=1` and `fs.protected_symlinks=1`.
 
 **P3 (post-1.0)**
@@ -1144,7 +1154,7 @@ The currently pinned `x/crypto v0.0.0-20211215153901` is affected by **23** advi
 
    var errExists = sftpStatus{code: sftp.ErrSSHFxFailure, msg: "file already exists"}
    ```
-9. **What `os.Root` does not cover** (this must be documented and compensated for): bind mounts, `/proc`, device files, the `Chmod`/`Chown`/`Chtimes` race on Unix when a file is swapped for a symlink, hardlinks pointing outside that a local user created in advance, and a stale fd if the mount directory was remounted or recreated after startup (§6.1 item 9). Compensation: running as an unprivileged user, the systemd sandbox (`RequiresMountsFor=`), Landlock, `require_mountpoint`, not sharing such trees.
+9. **What `os.Root` does not cover** (this must be documented and compensated for): bind mounts, `/proc`, device files, the `Chmod`/`Chown`/`Chtimes` race on Unix when a file is swapped for a symlink, hardlinks pointing outside that a local user created in advance, and a stale fd if the mount directory was remounted or recreated after startup (§6.1 item 9). Compensation: running as an unprivileged user, the systemd sandbox (`RequiresMountsFor=`), `require_mountpoint`, not sharing such trees. Landlock (ADR 0011) does not close these gaps: it checks paths, so a hard link or a bind mount inside a mount reaches what it points to, and it does not check `chmod`, `chown`, `utimes` or `stat`, so the race stays; it limits what a compromised process can open outside the mounts.
 
 ### 7.5 Resource limits and defaults
 
@@ -1266,7 +1276,7 @@ Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run on
 | v0.2.0 | ≥ 60% | ≥ 80% | ≥ 70% |
 | v1.0.0 | ≥ 80% | ≥ 90% | ≥ 90% |
 
-Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd` and `hooks` (M4, ADR 0010) ≥ 85%, `internal/auth` ≥ 90%.
+Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd`, `hooks` (M4, ADR 0010) and `sandbox` (M4, ADR 0011) ≥ 85%, `internal/auth` ≥ 90%.
 
 ### 8.6 Benchmarks
 
@@ -1389,19 +1399,21 @@ Later, the remaining `nfpms.contents` are added (sysusers, tmpfiles, the referen
   - GHCR is free for public packages.
 - **Packages (nfpm).**
   - Formats: deb, rpm, apk, archlinux.
-  - Contents: `/usr/lib/systemd/system/gosftpd.service`, `/usr/lib/sysusers.d/gosftpd.conf` (`u gosftpd - "gosftpd SFTP server" /var/lib/gosftpd`), `/usr/lib/tmpfiles.d/gosftpd.conf` (`d /srv/sftp 0750 gosftpd gosftpd -`), `/etc/gosftpd/config.toml` (`config|noreplace`, 0640), `/usr/share/doc/gosftpd/config.example.toml` (the reference config from §6.6), man1, completions.
+  - Contents: `/usr/lib/systemd/system/gosftpd.service`, `/usr/lib/sysusers.d/gosftpd.conf` (`u gosftpd - "gosftpd SFTP server" -`: the home is `/`, not `/var/lib/gosftpd`, since systemd sets `$HOME` from it and Landlock never treats the home as a dedicated directory, so host key rotation by reload would need a restart, ADR 0011), `/usr/lib/tmpfiles.d/gosftpd.conf` (`d /srv/sftp 0750 gosftpd gosftpd -` and `d /var/log/gosftpd 0750 gosftpd gosftpd -`, so that `config validate --check-fs` passes before the first start), `/etc/gosftpd/config.toml` (`config|noreplace`, 0640), `/usr/share/doc/gosftpd/config.example.toml` (the reference config from §6.6), man1, completions. The files live in `packaging/` and are in the Linux release archives from v0.4; `docs/install.md` installs them in this layout.
   - `/etc/gosftpd/config.toml` is a separate minimal `packaging/config.toml`, not the reference config: there are no users (they are added in `users.d/`; the server starts with the warning "no users configured"), one mount `[mounts.inbox] path = "/srv/sftp/inbox"` with `create = true`, and the audit log in `/var/log/gosftpd/audit.jsonl` (the directory is created by `LogsDirectory=`).
   - `/srv/sftp` is created by `systemd-tmpfiles`, not by nfpm: when the package is unpacked, the `gosftpd` user does not exist yet. Without this directory, `ReadWritePaths=-/srv/sftp` is silently ignored, `ProtectSystem=strict` leaves `/srv` read-only, and `create = true` will not work. The `d` line also changes the owner of an already existing `/srv/sftp` (verified on systemd 255). If an OpenSSH chroot lives there (it must be owned by root), `docs/install.md` warns about this: before installation, the line is overridden with an `/etc/tmpfiles.d/gosftpd.conf` file, and the data path is changed via a drop-in and the config.
-  - Postinstall: `systemd-sysusers ...; systemd-tmpfiles --create gosftpd.conf; chgrp gosftpd /etc/gosftpd/config.toml`; if `systemctl --version` < 253 (Debian 12, RHEL 9), it installs the drop-in `/etc/systemd/system/gosftpd.service.d/legacy-notify.conf` with `[Service]`, `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID` (postremove deletes it); then `systemctl daemon-reload`.
-- **systemd unit** (all directives are documented in man systemd; `Type=notify-reload` requires systemd ≥ 253):
+  - Postinstall: `systemd-sysusers ...; systemd-tmpfiles --create gosftpd.conf; chgrp gosftpd /etc/gosftpd/config.toml`; then it decides on the drop-in `/etc/systemd/system/gosftpd.service.d/legacy-notify.conf` (`packaging/systemd/legacy-notify.conf`: `[Service]`, `Type=notify` and `ExecReload=/bin/kill -HUP $MAINPID`) by testing the feature offline, not by `systemctl --version` (EL9 has `Type=notify-reload` since 252-21): a probe unit with `Type=notify-reload` run through `systemd-analyze verify --man=no` prints "Failed to parse service type" only where the type is unknown. The probe needs no systemd as PID 1 (image builds, chroots) and is not fooled by the drop-in itself. Postinstall installs the drop-in where the probe says so and removes it elsewhere (also after an upgrade of systemd); postremove deletes it; then `systemctl daemon-reload`. `docs/install.md` gives the same commands.
+- **systemd unit** (`packaging/systemd/gosftpd.service`, here without its comments; all directives are documented in man systemd; `Type=notify-reload` requires systemd ≥ 253, or EL9's 252-21):
 
 ```ini
 [Unit]
 Description=gosftpd SFTP server
-Documentation=man:gosftpd(1)
+Documentation=https://github.com/o-kolomoiets/go-sftp-server/blob/main/docs/install.md
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/srv/sftp
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=notify-reload
@@ -1409,10 +1421,14 @@ ExecStart=/usr/bin/gosftpd serve --config /etc/gosftpd/config.toml
 User=gosftpd
 Group=gosftpd
 StateDirectory=gosftpd
+StateDirectoryMode=0700
 LogsDirectory=gosftpd
+LogsDirectoryMode=0750
 ReadWritePaths=-/srv/sftp
 UMask=0027
 Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=2
 TimeoutStopSec=45
 KillMode=mixed
 LimitNOFILE=131072
@@ -1439,7 +1455,7 @@ RemoveIPC=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self
-SystemCallFilter=~@privileged
+SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 
@@ -1447,13 +1463,18 @@ CapabilityBoundingSet=
 WantedBy=multi-user.target
 ```
 
-Notes on the unit file:
-- We do not add `~@resources`: with `SystemCallErrorNumber=EPERM`, a `setrlimit` call would get EPERM, and Go would keep running with the old limit. That is why `LimitNOFILE` is set explicitly.
-- Landlock requires its syscalls to be allowed explicitly: `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self` are not part of `@system-service`, and without this line `BestEffort()` silently applies nothing. The `@sandbox` group appeared only in systemd 254, and on Debian 12 and RHEL 9 (252) it is silently ignored, so the syscalls are listed by name.
-- `ReadWritePaths=-/srv/sftp` with the `-` prefix: without it, the unit fails with 226/NAMESPACE if the directory does not exist. `RequiresMountsFor=` prevents the service from starting before the data disk is mounted (§6.1 item 9). If the data does not live in `/srv/sftp`, both paths are changed via a drop-in.
-- Port 22 requires `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
+Notes on the unit file (ADR 0011; `systemd-analyze security` scores it 1.2 on systemd 255, the lint job checks it with `--offline=true --threshold=12`, and the `systemd` CI job runs it):
+- `Documentation=` points to `docs/install.md` until the man page exists (M5): `systemd-analyze verify` fails on a missing man page.
+- `~@resources` is denied too: Go raises `RLIMIT_NOFILE` with `prlimit64`, which is in `@default`, not with `setrlimit`, so the limit is not affected (`LimitNOFILE` is still set explicitly). Exec hooks then cannot use `nice`, `ionice`, `taskset`, `chown` or `chgrp` (`~@privileged` holds `@chown`).
+- Landlock requires its syscalls to be allowed explicitly: `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self` are not part of `@system-service`. The `@sandbox` group appeared only in systemd 254, and 252 (Debian 12, EL9) warns "Unknown system call group, ignoring: @sandbox", so the syscalls are listed by name. Without them gosftpd logs `landlock: not available` with the reason "blocked by a seccomp filter" (with `SystemCallErrorNumber=`) or "killed by a seccomp filter" (a filter that kills, such as the interim unit of v0.3), and `server.start` records `landlock` = `blocked` in both cases.
+- `StateDirectoryMode=0700` (host keys) and `LogsDirectoryMode=0750`; the defaults are 0755.
+- `RestartPreventExitStatus=2`: exit 2 is a configuration or file-system-state error (also a mount that cannot be opened), which a restart does not fix; a data disk mounted late is therefore not retried, which `docs/install.md` says. `RestartSec=2s` with at most 5 starts in 60 s stops a runtime failure from restarting forever.
+- `TimeoutStopSec=45` covers the default `shutdown_timeout` + 10 s; at stop gosftpd sends `EXTEND_TIMEOUT_USEC` with its `shutdown_timeout` + 10 s, since a reload can raise it.
+- `ReadWritePaths=-/srv/sftp` with the `-` prefix: without it, the unit fails with 226/NAMESPACE if the directory does not exist. `RequiresMountsFor=` prevents the service from starting before the data disk is mounted (§6.1 item 9). If the data does not live in `/srv/sftp`, both paths are changed via a drop-in, and a writable mount outside them gets a start warning (read-only file system).
+- Port 22 requires `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and `AmbientCapabilities=CAP_NET_BIND_SERVICE` (a drop-in, `docs/install.md`); gosftpd clears the ambient set after binding, before any exec hook can run.
+- Not defaults: `PrivateUsers=yes` (1.1) breaks binding port 22, `IPAddressDeny=` breaks webhooks; `docs/install.md` shows them as options.
 - `AF_UNIX` is needed for sd_notify and journald.
-- For systemd < 253 (Debian 12 and RHEL 9 ship 252), `Type=notify-reload` is not supported; postinstall installs the `legacy-notify.conf` drop-in (see above).
+- For systemd < 253 without the backport (Debian 12, Ubuntu 22.04, EL9 before 252-21), `Type=notify-reload` is not supported; the `legacy-notify.conf` drop-in replaces it, installed where the offline probe says so (see above).
 
 ### 9.5 Signatures, SBOM, provenance
 
@@ -1562,7 +1583,8 @@ Go runtime and process metrics with the names of the Prometheus Go client are ad
 | A stream of advisories in `x/crypto/ssh` (16 in 2026 alone) | high / high | x/crypto as a direct dependency, weekly Dependabot, govulncheck in PRs and on a schedule, a patch release within ≤ 7 days for a reachable vulnerability (§9.6), a golang-announce subscription; ≈ 0.5 pd/mo is built into the estimate |
 | Reliance on undocumented `pkg/sftp` behavior (T2: remapping `r.Filepath`), the global `SetSFTPExtensions` | medium / high | Regression tests on every `pkg/sftp` upgrade; all work with the library is confined to `internal/sftpd` |
 | `pkg/sftp/v2` changes the API and v1 gets frozen | medium / medium | An adapter; ADR 0003; a trial migration in a separate branch once v2.0.0 is released |
-| Gaps in `os.Root` (bind mounts, `/proc`, the chmod race) and new CVEs in the stdlib (GO-2026-4970) | medium / high | Floor go1.26.5, releases built on the latest patch, systemd sandbox, Landlock, symlink and hardlink ban, documentation |
+| Gaps in `os.Root` (bind mounts, `/proc`, the chmod race) and new CVEs in the stdlib (GO-2026-4970) | medium / high | Floor go1.26.5, releases built on the latest patch, systemd sandbox, symlink and hardlink ban, documentation; Landlock (ADR 0011) limits a compromised process to its mounts and files, but does not cover hard links, bind mounts or the chmod race |
+| Landlock turns reloads into restarts: a file in a shared directory replaced by rename, a new or remounted mount, an audit log rotated by rename next to other files | medium / medium | Dedicated directories in the packaged layout, `gosftpd init` creates `users.d`, start warnings and `config validate --check-fs`, `restart_required` and `STATUS=` after a reload, `server.landlock = "off"` (ADR 0011) |
 | Client diversity: `rename` mode breaks sync tools (rclone, paramiko) | high / medium | Stat redirect, append-only resume, `version` mode, interop matrix, honest "known limitations" |
 | Scope creep toward "yet another SFTPGo" | high / high | An ADR with non-goals; issues are closed with a link to the ADR |
 | A single maintainer: time and bus factor | high / high | Small scope, automation (CI, Dependabot, GoReleaser), realistic estimates, decision D17 on the time budget |

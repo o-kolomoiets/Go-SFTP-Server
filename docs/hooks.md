@@ -130,7 +130,9 @@ group or others; symlinks are followed, so `/bin/sh` is checked at its
 target. That is checked at start and on reload, and the owner and mode
 again just before each run: a script that became writable by others is not
 run, and the run counts as failed. On Windows only the location is
-checked.
+checked. On Linux an exec hook turns Landlock off for the whole process
+(see [Sandboxes and containers](#sandboxes-and-containers)); webhooks do
+not.
 
 The program gets:
 
@@ -332,10 +334,11 @@ mount and path, so that it can be replayed. A restart can drop up to rate ×
 `delay` events of a delayed hook.
 
 A stop then takes up to `shutdown_timeout` + 8 seconds. With hooks, keep
-`shutdown_timeout` at least 10 seconds below systemd's `TimeoutStopSec` and
-Docker's `stop_grace_period`. A systemd unit should set `KillMode=mixed`,
-so that only gosftpd gets SIGTERM and what hooks left is killed once it has
-exited.
+`shutdown_timeout` at least 10 seconds below Docker's `stop_grace_period`;
+under systemd, gosftpd extends `TimeoutStopSec` to `shutdown_timeout` + 10
+seconds when it stops, if that is longer. A systemd unit should set
+`KillMode=mixed`, as the shipped one does, so that only gosftpd gets
+SIGTERM and what hooks left is killed once it has exited.
 
 ## Reload
 
@@ -357,8 +360,10 @@ stays connected for days.
 - A hook whose program fails its checks is left out until a reload fixes
   it. One whose `secret_file` cannot be used keeps its running secret. Both
   give a warning, are counted in `gosftpd_hooks_not_updated`, and do not
-  fail the reload. A hook file inside a mount fails the reload, as every
-  file gosftpd trusts does.
+  fail the reload. Under Landlock an exec hook that a reload adds is left
+  out and counted the same way, until a restart
+  ([Sandboxes and containers](#sandboxes-and-containers)). A hook file
+  inside a mount fails the reload, as every file gosftpd trusts does.
 
 ## Logs and metrics
 
@@ -374,22 +379,53 @@ With the admin listener on ([metrics.md](metrics.md)):
 | `gosftpd_hook_deliveries_total{type, result}` | Once per event and hook, at its final outcome: `type` is `exec` or `webhook`, `result` is `ok`, `failed`, `skipped` (exec: the file changed) or `dropped`. |
 | `gosftpd_hook_retries_total` | Webhook attempts after the first. |
 | `gosftpd_hook_queue_length` | Events queued or being delivered, of all hooks; with a delay, normally rate × delay. |
-| `gosftpd_hooks_not_updated` | Hooks the last reload left out or kept at their running secret. Alert when above 0. |
+| `gosftpd_hooks_not_updated` | Hooks the last reload left out (a program that fails its checks, or, under Landlock, an exec hook the reload added) or kept at their running secret. Alert when above 0; for an exec hook left out under Landlock the remedy is a restart. |
 
 ## Sandboxes and containers
 
-An exec hook runs as gosftpd's user and inherits its sandbox. Under a
-systemd unit with `ProtectSystem=strict`, it can write only the paths the
-unit allows (`ReadWritePaths=`, the state and log directories); `PrivateTmp`
-gives it a private `/tmp`, `ProtectHome` hides `/home`,
-`MemoryDenyWriteExecute=yes` stops JIT runtimes such as node or java, and
-`NoNewPrivileges` stops sudo. A hook that writes elsewhere needs a drop-in:
+An exec hook runs as gosftpd's user and inherits its sandbox. Under the
+shipped systemd unit ([install.md](install.md)), with
+`ProtectSystem=strict`, it can write only the paths the unit allows
+(`ReadWritePaths=`, the state and log directories, so also the host keys
+and the audit log); `PrivateTmp` gives it a private `/tmp`, `ProtectHome`
+hides `/home`, `MemoryDenyWriteExecute=yes` stops JIT runtimes such as node
+or java, and `NoNewPrivileges` stops sudo. The unit's system call filter
+denies `@resources` and `@privileged`, so `nice`, `ionice`, `taskset`,
+`chown` and `chgrp` fail with "Operation not permitted", and so do
+`install -g`, `cp -p` and `rsync -a` where they keep a group. A hook never
+gets a capability, also not when the unit grants one for port 22. A hook
+that writes elsewhere needs a drop-in:
 
 ```ini
 # /etc/systemd/system/gosftpd.service.d/archive.conf
 [Service]
 ReadWritePaths=/srv/archive
 ```
+
+With `AmbientCapabilities=CAP_NET_BIND_SERVICE` (to bind port 22) a hook
+would inherit the capability: gosftpd clears its ambient capabilities, on
+every thread, once its listeners are bound and before any hook can run.
+
+On Linux gosftpd confines itself with Landlock
+([security.md](security.md#landlock)) only while no exec hook is
+configured: a hook needs the loader, its libraries and whatever it
+touches. With an exec hook the log says `landlock: not applied` with
+`reason="exec hooks configured"`, `server.start` records `not_applied`, and
+`server.landlock = "required"` is refused. A reload that adds an exec hook
+while Landlock is applied leaves the hook out, with a warning, counts it
+in `gosftpd_hooks_not_updated` and names `hooks` in `restart_required`, at
+every reload until a restart; after a restart gosftpd runs it, without
+Landlock. Webhooks work under
+Landlock: the TLS roots are loaded at start, and name resolution reads
+`/etc/hosts`, `/etc/nsswitch.conf` and `/etc/resolv.conf` through rules on
+these files. One of them replaced by rename after the start
+(NetworkManager or dhclient rewriting `/etc/resolv.conf`, `sed -i` on
+`/etc/hosts`) cannot be read any more, and Go's resolver then quietly asks
+127.0.0.1:53 instead. Every reload, and every webhook that fails on name
+resolution, then logs the warning `landlock` with "/etc/resolv.conf was
+replaced after start; webhooks resolve names again after a restart". A
+systemd-resolved stub (`/etc/resolv.conf` a link into
+`/run/systemd/resolve`) replaced in its own directory stays readable.
 
 In a container without an init, gosftpd is PID 1 and does not reap what an
 exec hook leaves; it warns about it. Run the container with `docker run

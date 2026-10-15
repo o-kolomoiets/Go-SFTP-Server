@@ -14,11 +14,15 @@ import (
 // no value comes from a client (ADR 0009).
 var (
 	// ConnResults are the results of gosftpd_connections_total: those of
-	// conn.close, then no_version (the client sent nothing) and
+	// conn.close, then no_version (the client sent nothing),
 	// handshake_failed (it sent something, but never reached
-	// authentication).
-	ConnResults    = []string{"ok", "error", "idle_timeout", "keepalive_timeout", "revoked", "no_version", "handshake_failed"}
-	RefusedReasons = []string{"banned", "max_connections", "max_connections_per_ip", "max_preauth_connections", "audit_unavailable"}
+	// authentication) and untrusted_proxy (it began with a PROXY protocol
+	// header that gosftpd does not trust, ADR 0011).
+	ConnResults = []string{"ok", "error", "idle_timeout", "keepalive_timeout", "revoked", "no_version", "handshake_failed", "untrusted_proxy"}
+	// RefusedReasons are the reasons of gosftpd_connections_refused_total;
+	// proxy_header is a connection from a trusted proxy without a valid
+	// PROXY protocol header (ADR 0011).
+	RefusedReasons = []string{"banned", "max_connections", "max_connections_per_ip", "max_preauth_connections", "audit_unavailable", "proxy_header"}
 	AuthMethods    = []string{"publickey", "password", "other"}
 	Ops            = []string{"upload", "download", "rename", "mkdir", "rmdir", "remove", "setstat", "list", "stat", "other"}
 	OpResults      = []string{"ok", "denied", "not_found", "error", "aborted"}
@@ -102,7 +106,7 @@ func NewMetrics(version string) *Metrics {
 	m.hooks = newCounterVec(r, "gosftpd_hook_deliveries_total", "Hook deliveries, once per event and hook at the final outcome, by hook type and result.",
 		Label{"type", HookKinds}, Label{"result", HookResults})
 	m.hookRetries = newCounter(r, "gosftpd_hook_retries_total", "Webhook attempts after the first.")
-	m.hooksStale = newGauge(r, "gosftpd_hooks_not_updated", "Hooks the last reload kept at their running secret or left out because of a file problem.")
+	m.hooksStale = newGauge(r, "gosftpd_hooks_not_updated", "Hooks the last reload kept at their running secret or left out: because of a file problem, or exec hooks it added under Landlock.")
 	m.reloadOK.Set(1)
 	m.reloadTime.Set(unixSeconds(time.Now()))
 
@@ -164,6 +168,18 @@ func (m *Metrics) ConnectionEnded(result string) {
 // one of RefusedReasons.
 func (m *Metrics) ConnectionRefused(reason string) {
 	if m != nil {
+		m.refused.Add(1, reason)
+	}
+}
+
+// ConnectionEndedRefused ends an admitted connection that was refused
+// before the handshake, for one of RefusedReasons: a connection from a
+// trusted proxy is admitted before its PROXY protocol header names the
+// client (ADR 0011). It is no longer active and counts as refused, not in
+// gosftpd_connections_total.
+func (m *Metrics) ConnectionEndedRefused(reason string) {
+	if m != nil {
+		m.connsActive.Add(-1)
 		m.refused.Add(1, reason)
 	}
 }

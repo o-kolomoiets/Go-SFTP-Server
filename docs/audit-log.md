@@ -25,7 +25,8 @@ once known, the context fields:
 | Field | Meaning |
 |---|---|
 | `conn_id` | Random ID of the SSH connection (16 hex digits). |
-| `remote_addr`, `local_addr` | Client and server address. |
+| `remote_addr`, `local_addr` | Client and server address. Behind a trusted proxy (`server.trusted_proxies`), the client and the address it connected to as the PROXY protocol header names them; for the proxy's own connections (`LOCAL`, `UNKNOWN`) and before the header is read, the proxy's and the socket's. |
+| `proxy_addr` | The trusted proxy the connection came from (the TCP peer), on every event of such a connection, refusals included. With `LOCAL` or `UNKNOWN` it equals `remote_addr`. |
 | `user` | Authenticated user. |
 | `session_id` | Random ID of the SFTP session within the connection. |
 
@@ -36,11 +37,11 @@ never host paths. Strings from clients are JSON-escaped.
 
 | Event | Category | Fields |
 |---|---|---|
-| `server.start` | server | `version`, `listen`; `metrics_listen` with an admin listener ([metrics.md](metrics.md)) |
-| `server.reload` | server | `result` (`ok` or `error`), `duration_ms`; on error `reason`: `config` (the configuration cannot be read or is invalid), `mounts` or `audit_output` (the new `audit.output` cannot be opened); on success `restart_required` (comma-separated keys that changed but apply only at restart) and `disconnected` (connections closed by `reload.disconnect_removed_users`). The error itself goes to the operational log, since it can name host paths |
+| `server.start` | server | `version`, `listen`; `metrics_listen` with an admin listener ([metrics.md](metrics.md)); on Linux `landlock`: `v2` to `v5` (the Landlock ABI applied), `off`, `unavailable` (no Landlock in the kernel, or disabled at boot), `blocked` (a seccomp filter) or `not_applied` (ABI 1, exec hooks, a rule on `/`); see [Landlock](security.md#landlock); `trusted_proxies` (comma-separated, as gosftpd reads them: `10.0.0.5/32,10.0.1.0/28`) when proxies are trusted |
+| `server.reload` | server | `result` (`ok` or `error`), `duration_ms`; on error `reason`: `config` (the configuration cannot be read or is invalid), `mounts` or `audit_output` (the new `audit.output` cannot be opened); on success `restart_required` (comma-separated keys that changed but apply only at restart, and under Landlock the keys whose files or directories the ruleset applied at start does not cover, see [Landlock](security.md#landlock)) `disconnected` (connections closed by `reload.disconnect_removed_users`) and `trusted_proxies` as in `server.start`, when proxies are trusted after the reload. The error itself goes to the operational log, since it can name host paths |
 | `server.stop` | server | |
 | `server.audit_recovered` | server | written when the log works again after a failure |
-| `conn.reject` | conn | `reason`: `banned`, `max_connections`, `max_connections_per_ip` or `max_preauth_connections`; `suppressed` (see below) |
+| `conn.reject` | conn | A connection refused before the SSH handshake. `reason`: `banned`, `max_connections`, `max_connections_per_ip` or `max_preauth_connections`; `proxy_header` (a peer in `server.trusted_proxies` sent no valid PROXY protocol header: none, an incomplete or invalid one, one for a client that is not on TCP, or a loopback client from a proxy on another host); `untrusted_proxy` (the connection began with a PROXY protocol header, after the server's banner, from a peer that is not trusted or behind a trusted proxy's own header). Behind a trusted proxy, the ban and `max_connections_per_ip` apply to the client the header names, which is then `remote_addr`. `suppressed` (see below) |
 | `conn.accept` | conn | `client_version`; written after the key exchange, when the client starts to authenticate |
 | `conn.close` | conn | `duration_ms`, `result` (`ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked`: a reload refused the login, or closed the connection with `reload.disconnect_removed_users`) |
 | `conn.hostkeys_proved` | conn | `key_fps` (comma-separated SHA256 fingerprints): the client asked the server to prove that it holds these host keys, which it did not know, and it now adds them to `known_hosts` (OpenSSH `UpdateHostKeys`; see [Host keys](configuration.md#host-keys)). During a rotation, it shows which users' clients learned the next key |
@@ -72,7 +73,9 @@ temporary file is removed.
 Connections that end before they start to authenticate (health checks,
 port scanners, `ssh-keyscan`, clients without a common algorithm) are not
 audited; the metric `gosftpd_connections_total` counts them as `no_version`
-or `handshake_failed` ([metrics.md](metrics.md)). Refused connections
+or `handshake_failed` ([metrics.md](metrics.md)). The health checks of a
+trusted proxy are among them: they send nothing, or a PROXY protocol
+`LOCAL` header and nothing more. Refused connections
 (`conn.reject`) are logged at most 10 per second; the next `conn.reject`
 written reports how many were left out in `suppressed`.
 
@@ -112,5 +115,19 @@ If the file cannot be opened again (for example because logrotate created it
 with the wrong owner), gosftpd closes the rotated file and every write fails
 until the file can be opened: with `on_error = "fail-closed"` it refuses
 connections and changes, and the events go to stderr. It retries every 5
-seconds and recovers on its own. `copytruncate` works too: the file is opened
-with `O_APPEND`, so truncating it leaves no hole.
+seconds and recovers on its own, with one exception under Landlock (below).
+`copytruncate` works too: the file is opened with `O_APPEND`, so truncating
+it leaves no hole.
+
+Under Landlock (Linux, [configuration.md](configuration.md#landlock)) gosftpd
+may create files only in an audit directory that holds nothing but the
+audit log and its rotated copies, as `/var/log/gosftpd` in the packaged
+layout does. Elsewhere, for example next to the configuration file, only
+the file itself has a rule, and it does not recover on its own: once
+logrotate has renamed it, gosftpd can neither create the new file nor open
+the one logrotate created until a restart. The reload names
+`audit.output` in `restart_required`, the operational log adds "outside the
+Landlock ruleset applied at start; restart gosftpd", and with `on_error =
+"fail-closed"` every new connection is refused meanwhile. Give the audit log
+a directory of its own, or use `copytruncate`. `gosftpd config validate
+--check-fs` and the start warn about this layout.

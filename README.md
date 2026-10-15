@@ -412,7 +412,7 @@ wrong, [open an issue](https://github.com/o-kolomoiets/go-sftp-server/issues).
 ## Client compatibility
 
 CI tests every change with OpenSSH `sftp` and `scp`, paramiko, rclone and
-lftp. Things to know:
+lftp, directly and through HAProxy and nginx. Things to know:
 
 - `scp` works over the SFTP protocol, the default since OpenSSH 9.0; legacy
   `scp -O` does not.
@@ -447,11 +447,13 @@ go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest
 ```
 
 Not there yet: Windows and FreeBSD binaries, a Docker image, deb/rpm
-packages, a systemd unit, and signed releases (the checksums are SHA-256 and
-unsigned). Until then any process supervisor works: on SIGTERM gosftpd gives
-running transfers 30 seconds to finish, a second signal stops it at once,
-and v0.3.0 ignores SIGHUP, so restart it to apply a changed configuration.
-To run it as a service under its own user, see the v0.3.0
+packages, and signed releases (the checksums are SHA-256 and unsigned).
+From v0.4 the Linux archives carry a systemd unit with its user and
+directories; [docs/install.md](docs/install.md) installs it, with the
+binary in `/usr/bin`. With v0.3.0 any process supervisor works: on SIGTERM
+gosftpd gives running transfers 30 seconds to finish, a second signal stops
+it at once, and v0.3.0 ignores SIGHUP, so restart it to apply a changed
+configuration. To run v0.3.0 as a service under its own user, see its
 [quickstart](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/quickstart.md#running-it-as-a-service) and
 [hardening guide](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security/hardening.md).
 
@@ -474,6 +476,9 @@ To run it as a service under its own user, see the v0.3.0
 | Host key rotation without the `REMOTE HOST IDENTIFICATION HAS CHANGED` warning (OpenSSH 8.5+ clients), host certificates | | ✓ |
 | Prometheus `/metrics` (22 `gosftpd_*` metrics, no user, path or address in any label), `/healthz`, `/readyz`, `gosftpd healthcheck` | | ✓ |
 | Hooks: a signed webhook or a program when a file arrives, also for WinSCP and rclone temp-file uploads | | ✓ |
+| PROXY protocol behind HAProxy, nginx or a cloud load balancer: bans, limits and the audit log see the client, not the load balancer | | ✓ |
+| A sandboxed systemd unit (`systemd-analyze security` 1.2) with sysusers and tmpfiles files, [install guide](docs/install.md) | | ✓ |
+| Landlock on Linux, on by default without exec hooks: once started, gosftpd can open only its mounts, configuration, keys and audit log ([security model](docs/security.md#landlock)) | | ✓ |
 
 To try `main` today: `init` sets you up, and `user add --write` adds a
 partner and prints the host, port, host key fingerprint and `sftp` command to
@@ -507,6 +512,7 @@ These pages describe `main`. For the v0.3.0 release, read them
 v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 
 - [Quickstart](docs/quickstart.md): from nothing to a first upload, and running it as a service
+- [Install as a Linux service](docs/install.md): the systemd unit, its user and directories (on `main`)
 - [Configuration](docs/configuration.md): every key, with its default
 - [Security model](docs/security.md), [threat model](docs/security/threat-model.md) and [hardening guide](docs/security/hardening.md)
 - [Audit log](docs/audit-log.md): events, fields and the schema promise
@@ -519,7 +525,7 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 | Version | Status | What's in it |
 |---|---|---|
 | v0.3.0 | **released** 2026-10-09 | Connection limits and bans, password login, versions, atomic uploads, size limits, fuzzing, ssh-audit in CI |
-| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks). To do: PROXY protocol v2, a systemd unit, Landlock |
+| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol, a systemd unit, Landlock |
 | v0.5 | planned | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
 | v1.0 | planned | Compatibility freeze, benchmarks against OpenSSH, OpenSSF Best Practices badge |
 

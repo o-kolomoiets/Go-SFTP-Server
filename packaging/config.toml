@@ -1,0 +1,23 @@
+# gosftpd configuration, installed as /etc/gosftpd/config.toml (root:gosftpd,
+# 0640). Every key: gosftpd config example --full, or docs/configuration.md.
+# Check it as the service user:
+#   runuser -u gosftpd -- gosftpd config validate --check-fs --config /etc/gosftpd/config.toml
+config_version = 1
+
+# Users live in users.d/NAME.toml, written by:
+#   gosftpd user add NAME --key FILE --access inbox=upload --write
+# then: systemctl reload gosftpd
+include = ["users.d/*.toml"]
+
+[server]
+listen = [":2022"]
+host_keys = ["/var/lib/gosftpd/ssh_host_ed25519_key"]
+host_key_auto_generate = true
+
+# Another data path needs a drop-in for the unit (docs/install.md).
+[mounts.inbox]
+path = "/srv/sftp/inbox"
+create = true
+
+[audit]
+output = "/var/log/gosftpd/audit.jsonl"

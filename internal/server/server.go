@@ -96,6 +96,13 @@ type Config struct {
 	// DisconnectRevoked makes Reload close the connections whose login the
 	// new configuration would refuse (reload.disconnect_removed_users).
 	DisconnectRevoked bool
+
+	// TrustedProxies are the peers whose connections begin with a PROXY
+	// protocol header that names the client (ADR 0011): unmapped
+	// addresses and prefixes, none of length 0. A connection from another
+	// peer that begins with a header is refused. Each connection is
+	// classified by the configuration current at its accept.
+	TrustedProxies []netip.Prefix
 }
 
 // Server serves SFTP over SSH.
@@ -107,6 +114,8 @@ type Server struct {
 	hooks   *hooks.Dispatcher
 	limits  *limiter
 	rejects rejectLog
+	// Warnings about PROXY protocol headers, at most one a minute each.
+	headerWarn, untrustedWarn warnLimit
 
 	// snap is the configuration for new logins (see snapshot).
 	snap atomic.Pointer[snapshot]
@@ -135,6 +144,7 @@ type snapshot struct {
 	announced           []ssh.Signer // host keys, then announced-only keys
 	publicKey, password bool         // enabled methods
 	bans                *auth.BanTable
+	trusted             []netip.Prefix // trusted proxies, masked
 }
 
 // New validates cfg and returns a Server. The caller keeps cfg.Mounts open
@@ -224,7 +234,11 @@ func (s *Server) newSnapshot(cfg Config) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	sn := &snapshot{bans: cfg.Bans, announced: announced}
+	trusted, err := checkTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
+	sn := &snapshot{bans: cfg.Bans, announced: announced, trusted: trusted}
 	for _, m := range cfg.Methods {
 		switch m {
 		case auth.MethodPublicKey:
@@ -352,48 +366,85 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// admit applies bans and connection limits to a new connection. It closes
-// a refused connection, before the SSH handshake, and returns nil.
+// admit applies bans and connection limits to a new connection, without
+// I/O: it runs in the accept loop. A connection from a trusted proxy is
+// held to max_connections and max_preauth_connections only; the ban and
+// max_connections_per_ip apply to the client its header names
+// (admitClient). admit closes a refused connection, before the SSH
+// handshake, and returns nil.
 func (s *Server) admit(c net.Conn) *admission {
+	sn := s.snap.Load()
 	ip, isIP := auth.SourceAddr(c.RemoteAddr())
+	trusted := isIP && sn.trusts(ip)
 	var src netip.Prefix
-	if isIP {
+	if isIP && !trusted {
 		src = auth.SourceKey(ip)
 	}
 	var (
 		reason string
 		adm    *admission
 	)
-	switch bans := s.snap.Load().bans; {
+	switch {
 	case !s.audit.Healthy():
 		reason = rejectAudit
-	case isIP && bans != nil && bans.Banned(ip):
+	case src.IsValid() && sn.bans != nil && sn.bans.Banned(ip):
 		reason = rejectBanned
 	default:
 		adm, reason = s.limits.admit(src)
 	}
 	if adm != nil {
+		adm.trusted = trusted
 		return adm
 	}
 	_ = c.Close()
 	s.metrics.ConnectionRefused(reason)
+	// The header is not read yet: a trusted proxy's connection has the
+	// proxy's address.
+	peer := c.RemoteAddr().String()
+	kv := []any{"remote_addr", peer}
+	if trusted {
+		kv = append(kv, "proxy_addr", peer)
+	}
 	if reason == rejectAudit {
-		s.log.Warn("refusing connection: audit log unavailable", "remote_addr", c.RemoteAddr().String())
+		s.log.Warn("refusing connection: audit log unavailable", kv...)
 		return nil
 	}
-	s.log.Debug("connection refused", "remote_addr", c.RemoteAddr().String(), "reason", reason)
-	if ok, suppressed := s.rejects.allow(time.Now()); ok {
-		attrs := []slog.Attr{
-			slog.String("remote_addr", c.RemoteAddr().String()),
-			slog.String("local_addr", c.LocalAddr().String()),
-			slog.String("reason", reason),
-		}
-		if suppressed > 0 {
-			attrs = append(attrs, slog.Int("suppressed", suppressed))
-		}
-		s.audit.Event("conn.reject", attrs...)
+	s.log.Debug("connection refused", append(kv, "reason", reason)...)
+	attrs := []slog.Attr{slog.String("remote_addr", peer), slog.String("local_addr", c.LocalAddr().String())}
+	if trusted {
+		attrs = append(attrs, slog.String("proxy_addr", peer))
 	}
+	s.auditReject(s.audit, reason, attrs...)
 	return nil
+}
+
+// auditReject writes conn.reject, refused before the SSH handshake, at
+// most rejectBurst a second.
+func (s *Server) auditReject(al *audit.Logger, reason string, attrs ...slog.Attr) {
+	ok, suppressed := s.rejects.allow(time.Now())
+	if !ok {
+		return
+	}
+	attrs = append(attrs, slog.String("reason", reason))
+	if suppressed > 0 {
+		attrs = append(attrs, slog.Int("suppressed", suppressed))
+	}
+	al.Event("conn.reject", attrs...)
+}
+
+// admitClient applies the ban and max_connections_per_ip to the client a
+// trusted proxy's header names, or to the proxy itself for LOCAL and
+// UNKNOWN: the second phase of admission. It returns why the connection is
+// refused, or "".
+func (s *Server) admitClient(conn net.Conn, adm *admission) string {
+	ip, isIP := auth.SourceAddr(conn.RemoteAddr())
+	if !isIP {
+		return ""
+	}
+	if bans := s.snap.Load().bans; bans != nil && bans.Banned(ip) {
+		return rejectBanned
+	}
+	return adm.addSource(auth.SourceKey(ip))
 }
 
 // Shutdown waits for in-flight connections to finish; when ctx expires it
@@ -439,12 +490,23 @@ func (s *Server) ServeConn(c net.Conn) {
 func (s *Server) serveConn(c net.Conn, adm *admission) {
 	defer adm.release()
 	// Every admitted connection ends with exactly one result: the one of
-	// conn.close, or why there was none.
+	// conn.close, or why there was none; or, refused before the handshake
+	// once a trusted proxy's header was read, with the reason.
 	s.metrics.ConnectionStarted()
-	result := "error"
-	defer func() { s.metrics.ConnectionEnded(result) }()
+	result, refused := "error", ""
+	defer func() {
+		if refused != "" {
+			s.metrics.ConnectionEndedRefused(refused)
+			return
+		}
+		s.metrics.ConnectionEnded(result)
+	}()
 	connID := newID()
-	log := s.log.With("conn_id", connID, "remote_addr", c.RemoteAddr().String())
+	peer := c.RemoteAddr().String()
+	log := s.log.With("conn_id", connID, "remote_addr", peer)
+	if adm.trusted {
+		log = s.log.With("conn_id", connID, "proxy_addr", peer)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic while serving connection", "panic", r, "stack", string(debug.Stack()))
@@ -454,18 +516,34 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	s.track(c, true)
 	defer s.track(c, false)
 
-	al := s.audit.With("conn_id", connID, "remote_addr", c.RemoteAddr().String(), "local_addr", c.LocalAddr().String())
-
 	sn := s.snap.Load()
 	accepted := sn // its host keys are the connection's
-	ca := s.newConnAuth(c, al)
-	cfg := ca.config(sn)
-
 	start := time.Now()
 	if err := c.SetDeadline(start.Add(sn.cfg.HandshakeTimeout)); err != nil {
 		return
 	}
-	rc := &readConn{Conn: c}
+	// What SSH runs on: for a trusted proxy, the connection after its
+	// header, with the client's addresses.
+	conn := c
+	proxyAddr := ""
+	if adm.trusted {
+		proxyAddr = peer
+		var reason string
+		conn, reason = s.proxied(c, adm, start, sn.cfg.HandshakeTimeout, connID, log)
+		if conn == nil {
+			if reason == "" {
+				result = "no_version" // a TCP health check
+			}
+			refused = reason
+			return
+		}
+		log = log.With("remote_addr", conn.RemoteAddr().String())
+	}
+
+	al := s.audit.With(connContext(connID, conn, proxyAddr)...)
+	ca := s.newConnAuth(conn, al)
+	cfg := ca.config(sn)
+	rc := &readConn{Conn: conn}
 	sconn, chans, reqs, err := ssh.NewServerConn(rc, cfg)
 	adm.authenticated()
 	closed := func(r string) {
@@ -475,6 +553,10 @@ func (s *Server) serveConn(c net.Conn, adm *admission) {
 	if err != nil {
 		log.Debug("handshake failed", "err", err)
 		switch {
+		case rc.header.Load():
+			result = rejectUntrustedProxy
+			s.auditReject(al, rejectUntrustedProxy)
+			s.warnClientHeader(adm.trusted, conn, peer)
 		case !ca.accepted.Load() && !rc.read.Load():
 			result = "no_version" // health checks, port scanners
 		case !ca.accepted.Load():
@@ -570,6 +652,8 @@ type connAuth struct {
 	attemptedUser atomic.Value
 }
 
+// newConnAuth returns the authentication state of a connection; c has the
+// client's address, also behind a trusted proxy.
 func (s *Server) newConnAuth(c net.Conn, al *audit.Logger) *connAuth {
 	ca := &connAuth{s: s, al: al}
 	ca.ip, ca.isIP = auth.SourceAddr(c.RemoteAddr())
@@ -859,16 +943,25 @@ func (s *Server) ActiveBans() int {
 }
 
 // readConn notes whether the client sent anything: a connection closed
-// before the first byte is a health check or a port scan.
+// before the first byte is a health check or a port scan. It fails the
+// connection when the first bytes are a PROXY protocol header (headerCheck),
+// from any peer, also when no proxy is trusted. It is read by one goroutine
+// at a time.
 type readConn struct {
 	net.Conn
-	read atomic.Bool
+	read   atomic.Bool
+	header atomic.Bool // the first bytes were a PROXY protocol header
+	check  headerCheck
 }
 
 func (c *readConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 && !c.read.Load() {
 		c.read.Store(true)
+	}
+	if n > 0 && c.check.scan(p[:n]) {
+		c.header.Store(true)
+		return 0, errClientHeader
 	}
 	return n, err
 }

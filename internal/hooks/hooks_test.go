@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -296,6 +297,41 @@ func TestWebhookGivesUp(t *testing.T) {
 			t.Errorf("log:\n%s", logs)
 		}
 	})
+}
+
+// A webhook that fails on name resolution logs the name-resolution files
+// that Landlock no longer lets gosftpd read; one that fails otherwise does
+// not ask.
+func TestWebhookNameWarnings(t *testing.T) {
+	t.Parallel()
+	for name, failure := range map[string]error{
+		"name resolution": &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "receiver.example", IsNotFound: true}},
+		"refused":         errors.New("dial tcp: connection refused"),
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			log, logs := testLog()
+			var asked int
+			d := New(Options{
+				Log:       log,
+				Transport: &fakeTransport{fn: func(int, *http.Request) (*http.Response, error) { return nil, failure }},
+				NameWarnings: func() []string {
+					asked++
+					return []string{"/etc/resolv.conf was replaced after start; webhooks resolve names again after a restart"}
+				},
+			})
+			d.Update([]Spec{webhookSpec("notify")})
+			d.Notify(upload("alice", "/a.pdf"))
+			for range 200 {
+				time.Sleep(time.Second)
+			}
+			synctest.Wait()
+			d.Close(time.Now().Add(time.Second))
+			const want = `level=WARN msg=landlock detail="/etc/resolv.conf was replaced after start; webhooks resolve names again after a restart"`
+			if dns := name == "name resolution"; dns != (asked == 1) || dns != strings.Contains(logs.String(), want) {
+				t.Errorf("%s: asked %d times; log:\n%s", name, asked, logs)
+			}
+		})
+	}
 }
 
 // A timeout and a TLS error leave no trace of the URL's path or query in

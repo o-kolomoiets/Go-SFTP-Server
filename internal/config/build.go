@@ -101,6 +101,18 @@ type AuthOptions struct {
 	// <(...), keeps the keys it gave before (Previous).
 	Reload   bool
 	Previous KeyFiles
+	// Explain, if set, rewrites the error that keeps a file's keys or CAs
+	// from being used, for the warning: a reload adds the hint that the
+	// Landlock ruleset applied at start does not cover the file (ADR 0011).
+	Explain func(error) error
+}
+
+// explain applies o.Explain to err.
+func (o AuthOptions) explain(err error) error {
+	if o.Explain == nil {
+		return err
+	}
+	return o.Explain(err)
 }
 
 // BuildAuthenticator is Authenticator with options; it also returns the
@@ -229,7 +241,7 @@ func (o AuthOptions) readCAKeys(c *Config) ([]ssh.PublicKey, []string, error) {
 		case err != nil && !o.Reload:
 			return nil, warns, fmt.Errorf("%s: %w", k, err)
 		case err != nil:
-			warns = append(warns, fmt.Sprintf("%s: %v; its CAs are not trusted", k, err))
+			warns = append(warns, fmt.Sprintf("%s: %v; its CAs are not trusted", k, o.explain(err)))
 		default:
 			ks, ws := auth.ParseCAKeys(data, f)
 			cas = append(cas, ks...)
@@ -336,7 +348,9 @@ func (o AuthOptions) readKeys(path, k string) ([]auth.Key, []string, error) {
 	if !o.Reload {
 		return readAuthorizedKeys(path)
 	}
-	unused := func(err error) []string { return []string{fmt.Sprintf("%s: %v; its keys are not used", k, err)} }
+	unused := func(err error) []string {
+		return []string{fmt.Sprintf("%s: %v; its keys are not used", k, o.explain(err))}
+	}
 	fi, err := os.Stat(path)
 	switch {
 	case err != nil:
@@ -410,6 +424,18 @@ func (c *Config) Bans() *auth.BanTable {
 		Duration:      time.Duration(b.Duration),
 		Exempt:        exempt,
 	})
+}
+
+// TrustedProxyPrefixes returns server.trusted_proxies, unmapped and
+// masked. Call after Validate.
+func (c *Config) TrustedProxyPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range c.Server.TrustedProxies {
+		if p, err := ParseTrustedProxy(s); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Grants returns the mounts user may access. In zero-config mode every user

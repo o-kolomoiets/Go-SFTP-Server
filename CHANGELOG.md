@@ -8,6 +8,26 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+When upgrading a server behind a load balancer that sends PROXY protocol
+headers, add the load balancer to `server.trusted_proxies` together with
+the new binary (v0.3 refuses the key), or turn PROXY protocol off on the
+load balancer before the upgrade: headers from any other address are now
+refused (see Changed).
+
+### Upgrading
+
+- A systemd unit with its own `SystemCallFilter=` must allow the three
+  system calls of Landlock: `landlock_create_ruleset`, `landlock_add_rule`
+  and `landlock_restrict_self` (`@system-service` has none of them, and
+  `@sandbox` exists only from systemd 254). Without them gosftpd runs
+  without Landlock and logs `landlock: not available` with the reason
+  "blocked by a seccomp filter" (with `SystemCallErrorNumber=`) or "killed
+  by a seccomp filter" (a filter that kills, such as the one of the
+  interim unit of the v0.3 hardening guide); `server.start` records
+  `landlock` = `blocked` in both cases. The shipped unit allows them; to
+  move to it from the interim unit, see
+  [docs/install.md](docs/install.md#upgrade-from-the-quickstart-or-the-interim-unit).
+
 ### Added
 
 - Reload on SIGHUP (`systemctl reload`): the audit log file is reopened
@@ -20,7 +40,8 @@ Incompatible changes are prefixed with **BREAKING:**.
   configuration. A key file that is missing or unsafe on reload revokes its
   keys instead of failing the reload, and a mount that is unavailable is
   left out until the next reload. A remounted mount directory is opened
-  anew for new logins. See [docs/configuration.md](docs/configuration.md#reload)
+  anew for new logins (under Landlock: after a restart, see Changed). See
+  [docs/configuration.md](docs/configuration.md#reload)
   and [ADR 0005](docs/adr/0005-reload.md).
 - Audit event `server.reload`; `conn.close` result `revoked`.
 - `sd_notify`: `READY=1`, `RELOADING=1` with `MONOTONIC_USEC`, `STOPPING=1`
@@ -114,6 +135,58 @@ Incompatible changes are prefixed with **BREAKING:**.
   hour, of a file whose upload closed ok: the rename that completes a
   temp-file upload (WinSCP's `.filepart`, rclone's `.partial`), or a plain
   upload renamed later. `fs.upload` hooks fire for it.
+- PROXY protocol v1 and v2 behind a load balancer
+  ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md)): a connection from
+  an address in the new `server.trusted_proxies` must begin with a PROXY
+  protocol header, which names the client. Bans, `max_connections_per_ip`,
+  `allow_from`, `from=`, certificate `source-address` and the audit log's
+  `remote_addr` and `local_addr` then see the client, and the new context
+  field `proxy_addr` names the load balancer. `LOCAL` and `UNKNOWN` headers
+  (health checks, clients of a Unix socket front end) are the load
+  balancer's own connections. A trusted peer that sends no valid header is
+  refused (`conn.reject` with `reason=proxy_header`,
+  `gosftpd_connections_refused_total{reason="proxy_header"}`); one that sends
+  nothing at all, as a TCP health check, is not audited. The setting is
+  reloadable, and `server.start` and `server.reload` record it.
+  `gosftpd healthcheck` sends a `LOCAL` header when its own address is
+  trusted. Tested with HAProxy and nginx. See
+  [docs/configuration.md](docs/configuration.md#behind-a-load-balancer).
+- A systemd unit, `packaging/systemd/gosftpd.service`, with sysusers and
+  tmpfiles files and a drop-in for systemd before 253, in the Linux release
+  archives ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md)):
+  `Type=notify-reload`, a sandbox that `systemd-analyze security` scores
+  1.2 on systemd 255 (CI checks it), and no restart after a configuration
+  error (exit status 2). [docs/install.md](docs/install.md) installs it in
+  the layout of the coming packages and covers another data path, mounts
+  under `/home`, port 22, older systemd and the upgrade from the interim
+  unit.
+- After a reload, the status line of `systemctl status` names the settings
+  that need a restart (`configuration reloaded; restart needed for:
+  server.listen`, at most five), besides `configuration reloaded` and
+  `configuration reload failed, see the log`.
+- At stop, gosftpd asks systemd for `shutdown_timeout` + 10 s
+  (`EXTEND_TIMEOUT_USEC`), so that `TimeoutStopSec` does not cut off a
+  drain that a reload made longer.
+- A warning at start, at reload and in `config validate --check-fs` when a
+  writable mount is on a read-only file system (under systemd: outside
+  `ReadWritePaths=`). Uploads there failed with a bare "Failure" and
+  nothing in the log.
+- Landlock on Linux ([ADR 0011](docs/adr/0011-proxy-systemd-landlock.md),
+  [docs/security.md](docs/security.md#landlock)): once its listeners are
+  bound, `serve` can open only its mounts, its configuration and key files,
+  its audit log, `/proc/self` and the files name resolution reads.
+  `server.landlock` (restart-only) is `"auto"`, the default: applied where
+  it can be, and the log says why not elsewhere (no Landlock in the kernel,
+  a seccomp filter that blocks it, ABI 1, exec hooks, a mount at `/`);
+  `"required"`, which makes each of these an error at start (exit status
+  2); or `"off"`. Any other failure to apply it fails the start (exit
+  status 1). The log says `landlock: ABI vN applied`, and `server.start`
+  records `landlock` (`v2` to `v5`, `off`, `unavailable`, `blocked`,
+  `not_applied`). A directory gets a rule only when every entry in it is a
+  file the configuration names; elsewhere the files get rules of their
+  own, with a warning at start, which `config validate --check-fs` prints
+  too. `config validate` refuses `required` with exec hooks. New
+  dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
 
 ### Changed
 
@@ -148,6 +221,44 @@ Incompatible changes are prefixed with **BREAKING:**.
   with a warning, now take effect: check existing files before upgrading. In
   zero-config mode without `--user`, a `cert-authority` line needs
   `principals=`.
+- **BREAKING:** a connection that begins with a PROXY protocol header (v1 or
+  v2) from a peer that is not in `server.trusted_proxies` is closed after
+  the server's banner, also when no proxy is trusted: `conn.reject` with
+  `reason=untrusted_proxy`, `gosftpd_connections_total{result="untrusted_proxy"}`
+  and a warning in the log. Before, a v1 header, and a v2 header whose last
+  byte is a line feed, were skipped, and every client was logged, banned and
+  limited with the load balancer's address; other v2 headers failed the
+  handshake.
+  If a load balancer sends PROXY protocol to gosftpd, list it in
+  `server.trusted_proxies` (reload gosftpd first, then the load balancer),
+  or turn PROXY protocol off on the load balancer.
+- `conn.reject` means a connection refused before the SSH handshake: for
+  `untrusted_proxy` that is after the server's banner, and from a trusted
+  load balancer after its header.
+- On Linux, with Landlock applied (the default where the kernel offers
+  it), a reload cannot reach beyond the rules applied at start
+  ([docs/configuration.md](docs/configuration.md#landlock)): a new or moved
+  mount, or a mount directory recreated or remounted since the start, is
+  unavailable; `read_only = false`, `create = true` and a new
+  `audit.output` that the rules do not allow keep their running values; an
+  exec hook added by the reload is left out; a key, CA or secret file in a
+  shared directory replaced by rename is left out as an unreadable one is.
+  Each is named in `restart_required`; such an include file, revocation
+  list or the configuration file itself (`sed -i`, most editors) fails the
+  reload instead, until a restart. The log adds "outside the Landlock
+  ruleset applied at start; restart gosftpd". An audit log that shares its
+  directory with other files cannot be rotated by rename without a
+  restart: give it a directory of its own or use `copytruncate`. An
+  `audit.output` on `/dev/stderr` is no longer reopened at reload. Keep the
+  configuration, `users.d` and key files in directories of their own, as
+  the packaged layout does, or set `server.landlock = "off"`.
+- `gosftpd init` also creates an empty `users.d/` next to the file: under
+  Landlock an include directory that is missing at start needs a restart
+  for its first file.
+- Exec hooks no longer inherit ambient capabilities: once its listeners
+  are bound, before any hook can run, `serve` clears the ambient set on
+  every thread (with `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port
+  22 a hook inherited the capability).
 
 ### Fixed
 

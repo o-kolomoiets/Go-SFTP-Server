@@ -10,15 +10,19 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/pires/go-proxyproto"
 	"github.com/spf13/cobra"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
 
@@ -65,10 +69,16 @@ Without --url it connects to the SSH listener and waits for the server's
 SSH banner, then closes the connection without sending its own: such a probe
 leaves no trace in the audit log. The address is --address, else
 $GOSFTPD_LISTEN, else the first server.listen of the configuration file that
-serve would read (only that key is read), else :2022. A wildcard address is
-checked on 127.0.0.1, then on ::1. A server that accepts the connection and
-closes it at once is alive but refuses new connections (limits, a ban, or an
-unavailable audit log): that is healthy, unless --ready is given.
+serve would read, else :2022. A wildcard address is checked on 127.0.0.1,
+then on ::1. A server that accepts the connection and closes it at once is
+alive but refuses new connections (limits, a ban, or an unavailable audit
+log): that is healthy, unless --ready is given.
+
+From the same file it reads server.trusted_proxies, also with --address or
+$GOSFTPD_LISTEN: when its own address is a trusted proxy, it sends a PROXY
+protocol LOCAL header before it waits for the banner. Of the file only
+server.listen is read strictly; what cannot be used of
+server.trusted_proxies is named at the end of the line it prints.
 
 With --url it sends GET URL to the admin listener ([metrics] listen); any 2xx
 status is healthy. Use /healthz for liveness and /readyz for readiness.`,
@@ -107,54 +117,109 @@ func runHealthcheck(ctx context.Context, o healthOptions, getenv func(string) st
 		}
 		return checkURL(ctx, o.url, o.timeout, stdout)
 	}
-	addr, err := healthAddress(o, getenv)
+	t, err := healthTargetFor(o, getenv)
 	if err != nil {
 		return err
 	}
-	return checkSSH(ctx, addr, o.timeout, o.ready, stdout)
+	ok, err := checkSSH(ctx, t, o.timeout, o.ready)
+	// A server.trusted_proxies that cannot be used is named on the one line
+	// the check prints, healthy or not (ADR 0009, ADR 0011).
+	if t.note != "" {
+		note := " (server.trusted_proxies: " + oneLine(t.note) + ")"
+		if he, isHealth := errors.AsType[healthError](err); isHealth {
+			return healthError{he.msg + note}
+		}
+		ok += note
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, ok)
+	return nil
 }
 
-// healthAddress returns the SSH address to check: --address, else
+// healthTarget is what the SSH check connects to.
+type healthTarget struct {
+	addr string
+	// trusted are the server's trusted proxies (server.trusted_proxies):
+	// a probe from one of them sends a PROXY protocol LOCAL header.
+	trusted []netip.Prefix
+	// note says why server.trusted_proxies, or some of its entries, could
+	// not be used.
+	note string
+}
+
+// healthTargetFor returns the SSH address to check: --address, else
 // $GOSFTPD_LISTEN, else the first server.listen of the configuration file,
-// else :2022.
-func healthAddress(o healthOptions, getenv func(string) string) (string, error) {
-	addr := o.address
+// else :2022; and server.trusted_proxies of that file, found as serve finds
+// it also when the address does not come from there. Only server.listen
+// can fail the check: server.trusted_proxies is read apart from it, and
+// what cannot be used of it goes into the note.
+func healthTargetFor(o healthOptions, getenv func(string) string) (healthTarget, error) {
+	t := healthTarget{addr: o.address}
 	from := "--address"
-	if addr == "" {
+	if t.addr == "" {
 		if v := getenv(config.EnvListen); v != "" {
-			addr, _, _ = strings.Cut(v, ",")
+			t.addr, _, _ = strings.Cut(v, ",")
 			from = "$" + config.EnvListen
 		}
 	}
-	if addr == "" {
-		path, err := config.Find(o.config, getenv)
+	path, findErr := config.Find(o.config, getenv)
+	if t.addr == "" {
 		switch {
-		case errors.Is(err, config.ErrNotFound):
-		case err != nil:
-			return "", healthError{oneLine(err.Error())}
+		case errors.Is(findErr, config.ErrNotFound):
+		case findErr != nil:
+			return t, healthError{oneLine(findErr.Error())}
 		default:
 			listen, err := config.ReadListen(path)
 			if err != nil {
-				return "", healthError{"cannot read server.listen (pass --address): " + oneLine(err.Error())}
+				return t, healthError{"cannot read server.listen (pass --address): " + oneLine(err.Error())}
 			}
 			if len(listen) > 0 {
-				addr, from = listen[0], "server.listen in "+path
+				t.addr, from = listen[0], "server.listen in "+path
 			}
 		}
 	}
-	if addr == "" {
-		addr, from = ":2022", "the default"
+	if t.addr == "" {
+		t.addr, from = ":2022", "the default"
 	}
-	_, port, err := net.SplitHostPort(addr)
+	_, port, err := net.SplitHostPort(t.addr)
 	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
-		return "", healthError{fmt.Sprintf("%s: %q is not HOST:PORT with a port from 1 to 65535", from, addr)}
+		return t, healthError{fmt.Sprintf("%s: %q is not HOST:PORT with a port from 1 to 65535", from, t.addr)}
 	}
-	return addr, nil
+	switch {
+	case errors.Is(findErr, config.ErrNotFound):
+	case findErr != nil:
+		t.note = findErr.Error() // only with --address or $GOSFTPD_LISTEN
+	default:
+		var err error
+		if t.trusted, err = config.ReadTrustedProxies(path); err != nil {
+			t.note = err.Error()
+		}
+	}
+	return t, nil
 }
 
-// checkSSH connects to addr and waits for the SSH banner, without sending
-// its own version: the server writes no conn.accept for such a probe.
-func checkSSH(ctx context.Context, addr string, timeout time.Duration, ready bool, stdout io.Writer) error {
+// localHeader is the PROXY protocol v2 header of a proxy's own connection
+// (LOCAL, 16 bytes): a probe from a trusted proxy's address sends it, since
+// the server waits for a header from there before it sends its banner. It
+// is the signature, then version 2 with LOCAL, no address family and an
+// address block of length 0.
+var localHeader = append(bytes.Clone(proxyproto.SIGV2), byte(proxyproto.LOCAL), byte(proxyproto.UNSPEC), 0, 0)
+
+// trustedSource reports whether the probe's own address on conn is one of
+// the server's trusted proxies.
+func trustedSource(conn net.Conn, trusted []netip.Prefix) bool {
+	ip, ok := auth.SourceAddr(conn.LocalAddr())
+	return ok && slices.ContainsFunc(trusted, func(p netip.Prefix) bool { return p.Contains(ip) })
+}
+
+// checkSSH connects to t.addr and waits for the SSH banner, without
+// sending its own version: the server writes no conn.accept for such a
+// probe. From a trusted proxy's address it first sends a LOCAL header. It
+// returns the line to print when the server is healthy.
+func checkSSH(ctx context.Context, t healthTarget, timeout time.Duration, ready bool) (string, error) {
+	addr := t.addr
 	host, port, _ := net.SplitHostPort(addr)
 	targets := []string{addr}
 	if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
@@ -180,11 +245,18 @@ func checkSSH(ctx context.Context, addr string, timeout time.Duration, ready boo
 		errs = append(errs, err)
 	}
 	if conn == nil {
-		return unhealthy("%s", errors.Join(errs...)) // every address tried
+		return "", unhealthy("%s", errors.Join(errs...)) // every address tried
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetReadDeadline(deadline)
+		_ = conn.SetDeadline(deadline)
+	}
+	via := ""
+	if trustedSource(conn, t.trusted) {
+		if _, err := conn.Write(localHeader); err != nil {
+			return "", unhealthy("%s: cannot send a PROXY protocol LOCAL header: %s", addr, err)
+		}
+		via = " after a PROXY protocol LOCAL header"
 	}
 	var got []byte
 	buf := make([]byte, maxBannerBytes)
@@ -194,10 +266,9 @@ func checkSSH(ctx context.Context, addr string, timeout time.Duration, ready boo
 		switch banner(got) {
 		case bannerMore:
 		case bannerFound:
-			fmt.Fprintf(stdout, "ok: %s sent an SSH banner\n", addr)
-			return nil
+			return fmt.Sprintf("ok: %s sent an SSH banner%s", addr, via), nil
 		case bannerWrong:
-			return unhealthy("%s answered %q, not SSH-2.0", addr, firstLine(got))
+			return "", unhealthy("%s answered %q, not SSH-2.0", addr, firstLine(got))
 		}
 		if err == nil {
 			continue
@@ -205,16 +276,15 @@ func checkSSH(ctx context.Context, addr string, timeout time.Duration, ready boo
 		var ne net.Error
 		switch {
 		case errors.As(err, &ne) && ne.Timeout():
-			return unhealthy("%s sent no SSH banner within %s", addr, timeout)
+			return "", unhealthy("%s sent no SSH banner within %s", addr, timeout)
 		case len(got) > 0:
-			return unhealthy("%s closed the connection after %d bytes without an SSH banner", addr, len(got))
+			return "", unhealthy("%s closed the connection after %d bytes without an SSH banner", addr, len(got))
 		case ready:
-			return unhealthy("%s accepted the connection and closed it without a banner: the server refuses new connections (connection limits, a ban, or an unavailable audit log)", addr)
+			return "", unhealthy("%s accepted the connection and closed it without a banner: the server refuses new connections (connection limits, a ban, or an unavailable audit log)", addr)
 		}
-		fmt.Fprintf(stdout, "ok: %s accepted the connection and closed it without a banner: the server runs but refuses new connections (connection limits, a ban, or an unavailable audit log)\n", addr)
-		return nil
+		return fmt.Sprintf("ok: %s accepted the connection and closed it without a banner: the server runs but refuses new connections (connection limits, a ban, or an unavailable audit log)", addr), nil
 	}
-	return unhealthy("%s sent no SSH banner in its first %d bytes", addr, maxBannerBytes)
+	return "", unhealthy("%s sent no SSH banner in its first %d bytes", addr, maxBannerBytes)
 }
 
 type bannerState int

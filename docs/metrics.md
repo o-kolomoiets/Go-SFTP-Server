@@ -73,8 +73,8 @@ event.
 |---|---|---|---|
 | `gosftpd_build_info` | gauge | `version`, `goversion` | Always 1. |
 | `gosftpd_connections_active` | gauge | | Admitted connections being served, before and after login. |
-| `gosftpd_connections_total` | counter | `result` | Admitted connections when they end, one result each: `ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked` (the `result` of `conn.close`); `no_version` (the client sent nothing: health checks, port scanners); `handshake_failed` (it sent something but never reached authentication: no common algorithm, `ssh-keyscan`, a bad version line). |
-| `gosftpd_connections_refused_total` | counter | `reason` | Connections refused before the handshake: `banned`, `max_connections`, `max_connections_per_ip`, `max_preauth_connections`, `audit_unavailable`. Exact, unlike the `conn.reject` events, which are limited to 10 per second. |
+| `gosftpd_connections_total` | counter | `result` | Admitted connections when they end, one result each: `ok`, `error`, `idle_timeout`, `keepalive_timeout`, `revoked` (the `result` of `conn.close`); `no_version` (the client sent nothing: health checks, port scanners; from a trusted proxy also nothing but a `LOCAL` header); `handshake_failed` (it sent something but never reached authentication: no common algorithm, `ssh-keyscan`, a bad version line); `untrusted_proxy` (it began with a PROXY protocol header, after the server's banner, from a peer not in `server.trusted_proxies` or behind a trusted proxy's own header; audited as `conn.reject`). |
+| `gosftpd_connections_refused_total` | counter | `reason` | Connections refused before the handshake: `banned`, `max_connections`, `max_connections_per_ip`, `max_preauth_connections`, `audit_unavailable`, `proxy_header` (a peer in `server.trusted_proxies` sent no valid PROXY protocol header). Exact, unlike the `conn.reject` events, which are limited to 10 per second; `conn.reject` with `reason=untrusted_proxy` is counted in `gosftpd_connections_total` instead, since that connection was refused only after the server's banner. A connection from a trusted proxy is admitted, and counted in `gosftpd_connections_active`, before its header names the client: when the ban or `max_connections_per_ip` of the client, or `proxy_header`, refuses it then, it counts here and not in `gosftpd_connections_total`. A refused connection counts in one of the two, never in both. |
 | `gosftpd_logins_total` | counter | `result` | Connections that reached authentication: `success` or `failure` (as `auth.success` and `auth.failure`). |
 | `gosftpd_auth_attempts_total` | counter | `method` (`publickey`, `password`, `other`), `result` (`success`, `failure`) | Authentication requests other than `none`. A key the server does not accept counts as a failure: an SSH agent that offers several keys makes several. |
 | `gosftpd_sftp_operations_total` | counter | `op`, `result` | One per SFTP operation when it ends; a transfer when it is closed, or when its open fails. `op`: `upload`, `download`, `rename`, `mkdir`, `rmdir`, `remove`, `setstat`, `list`, `stat`, `other` (symlink, link, readlink, statvfs). `result`: `ok`, `denied`, `not_found`, `error`, `aborted` (a transfer cut off by the end of the session). Counted whatever `audit.events` records. |
@@ -92,7 +92,7 @@ event.
 | `gosftpd_hook_deliveries_total` | counter | `type` (`exec`, `webhook`), `result` (`ok`, `failed`, `skipped`, `dropped`) | Once per event and hook, at its final outcome ([hooks.md](hooks.md)). `skipped`: an exec hook whose file changed before it ran; `dropped`: a full queue, a hook removed by a reload or no longer matching, shutdown. |
 | `gosftpd_hook_retries_total` | counter | | Webhook attempts after the first. |
 | `gosftpd_hook_queue_length` | gauge | | Hook events queued or being delivered, of all hooks; with a `delay`, normally the rate times the delay. |
-| `gosftpd_hooks_not_updated` | gauge | | Hooks the last reload left out (a program that fails its checks) or kept at their running secret. |
+| `gosftpd_hooks_not_updated` | gauge | | Hooks the last reload left out (a program that fails its checks, or, under Landlock, an exec hook the reload added: it runs after a restart, without Landlock) or kept at their running secret. |
 
 Go runtime and process metrics have the names of the Prometheus Go client,
 so existing dashboards work. None of them stops the world to be read.
@@ -130,6 +130,11 @@ rate(gosftpd_transfer_bytes_total{direction="upload"}[5m])
 # Connections refused because a limit was reached
 sum by (reason) (rate(gosftpd_connections_refused_total{reason=~"max_.*"}[5m]))
 
+# PROXY protocol set up on one side only: a trusted load balancer that sends
+# no header, or a header from a peer that is not trusted
+rate(gosftpd_connections_refused_total{reason="proxy_header"}[5m])
+rate(gosftpd_connections_total{result="untrusted_proxy"}[5m])
+
 # 95th percentile transfer time
 histogram_quantile(0.95, sum by (le, direction) (rate(gosftpd_transfer_duration_seconds_bucket[1h])))
 ```
@@ -153,6 +158,11 @@ groups:
         expr: gosftpd_hooks_not_updated > 0
         for: 5m
 ```
+
+`GosftpdHooksNotUpdated` clears once a reload fixes the hook's program or
+secret file. An exec hook that a reload added under Landlock is counted at
+every reload until a restart, which is the remedy then (the reload's
+warning names the hook, and `restart_required` has `hooks`).
 
 ## Kubernetes
 
@@ -200,19 +210,36 @@ The server writes nothing to the audit log for such a probe; it counts as
 `gosftpd_connections_total{result="no_version"}`. The address is, in this
 order: `--address`, `$GOSFTPD_LISTEN`, the first `server.listen` of the
 configuration file that `serve` would read (`--config`, `$GOSFTPD_CONFIG`,
-the search path), `:2022`. Only `server.listen` is read from the file, so an
-invalid value elsewhere that a reload refused does not fail the check; a
-file that is not valid TOML does, as the address cannot be known: pass
+the search path), `:2022`. Of the file only `server.listen` is read strictly,
+so an invalid value elsewhere that a reload refused does not fail the check;
+a file that is not valid TOML does, as the address cannot be known: pass
 `--address` or set `GOSFTPD_LISTEN` to be independent of the file. A
 wildcard address (`:2022`, `0.0.0.0`, `[::]`) is checked on `127.0.0.1`,
 then on `::1`. When `serve` runs with `--listen` or `--dir`, pass
 `--address`.
+
+The check also reads `server.trusted_proxies` from that file, also with
+`--address` or `$GOSFTPD_LISTEN`. When the probe's own address is a trusted
+proxy (a load balancer on loopback, a sidecar), it sends a PROXY protocol
+v2 `LOCAL` header first, as the proxy's own health checks do, and the line
+it prints says so. The key never fails the check: a value of the wrong type
+or an entry that does not parse is named at the end of the line, as
+`(server.trusted_proxies: ...)`, and the entries that parse are used. With
+`--address` or `$GOSFTPD_LISTEN`, a file that is missing, unreadable or not
+TOML only means no trusted proxies, with the same note.
 
 | Server | Result |
 |---|---|
 | Sends its SSH banner | healthy |
 | Not listening, or no banner within `--timeout` (5 s) | unhealthy |
 | Accepts and closes the connection at once | healthy, with a note: the server runs but refuses new connections (connection limits, a ban, or an unavailable audit log); unhealthy with `--ready` |
+
+A probe from a trusted proxy's address that sends no header (its
+configuration file is not the server's) gets no banner: the server waits
+for the header for `min(handshake_timeout, 10 s)`. When the probe's
+`--timeout` ends first, it is unhealthy; when the server's wait ends first,
+the server closes the connection and the probe reports it as a refused
+connection: healthy, unhealthy with `--ready`.
 
 With `--url URL` it sends `GET URL` instead, without a proxy and without
 following redirects; any 2xx status is healthy:

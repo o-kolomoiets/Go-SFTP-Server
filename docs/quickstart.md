@@ -77,6 +77,15 @@ and the `sftp` command. On a running server, `kill -HUP` (or `systemctl reload
 gosftpd`) applies it without a restart; `gosftpd user disable partner`,
 `enable` and `remove` change the file the same way.
 
+On Linux `serve` confines itself with Landlock
+([security.md](security.md#landlock)), and in `init`'s layout `share` lies
+next to `gosftpd.toml`: an edit that replaces `gosftpd.toml` by rename
+(`sed -i`, most editors) then needs a restart, and every reload fails until
+one. To reload such edits too, keep `gosftpd.toml` in a directory that
+holds only gosftpd's files (`gosftpd.toml` and `users.d`, not your home
+directory), for example with `init --out DIR/gosftpd.toml --dir
+NAME=PATH`.
+
 `partner` can list and upload, but not download, delete or overwrite; an
 upload over an existing name becomes a copy. See
 [configuration.md](configuration.md) for mounts, per-user home directories,
@@ -86,8 +95,11 @@ JSON audit log on stdout.
 ## Running it as a service
 
 Run gosftpd as an unprivileged user that owns the served directories, never as
-root. A systemd unit, packages and a Docker image are planned for v0.4–v0.5;
-until then any supervisor works: gosftpd stops cleanly on SIGTERM (running
-transfers get `shutdown_timeout`, 30 s by default) and applies its
+root. On Linux with systemd, [install.md](install.md) installs it as a
+service with the unit, user and directories from the release archive (from
+v0.4): the binary then goes to `/usr/bin` instead, and a copy left in
+`/usr/local/bin` should be removed. Packages and a Docker image follow in
+v0.5. Any other supervisor works too: gosftpd stops cleanly on SIGTERM
+(running transfers get `shutdown_timeout`, 30 s by default) and applies its
 configuration again on SIGHUP without dropping connections (see
 [Reload](configuration.md#reload)).

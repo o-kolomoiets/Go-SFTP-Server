@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -84,4 +85,65 @@ func ReadListen(path string) ([]string, error) {
 		return nil, decodeError(path, err)
 	}
 	return f.Server.Listen, nil
+}
+
+// ReadTrustedProxies returns server.trusted_proxies of the file at path,
+// read leniently for gosftpd healthcheck and apart from server.listen (ADR
+// 0011): a value of the wrong type or an entry that does not parse must
+// not fail the check. It returns the entries that parse, and an error that
+// names the others, or says why the key cannot be read at all: the file
+// cannot be read or is not TOML, or the key is not a list.
+func ReadTrustedProxies(path string) ([]netip.Prefix, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var f map[string]any
+	if _, err := toml.Decode(string(data), &f); err != nil {
+		return nil, decodeError(path, err)
+	}
+	srv, _ := f["server"].(map[string]any)
+	v, ok := srv["trusted_proxies"]
+	if !ok {
+		return nil, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("not a list of addresses but %s", tomlKind(v))
+	}
+	var (
+		prefixes []netip.Prefix
+		errs     []error
+	)
+	for i, e := range list {
+		s, ok := e.(string)
+		if !ok {
+			errs = append(errs, fmt.Errorf("entry %d is %s, not an address", i+1, tomlKind(e)))
+			continue
+		}
+		p, err := ParseTrustedProxy(s)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("entry %d: %w", i+1, err))
+			continue
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, errors.Join(errs...)
+}
+
+// tomlKind names the TOML type of a decoded value.
+func tomlKind(v any) string {
+	switch v.(type) {
+	case string:
+		return "a string"
+	case int64, float64:
+		return "a number"
+	case bool:
+		return "a boolean"
+	case map[string]any:
+		return "a table"
+	case []any, []map[string]any:
+		return "a list"
+	}
+	return "a date or time"
 }

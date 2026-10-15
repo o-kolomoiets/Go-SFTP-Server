@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hostkey"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
+	"github.com/o-kolomoiets/go-sftp-server/internal/sandbox"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/version"
@@ -406,17 +408,20 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if c.Metrics.Listen != "" {
 		metrics = obs.NewMetrics(version.Get().Version)
 	}
-	hookSpecs, _, _, err := buildHooks(c, nil)
+	hookSpecs, _, _, err := buildHooks(c, nil, nil)
 	if err != nil {
 		_ = mounts.Close()
 		return configError{err}
 	}
 	// It always exists, so that a reload can add the first hook; it loads
-	// the TLS roots now, before a sandbox could hide them.
-	dispatcher := hooks.New(hooks.Options{Log: log, Metrics: metrics})
+	// the TLS roots now, before the sandbox hides them. Its hooks, and with
+	// them its workers, come after the sandbox step.
+	var ruleset atomic.Pointer[sandbox.Ruleset] // set by the sandbox step
+	dispatcher := hooks.New(hooks.Options{
+		Log: log, Metrics: metrics,
+		NameWarnings: func() []string { return ruleset.Load().ResolverWarnings() },
+	})
 	defer dispatcher.Close(time.Now()) // on early returns; a no-op after the drain
-	dispatcher.Update(hookSpecs)
-	warnOrphans(ctx, log, hookSpecs)
 	cfg := serverConfig(c, authn, mounts, keys)
 	cfg.Audit, cfg.Log, cfg.Metrics, cfg.CryptoPolicy, cfg.Hooks = al, log, metrics, c.Server.CryptoPolicy, dispatcher
 	srv, err := server.New(cfg)
@@ -467,6 +472,24 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 			return err
 		}
 	}
+
+	// The sandbox step (ADR 0011): everything gosftpd opens at start is
+	// open, and no hook, background goroutine or connection runs yet.
+	sb, err := applySandbox(ctx, c, mounts, log)
+	if err != nil {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+		if admin != nil {
+			admin.stop(ctx)
+		}
+		return err
+	}
+	r.ruleset = sb.Ruleset
+	ruleset.Store(sb.Ruleset)
+	dispatcher.Update(hookSpecs)
+	warnOrphans(ctx, log, hookSpecs)
+
 	printBanner(stderr, bannerInfo{c: c, listeners: listeners, admin: admin, keys: keys, auth: authn, mounts: mounts})
 	addrs := make([]string, len(listeners))
 	for i, ln := range listeners {
@@ -475,6 +498,10 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	startAttrs := []slog.Attr{slog.String("version", version.Get().Version), slog.String("listen", strings.Join(addrs, ","))}
 	if admin != nil {
 		startAttrs = append(startAttrs, slog.String("metrics_listen", admin.addr()))
+	}
+	startAttrs = append(startAttrs, trustedProxiesAttr(c)...)
+	if sb.Status != "" { // only on Linux
+		startAttrs = append(startAttrs, slog.String("landlock", sb.Status))
 	}
 	al.Event("server.start", startAttrs...)
 
@@ -513,6 +540,12 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	stop()            // a second signal terminates immediately
 	background.Wait() // no reload runs during the shutdown
 	timeout := r.shutdownTimeout()
+	// A reload can raise shutdown_timeout, while systemd's TimeoutStopSec
+	// is fixed: ask for the time this stop may take, from now, in a
+	// datagram of its own once the final value is known (ADR 0011).
+	if err := sdnotify.ExtendTimeout(timeout + stopSlack); err != nil {
+		log.DebugContext(ctx, "sd_notify", "err", err)
+	}
 	log.InfoContext(ctx, "shutting down", "timeout", timeout)
 	for range pending {
 		<-served
@@ -538,6 +571,11 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 // hookGrace is the least time hooks get after the SFTP drain.
 const hookGrace = 5 * time.Second
 
+// stopSlack is what a stop may take beyond shutdown_timeout: hookGrace,
+// the pipes of a killed hook program, closing the audit log. The packaged
+// unit's TimeoutStopSec is the default shutdown_timeout plus this, or more.
+const stopSlack = 10 * time.Second
+
 // serverConfig returns the reloadable part of the server configuration.
 func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table, keys hostKeys) server.Config {
 	cfg := server.Config{
@@ -557,9 +595,25 @@ func serverConfig(c *config.Config, authn *auth.Authenticator, mounts *vfs.Table
 		MaxOpenHandles:        c.Limits.MaxOpenHandles,
 		MaxAuthTries:          c.Limits.MaxAuthTries,
 		DisconnectRevoked:     c.Reload.DisconnectRemovedUsers,
+		TrustedProxies:        c.TrustedProxyPrefixes(),
 	}
 	keys.apply(&cfg)
 	return cfg
+}
+
+// trustedProxiesAttr returns the trusted_proxies field of server.start and
+// server.reload, comma-separated as listen is, or none when no proxy is
+// trusted.
+func trustedProxiesAttr(c *config.Config) []slog.Attr {
+	prefixes := c.TrustedProxyPrefixes()
+	if len(prefixes) == 0 {
+		return nil
+	}
+	s := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		s[i] = p.String()
+	}
+	return []slog.Attr{slog.String("trusted_proxies", strings.Join(s, ","))}
 }
 
 // checkRoot refuses to serve as root unless allowed: a confinement bug

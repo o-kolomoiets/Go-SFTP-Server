@@ -18,6 +18,7 @@ import (
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 	"github.com/o-kolomoiets/go-sftp-server/internal/hooks"
 	"github.com/o-kolomoiets/go-sftp-server/internal/obs"
+	"github.com/o-kolomoiets/go-sftp-server/internal/sandbox"
 	"github.com/o-kolomoiets/go-sftp-server/internal/sdnotify"
 	"github.com/o-kolomoiets/go-sftp-server/internal/server"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
@@ -40,6 +41,9 @@ type running struct {
 	pprof   atomic.Bool
 	// hooks lives for the process; a reload updates its hooks.
 	hooks *hooks.Dispatcher
+	// ruleset is the Landlock ruleset applied at start, nil without one;
+	// a reload checks the new configuration against it (ADR 0011).
+	ruleset *sandbox.Ruleset
 
 	mu     sync.Mutex // serializes reloads; guards the fields below
 	c      *config.Config
@@ -78,30 +82,37 @@ func (r *running) reloadLoop(ctx context.Context, hup <-chan os.Signal) {
 		if err := sdnotify.Reloading(); err != nil {
 			r.log.DebugContext(ctx, "sd_notify", "err", err)
 		}
-		status := "configuration reloaded"
-		if !r.reload(ctx) {
-			status = "configuration reload failed, see the log"
-		}
-		if err := sdnotify.Notify("READY=1\nSTATUS=" + status); err != nil {
+		// systemctl reload cannot fail under Type=notify-reload: the
+		// result is in the status line of systemctl status (ADR 0011).
+		ok, restart := r.reload(ctx)
+		if err := sdnotify.Reloaded(ok, restart); err != nil {
 			r.log.DebugContext(ctx, "sd_notify", "err", err)
 		}
 	}
 }
 
 // reload reopens the audit log, then applies the configuration file again.
-// Any error keeps the running configuration. It reports success.
-func (r *running) reload(ctx context.Context) bool {
+// Any error keeps the running configuration. It reports success, and the
+// settings that changed but need a restart (restart_required).
+func (r *running) reload(ctx context.Context) (ok bool, restartRequired []string) {
 	start := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.mounts == nil {
-		return false // shutting down
+		return false, nil // shutting down
 	}
-	// First, and whatever the result: logrotate moved the file.
-	if err := r.out.reopen(); err != nil {
-		r.log.ErrorContext(ctx, "cannot reopen the audit log; writing it fails until it can be opened", "err", err)
+	// First, and whatever the result: logrotate moved the file. A file
+	// under /dev or /proc (stderr) keeps the descriptor opened at start:
+	// under Landlock it could not be opened again.
+	if !r.ruleset.KeepsOpen(r.c.Audit.Output) {
+		if err := r.out.reopen(); err != nil {
+			r.log.ErrorContext(ctx, "cannot reopen the audit log; writing it fails until it can be opened", "err", r.ruleset.Explain(err, sandbox.WriteFile))
+		}
 	}
 	r.al.Probe()
+	for _, w := range r.ruleset.ResolverWarnings() {
+		r.log.WarnContext(ctx, "landlock", "detail", w)
+	}
 
 	restart, disconnected, reason, err := r.apply(ctx)
 	attrs := []slog.Attr{slog.String("result", "ok")}
@@ -117,10 +128,14 @@ func (r *running) reload(ctx context.Context) bool {
 		if disconnected > 0 {
 			attrs = append(attrs, slog.Int("disconnected", disconnected))
 		}
+		attrs = append(attrs, trustedProxiesAttr(r.c)...)
 	}
 	r.al.Event("server.reload", append(attrs, slog.Int64("duration_ms", time.Since(start).Milliseconds()))...)
 	r.metrics.Reloaded(err == nil, time.Now())
-	return err == nil
+	if err != nil {
+		return false, nil
+	}
+	return true, restart
 }
 
 // apply builds the new configuration and switches to it. Everything that
@@ -128,8 +143,9 @@ func (r *running) reload(ctx context.Context) bool {
 func (r *running) apply(ctx context.Context) (restart []string, disconnected int, reason string, err error) {
 	c, masked, err := buildConfig(r.flags, r.opts, r.getenv, true)
 	if err != nil {
-		return nil, 0, reloadConfig, err
+		return nil, 0, reloadConfig, r.ruleset.Explain(err, sandbox.ReadFile)
 	}
+	readable := r.explain(sandbox.ReadFile)
 	warn := func(details []string) {
 		for _, d := range details {
 			r.log.WarnContext(ctx, "configuration", "detail", d)
@@ -146,33 +162,43 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	for _, k := range restart {
 		r.log.WarnContext(ctx, "this setting changes only at restart; the running value stays", "key", k)
 	}
+	// Under Landlock, before the file checks too: what the rules applied
+	// at start do not cover keeps its running value or is left out.
+	ll := r.checkLandlock(ctx, c)
+	restart = append(restart, ll.restart...)
 	// Revocation does not wait for host key files (ADR 0008): with a host
 	// key that cannot be used, the running host keys stay, and the file
 	// checks below cover those.
-	hostKeys, warns, err := loadHostKeys(c.Server.HostKeys, hostKeyOptions{certs: c.Server.HostCertificates, lenient: true})
+	hostKeys, warns, err := loadHostKeys(c.Server.HostKeys, hostKeyOptions{certs: c.Server.HostCertificates, lenient: true, explain: readable})
 	warn(warns)
 	if err != nil {
-		r.log.WarnContext(ctx, "host keys cannot be used; the running host keys stay", "err", err)
+		r.log.WarnContext(ctx, "host keys cannot be used; the running host keys stay", "err", readable(err))
 		hostKeys = r.hostKeys
 		c.Server.HostKeys = hostKeys.paths()
 		c.Server.HostCertificates = r.c.Server.HostCertificates
 	}
 	// Before the file checks too; hooks that cannot be used are left out
 	// or keep their running secret, so the checks cover what will run.
-	hookSpecs, warns, staleHooks, err := buildHooks(c, r.hookSpecs)
+	hookSpecs, warns, staleHooks, err := buildHooks(c, r.hookSpecs, readable)
 	warn(warns)
 	if err != nil {
 		return nil, 0, reloadConfig, err
 	}
+	staleHooks += ll.staleHooks
 	warns, unavailable, err := c.CheckFSReload(r.liveMounts())
 	warn(warns)
 	if err != nil {
 		return nil, 0, reloadConfig, problemsError{c.File, err}
 	}
-	authn, keys, warns, err := c.BuildAuthenticator(config.AuthOptions{Reload: true, Previous: r.keys})
+	for _, name := range ll.unavailable {
+		if !slices.Contains(unavailable, name) {
+			unavailable = append(unavailable, name)
+		}
+	}
+	authn, keys, warns, err := c.BuildAuthenticator(config.AuthOptions{Reload: true, Previous: r.keys, Explain: readable})
 	warn(warns)
 	if err != nil {
-		return nil, 0, reloadConfig, err
+		return nil, 0, reloadConfig, readable(err)
 	}
 	level, err := parseLevel(c.Log.Level)
 	if err != nil {
@@ -188,14 +214,14 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 		return nil, 0, reloadMounts, err
 	}
 	for _, w := range mountWarns {
-		r.log.WarnContext(ctx, "mount unavailable", "err", w)
+		r.log.WarnContext(ctx, "mount unavailable", "err", r.ruleset.Explain(w, sandbox.ReadDir))
 	}
 	var auditFile *os.File
 	newAudit := c.Audit.Output != r.c.Audit.Output
 	if newAudit {
 		if auditFile, err = openAuditFile(c.Audit.Output); err != nil {
 			_ = mounts.Close()
-			return nil, 0, reloadAuditOutput, err
+			return nil, 0, reloadAuditOutput, r.ruleset.Explain(err, sandbox.WriteFile)
 		}
 	}
 	if disconnected, err = r.srv.Reload(serverConfig(c, authn, mounts, hostKeys)); err != nil {
@@ -258,6 +284,9 @@ func keepRestartOnly(cur, next *config.Config) []string {
 		func() { next.Server.HostKeyAutoGenerate = cur.Server.HostKeyAutoGenerate })
 	keep("server.crypto_policy", cur.Server.CryptoPolicy != next.Server.CryptoPolicy,
 		func() { next.Server.CryptoPolicy = cur.Server.CryptoPolicy })
+	// The ruleset applied at start cannot be lifted or replaced (ADR 0011).
+	keep("server.landlock", cur.Server.Landlock != next.Server.Landlock,
+		func() { next.Server.Landlock = cur.Server.Landlock })
 	keep("metrics.listen", cur.Metrics.Listen != next.Metrics.Listen,
 		func() { next.Metrics.Listen = cur.Metrics.Listen })
 	keep("log.format", cur.Log.Format != next.Log.Format,

@@ -40,17 +40,29 @@ jobs:
         run: go tool -modfile=tools/go.mod actionlint
       - name: FreeBSD cross-build (Tier 2)
         run: GOOS=freebsd go vet ./... && GOOS=freebsd go build ./...
+      # Offline: systemd-analyze security --offline=true --threshold=12 (the
+      # score differs between systemd versions, hence the pinned runner),
+      # verify --man=no against a controlled root (any output fails), and
+      # systemd-sysusers and systemd-tmpfiles --root (ADR 0011).
+      - name: systemd unit, sysusers and tmpfiles
+        run: test/systemd/lint.sh
 
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, windows-latest]
+        # ubuntu-26.04: kernel 7.0, where the kernel itself applies a
+        # Landlock ruleset to every thread (TSYNC, ADR 0011).
+        os: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, macos-latest, windows-latest]
         go: ["1.26.x", "1.27.x"]
     runs-on: ${{ matrix.os }}
     env:
       # One cell records coverage for the floors (job coverage, ROADMAP §8.5).
       COVERAGE: ${{ matrix.os == 'ubuntu-24.04' && matrix.go == '1.27.x' && 'true' || '' }}
+      # The sandboxed tests (Landlock, the ambient capability clear) fail
+      # instead of skipping when these kernels report no Landlock or
+      # passwordless sudo is missing.
+      GOSFTPD_TEST_REQUIRE_SANDBOX: ${{ startsWith(matrix.os, 'ubuntu-') && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,6 +82,14 @@ jobs:
       - name: go test
         if: runner.os == 'Windows'
         run: go test -shuffle=on -count=1 ./...
+      - name: sandboxed tests without cgo (the release path)
+        if: runner.os == 'Linux'
+        # Release binaries are built with CGO_ENABLED=0: Landlock and the
+        # ambient capability clear then reach every thread through
+        # syscall.AllThreadsSyscall instead of libpsx.
+        env:
+          CGO_ENABLED: "0"
+        run: go test -shuffle=on -count=1 ./internal/sandbox/... ./internal/cli/...
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.COVERAGE
         with:
@@ -94,7 +114,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - openssh: system # 9.6p1 on ubuntu-24.04, plus paramiko, rclone, lftp and promtool
+          - openssh: system # 9.6p1 on ubuntu-24.04, plus paramiko, rclone, lftp, promtool, HAProxy and nginx
             clients: true
           - openssh: V_10_6_P1 # built from source
     runs-on: ubuntu-24.04
@@ -106,6 +126,8 @@ jobs:
       # promtool checks the /metrics output (ADR 0009).
       CLIENT_PROMETHEUS_VERSION: 3.5.0
       CLIENT_PROMETHEUS_SHA256: e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a
+      # Every server must log that it applied Landlock (ADR 0011).
+      REQUIRE_LANDLOCK: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -128,11 +150,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/openssh-bin/bin"
           cp ssh sftp scp ssh-keygen "$RUNNER_TEMP/openssh-bin/bin/"
           echo "$RUNNER_TEMP/openssh-bin/bin" >> "$GITHUB_PATH"
-      - name: Install paramiko, rclone, lftp and promtool
+      - name: Install paramiko, rclone, lftp, promtool, HAProxy and nginx
         if: matrix.clients
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q lftp
+          # HAProxy and nginx's stream module send PROXY protocol headers (ADR 0011).
+          sudo apt-get install -y -q lftp haproxy nginx libnginx-mod-stream
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install -q "paramiko==$CLIENT_PARAMIKO_VERSION"
           curl -fsSLo "$RUNNER_TEMP/rclone.zip" \
@@ -166,6 +189,23 @@ jobs:
           name: coverage-e2e
           path: coverage/e2e
           retention-days: 7
+
+  # The packaged unit under the runner's systemd 255 (PID 1 on the VM):
+  # Landlock, reloads and their status line, hooks, capabilities, seccomp
+  # filters, the legacy drop-in and the upgrade from the interim unit
+  # (ADR 0011). The script changes the system; it runs only in CI.
+  systemd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: gosftpd under systemd
+        run: test/systemd/run.sh
 
   coverage:
     needs: [test, interop]
@@ -217,6 +257,7 @@ jobs:
           - { pkg: ./internal/auth, fn: FuzzAuthorizedKeys }
           - { pkg: ./internal/auth, fn: FuzzCertificate }
           - { pkg: ./internal/server, fn: FuzzHostKeyProof }
+          - { pkg: ./internal/server, fn: FuzzProxyHeader }
           - { pkg: ./internal/sftpd, fn: FuzzRequestServer }
     runs-on: ubuntu-24.04
     steps:
@@ -261,10 +302,23 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
+      - name: Only the Linux archives hold the systemd files (ADR 0011)
+        run: |
+          status=0
+          for f in dist/*_linux_*.tar.gz; do
+            for p in packaging/config.toml packaging/gosftpd.sysusers packaging/gosftpd.tmpfiles \
+              packaging/systemd/gosftpd.service packaging/systemd/legacy-notify.conf; do
+              if ! tar -tzf "$f" | grep -qx "$p"; then echo "::error file=$f::$p is missing"; status=1; fi
+            done
+          done
+          for f in dist/*_darwin_*.tar.gz; do
+            if tar -tzf "$f" | grep -q '^packaging/'; then echo "::error file=$f::has the systemd files"; status=1; fi
+          done
+          exit $status
       - name: Release binaries stay within 12 MiB (ROADMAP §11.1, D21)
         run: |
           status=0
-          for f in dist/gosftpd_*/gosftpd; do
+          for f in dist/gosftpd*/gosftpd; do
             size=$(stat -c %s "$f")
             echo "$f: $size bytes"
             if [ "$size" -gt 12582912 ]; then echo "::error file=$f::$size bytes is over the 12 MiB budget"; status=1; fi
@@ -283,7 +337,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed

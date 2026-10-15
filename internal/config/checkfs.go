@@ -105,6 +105,10 @@ func (c *Config) checkMount(p *problems, name string) {
 	case errors.Is(err, fs.ErrNotExist) && m.Create:
 		if m.RequireMountpoint {
 			p.errorf(k, "%s does not exist, so it cannot be a mount point (require_mountpoint = true)", dir)
+			return
+		}
+		if !m.ReadOnly {
+			warnReadOnlyFS(p, k, m.Path, existingAncestor(dir))
 		}
 		return
 	case errors.Is(err, fs.ErrNotExist):
@@ -119,6 +123,38 @@ func (c *Config) checkMount(p *problems, name string) {
 	}
 	if m.RequireMountpoint {
 		checkMountpoint(p, key("mounts", name, "require_mountpoint"), dir, fi)
+	}
+	if !m.ReadOnly {
+		warnReadOnlyFS(p, k, m.Path, dir)
+	}
+}
+
+// readOnlyFS reports whether a path lies on a file system mounted
+// read-only; tests replace it, since they cannot mount one.
+var readOnlyFS = statfsReadOnly
+
+// warnReadOnlyFS warns when the directory of a writable mount, at path, is
+// on a read-only file system: uploads would fail with a bare "Failure" and
+// nothing in the log. Under systemd, ProtectSystem=strict does that to every
+// path outside ReadWritePaths= (ADR 0011). dir is the mount's directory,
+// or the nearest existing one above it while it is still to be created.
+func warnReadOnlyFS(p *problems, k, path, dir string) {
+	if ro, err := readOnlyFS(dir); err == nil && ro {
+		p.warnf(k, "%s is on a read-only file system; uploads will fail (under systemd: add it to ReadWritePaths=, docs/install.md)", path)
+	}
+}
+
+// existingAncestor returns the nearest directory above dir that exists.
+func existingAncestor(dir string) string {
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+		if _, err := os.Stat(dir); err == nil {
+			return dir
+		}
 	}
 }
 

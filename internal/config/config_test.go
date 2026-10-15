@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1367,6 +1369,27 @@ access = { m = "read" }
 	if err != nil || a.Len() != 0 || !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "nobody can log in") }) {
 		t.Errorf("zero-config reload without keys = %d keys, %q, %v", a.Len(), warns, err)
 	}
+
+	// Explain rewrites what keeps a key or CA file from being used: the
+	// Landlock hint of a reload.
+	c.Auth.TrustedUserCAKeysFile = filepath.Join(dir, "missing-ca.pub")
+	explain := func(err error) error { return fmt.Errorf("%w (explained)", err) }
+	_, _, warns, err = c.BuildAuthenticator(AuthOptions{Reload: true, Explain: explain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(warns, func(w string) bool {
+		return strings.Contains(w, "missing-ca.pub") && strings.HasSuffix(w, "(explained); its CAs are not trusted")
+	}) {
+		t.Errorf("warnings = %q", warns)
+	}
+	if err := os.Remove(bob); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	_, _, warns, _ = c.BuildAuthenticator(AuthOptions{Reload: true, Explain: explain})
+	if !slices.ContainsFunc(warns, func(w string) bool { return strings.Contains(w, "(explained); its keys are not used") }) {
+		t.Errorf("warnings = %q", warns)
+	}
 }
 
 // Include skips names that start with a dot (editor and user add temporary
@@ -1402,6 +1425,46 @@ func TestIncludeSkipsDotFilesAndUnreadable(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(users, 0o700) })
 	if _, err := Load(path); err == nil {
 		t.Error("an unreadable include directory was taken as empty")
+	}
+}
+
+// An include pattern with a wildcard directory checks its leading
+// directory, the one Glob lists first: unreadable, it is an error.
+func TestIncludeUnreadableLeadingDir(t *testing.T) {
+	t.Parallel()
+	for pattern, want := range map[string]string{
+		"users.d/*.toml":                  "users.d",
+		"teams/*/users.toml":              "teams",
+		"teams/t[12]/sub/*/users.toml":    "teams",
+		"*/users.toml":                    ".",
+		"/srv/partners/*/users.toml":      "/srv/partners",
+		"/srv/partners/?/[ab]/users.toml": "/srv/partners",
+		"/*.toml":                         "/",
+	} {
+		if got := leadingDir(filepath.FromSlash(pattern)); got != filepath.FromSlash(want) {
+			t.Errorf("leadingDir(%s) = %s, want %s", pattern, got, want)
+		}
+	}
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return // no unreadable directories for this user
+	}
+	dir := t.TempDir()
+	teams := filepath.Join(dir, "teams")
+	if err := os.MkdirAll(filepath.Join(teams, "t1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(teams, "t1", "users.toml"), []byte("[users.carol]\naccess = { m = \"read\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(teams, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(teams, 0o700) })
+	for _, pattern := range []string{"teams/*/users.toml", filepath.Join(teams, "*", "users.toml")} {
+		path := writeConfig(t, dir, "config_version = 1\ninclude = ['"+pattern+"']\n")
+		if _, err := Load(path); !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s with an unreadable leading directory: %v", pattern, err)
+		}
 	}
 }
 
@@ -1537,5 +1600,46 @@ func TestReadListen(t *testing.T) {
 	path = writeConfig(t, dir, "[server]\nlisten = \"127.0.0.1:1\"\n")
 	if _, err := ReadListen(path); err == nil {
 		t.Error("a string listen was accepted")
+	}
+}
+
+// gosftpd healthcheck reads server.trusted_proxies apart from
+// server.listen: what cannot be used of it is an error, while the entries
+// that parse are still returned.
+func TestReadTrustedProxies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		file string
+		want []string
+		err  string
+	}{
+		{"[server]\nlisten = [\":2022\"]\n", nil, ""},
+		{"[server]\ntrusted_proxies = [\"127.0.0.1\", \"10.0.1.7/28\"]\nbogus = 1\n[nonsense]\n", []string{"127.0.0.1/32", "10.0.1.0/28"}, ""},
+		{"[server]\ntrusted_proxies = \"127.0.0.1\"\n", nil, "not a list of addresses but a string"},
+		{"[server]\ntrusted_proxies = 5\n", nil, "not a list of addresses but a number"},
+		{
+			"[server]\ntrusted_proxies = [\"bogus\", \"127.0.0.1\", 7, \"0.0.0.0/0\"]\n",
+			[]string{"127.0.0.1/32"},
+			`entry 1: "bogus" is not an IP address or CIDR block` + "\n" + "entry 3 is a number, not an address" + "\n" + `entry 4: "0.0.0.0/0" holds every address`,
+		},
+		{"[server\n", nil, "toml:"},
+	} {
+		path := writeConfig(t, dir, tt.file)
+		prefixes, err := ReadTrustedProxies(path)
+		var got []string
+		for _, p := range prefixes {
+			got = append(got, p.String())
+		}
+		if !slices.Equal(got, tt.want) || (err == nil) != (tt.err == "") || err != nil && !strings.Contains(err.Error(), tt.err) {
+			t.Errorf("%q: %v, %v; want %v, %q", tt.file, got, err, tt.want, tt.err)
+		}
+	}
+	if _, err := ReadTrustedProxies(filepath.Join(dir, "missing.toml")); err == nil {
+		t.Error("a missing file read")
+	}
+	if p, err := ParseTrustedProxy("10.0.0.5"); err != nil || p != netip.MustParsePrefix("10.0.0.5/32") {
+		t.Errorf("ParseTrustedProxy = %v, %v", p, err)
 	}
 }

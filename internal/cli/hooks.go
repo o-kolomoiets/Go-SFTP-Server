@@ -19,8 +19,9 @@ import (
 // files fail their checks is left out, since they are run as they are at
 // each run; one whose secret cannot be used keeps its running secret,
 // which is held in memory. Each gives a warning and counts in stale, so
-// that a broken hook file never blocks the rest of a reload.
-func buildHooks(c *config.Config, running map[string]hooks.Spec) (specs []hooks.Spec, warns []string, stale int, err error) {
+// that a broken hook file never blocks the rest of a reload. explain, if
+// set, rewrites a secret file's error for the warning (the Landlock hint).
+func buildHooks(c *config.Config, running map[string]hooks.Spec, explain func(error) error) (specs []hooks.Spec, warns []string, stale int, err error) {
 	var errs []error
 	for _, h := range c.Hooks {
 		if h == nil {
@@ -34,6 +35,9 @@ func buildHooks(c *config.Config, running map[string]hooks.Spec) (specs []hooks.
 			}
 			specs = append(specs, c.HookSpec(h, secret))
 			continue
+		}
+		if secretErr != nil && explain != nil {
+			secretErr = explain(secretErr)
 		}
 		if argvErr != nil {
 			warns = append(warns, fmt.Sprintf("hook %q is left out until its program is fixed: %v", h.Name, argvErr))

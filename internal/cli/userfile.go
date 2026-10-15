@@ -36,6 +36,22 @@ func usersDirMode(cfg fs.FileInfo) fs.FileMode {
 	return 0o700
 }
 
+// makeUsersDir creates dir for files of users unless it exists, with the
+// owner and group of like (the main configuration file), and reports
+// whether it did.
+func makeUsersDir(dir string, like fs.FileInfo) (bool, error) {
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return false, err
+	}
+	chownLike(dir, like)
+	// Not subject to the umask: the server's group must be able to list
+	// the directory, or the include would find nothing.
+	return true, os.Chmod(dir, usersDirMode(like))
+}
+
 // writeUsersFile writes data to path through a temporary file in the same
 // directory, so that a reload never reads half a file. The file gets mode
 // and, where the platform allows, the owner and group of like (the main
@@ -43,16 +59,8 @@ func usersDirMode(cfg fs.FileInfo) fs.FileMode {
 // path is an error.
 func writeUsersFile(path string, data []byte, mode fs.FileMode, like fs.FileInfo, exclusive bool) error {
 	dir := filepath.Dir(path)
-	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			return err
-		}
-		chownLike(dir, like)
-		// Not subject to the umask: the server's group must be able to
-		// list the directory, or the include would find nothing.
-		if err := os.Chmod(dir, usersDirMode(like)); err != nil {
-			return err
-		}
+	if _, err := makeUsersDir(dir, like); err != nil {
+		return err
 	}
 	if exclusive {
 		if _, err := os.Lstat(path); err == nil {

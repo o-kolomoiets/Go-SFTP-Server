@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strconv"
@@ -67,6 +68,7 @@ func (c *Config) Validate() (warnings []string, err error) {
 		p.errorf("config_version", "%d is not supported by this version of gosftpd (it supports %d)", c.ConfigVersion, Version)
 	}
 	c.validateServer(p)
+	c.validateTrustedProxies(p)
 	c.validateLimits(p)
 	c.validateAuth(p)
 	c.Defaults.validate(p, nil, "defaults")
@@ -75,6 +77,7 @@ func (c *Config) Validate() (warnings []string, err error) {
 	c.validateLogs(p)
 	c.validateMetrics(p)
 	c.validateHooks(p)
+	c.validateLandlock(p)
 	return p.result()
 }
 
@@ -160,6 +163,61 @@ func (c *Config) validateServer(p *problems) {
 	if d := time.Duration(s.ShutdownTimeout); d < time.Second || d > maxShutdownTimeout {
 		p.errorf("server.shutdown_timeout", "must be between 1s and %s", maxShutdownTimeout)
 	}
+}
+
+// minHeaderTimeout is the time the PROXY protocol specification asks a
+// receiver to allow for a header, to cover a TCP retransmit.
+const minHeaderTimeout = 3 * time.Second
+
+// validateTrustedProxies checks server.trusted_proxies and warns about
+// settings that work against it (ADR 0011).
+func (c *Config) validateTrustedProxies(p *problems) {
+	const k = "server.trusted_proxies"
+	var trusted []netip.Prefix
+	for _, s := range c.Server.TrustedProxies {
+		pr, err := ParseTrustedProxy(s)
+		if err != nil {
+			p.errorf(k, "%v", err)
+			continue
+		}
+		trusted = append(trusted, pr)
+	}
+	if len(trusted) == 0 {
+		return
+	}
+	if d := time.Duration(c.Server.HandshakeTimeout); d < minHeaderTimeout {
+		p.warnf("server.handshake_timeout", "%s is below %s: it also bounds the time a load balancer in server.trusted_proxies has for its PROXY protocol header, and the protocol asks for at least %s to cover a TCP retransmit",
+			d, minHeaderTimeout, minHeaderTimeout)
+	}
+	if c.Auth.Ban.AfterFailures == 0 {
+		return // no bans: nothing to be exempt from
+	}
+	for _, t := range trusted {
+		for _, e := range c.Auth.Ban.Exempt {
+			if pe, err := auth.ParsePrefix(e); err == nil && pe.IsValid() && pe.Overlaps(t) {
+				p.warnf(k, "%s overlaps auth.ban.exempt (%s): connections the proxy sends as LOCAL or UNKNOWN (its health checks, clients of a Unix socket front end) are its own and are never banned",
+					t, pe)
+				break
+			}
+		}
+	}
+}
+
+// ParseTrustedProxy parses an entry of server.trusted_proxies: an IP
+// address or CIDR block, unmapped and masked as allow_from takes it. A
+// block that holds every address is an error, as any client could then
+// choose its address.
+func ParseTrustedProxy(s string) (netip.Prefix, error) {
+	p, err := auth.ParsePrefix(s)
+	switch {
+	case err != nil:
+		return netip.Prefix{}, err
+	case !p.IsValid():
+		return netip.Prefix{}, fmt.Errorf("%q is not a valid CIDR block", s)
+	case p.Bits() == 0:
+		return netip.Prefix{}, fmt.Errorf("%q holds every address: list the load balancers' own addresses", s)
+	}
+	return p, nil
 }
 
 func validListen(addr string) error {

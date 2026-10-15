@@ -19,6 +19,8 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/pkg/sftp"
+
+	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
 
 // testServer is gosftpd serve running in the test, with reloads triggered
@@ -363,5 +365,31 @@ access = { data = "full" }
 	if c, err := ts.login("alice", certKey); err == nil {
 		c.Close()
 		t.Error("a failed reload un-revoked the certificate")
+	}
+}
+
+// TestKeepRestartOnly: each restart-only key keeps its running value and is
+// listed once.
+func TestKeepRestartOnly(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(c *config.Config){
+		"server.listen":                 func(c *config.Config) { c.Server.Listen = []string{"127.0.0.1:1"} },
+		"server.host_key_auto_generate": func(c *config.Config) { c.Server.HostKeyAutoGenerate = true },
+		"server.crypto_policy":          func(c *config.Config) { c.Server.CryptoPolicy = "compat" },
+		"server.landlock":               func(c *config.Config) { c.Server.Landlock = config.LandlockOff },
+		"metrics.listen":                func(c *config.Config) { c.Metrics.Listen = "127.0.0.1:9090" },
+		"log.format":                    func(c *config.Config) { c.Log.Format = "json" },
+		"audit.events":                  func(c *config.Config) { c.Audit.Events = []string{"conn"} },
+		"audit.on_error":                func(c *config.Config) { c.Audit.OnError = config.AuditFailOpen },
+	}
+	for key, change := range cases {
+		cur, next := config.Default(), config.Default()
+		change(next)
+		if got := keepRestartOnly(cur, next); len(got) != 1 || got[0] != key {
+			t.Errorf("%s: keepRestartOnly = %v", key, got)
+		}
+		if again := keepRestartOnly(cur, next); len(again) != 0 {
+			t.Errorf("%s: the running value was not kept: %v", key, again)
+		}
 	}
 }

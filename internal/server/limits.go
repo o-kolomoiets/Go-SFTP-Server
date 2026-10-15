@@ -11,18 +11,31 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Reasons a connection is refused right after accept.
+// Reasons a connection is refused before the SSH handshake: right after
+// accept, or, for a connection from a trusted proxy, once its PROXY
+// protocol header is read (ADR 0011).
 const (
-	rejectBanned   = "banned"
-	rejectMaxConns = "max_connections"
-	rejectPerIP    = "max_connections_per_ip"
-	rejectPreauth  = "max_preauth_connections"
-	rejectAudit    = "audit_unavailable"
+	rejectBanned      = "banned"
+	rejectMaxConns    = "max_connections"
+	rejectPerIP       = "max_connections_per_ip"
+	rejectPreauth     = "max_preauth_connections"
+	rejectAudit       = "audit_unavailable"
+	rejectProxyHeader = "proxy_header" // a trusted proxy sent no valid header
+	// rejectUntrustedProxy ends a connection whose first bytes after the
+	// banner are a PROXY protocol header that is not trusted; it is also
+	// the connection's result in gosftpd_connections_total.
+	rejectUntrustedProxy = "untrusted_proxy"
 )
 
 // limiter counts connections: in total, per source (auth.SourceKey) and
 // before authentication. A reload changes its limits; connections above a
 // lowered limit stay, and new ones are refused until the count is below it.
+//
+// Admission has two phases (ADR 0011). In the accept loop a connection
+// takes its connection and pre-authentication slots and, from a peer that
+// is not a trusted proxy, the slot for the peer. A connection from a
+// trusted proxy takes the slot for its client once the PROXY protocol
+// header names it (addSource).
 type limiter struct {
 	mu                                 sync.Mutex
 	maxConns, maxPerSource, maxPreauth int
@@ -44,13 +57,18 @@ func (l *limiter) setLimits(maxConns, maxPerSource, maxPreauth int) {
 
 // admission is a connection's share of the limits.
 type admission struct {
-	l       *limiter
-	src     netip.Prefix // invalid for non-IP connections
+	l *limiter
+	// trusted is set at accept for a connection from a trusted proxy,
+	// which must begin with a PROXY protocol header.
+	trusted bool
+	src     netip.Prefix // guarded by l.mu; invalid while no source slot is held
 	preauth atomic.Bool
 }
 
-// admit takes a connection slot, a slot for src and a pre-authentication
-// slot, or reports which limit is reached.
+// admit takes a connection slot, a pre-authentication slot and, when src is
+// valid, the slot for src; or it reports which limit is reached. src is
+// invalid for non-IP connections and for trusted proxies, whose clients
+// take their slot later (addSource).
 func (l *limiter) admit(src netip.Prefix) (*admission, string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -65,12 +83,35 @@ func (l *limiter) admit(src netip.Prefix) (*admission, string) {
 	}
 	l.total++
 	l.preauth++
-	if src.IsValid() {
-		l.sources[src]++
-	}
-	a := &admission{l: l, src: src}
+	a := &admission{l: l}
+	a.takeSource(src)
 	a.preauth.Store(true)
 	return a, ""
+}
+
+// addSource takes the slot for src, the client a trusted proxy names in
+// its header (or the proxy itself for LOCAL and UNKNOWN), or reports that
+// src has reached its limit. A connection holds at most one source slot.
+func (a *admission) addSource(src netip.Prefix) string {
+	l := a.l
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !src.IsValid() || a.src.IsValid() {
+		return ""
+	}
+	if l.sources[src] >= l.maxPerSource {
+		return rejectPerIP
+	}
+	a.takeSource(src)
+	return ""
+}
+
+// takeSource counts the connection for src, if valid; l.mu must be held.
+func (a *admission) takeSource(src netip.Prefix) {
+	if src.IsValid() {
+		a.src = src
+		a.l.sources[src]++
+	}
 }
 
 // authenticated frees the pre-authentication slot.
@@ -82,7 +123,7 @@ func (a *admission) authenticated() {
 	}
 }
 
-// release frees every slot of the connection.
+// release frees every slot the connection holds.
 func (a *admission) release() {
 	a.authenticated()
 	l := a.l
@@ -124,6 +165,29 @@ func (r *rejectLog) allow(now time.Time) (bool, int) {
 	s := r.suppressed
 	r.suppressed = 0
 	return true, s
+}
+
+// warnLimit lets a warning through at most once a minute, so that a
+// misconfigured proxy cannot flood the operational log.
+type warnLimit struct {
+	mu   sync.Mutex
+	next time.Time
+	held int
+}
+
+// allow reports whether the warning may be logged now and how many were
+// held back since the last one.
+func (w *warnLimit) allow(now time.Time) (bool, int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if now.Before(w.next) {
+		w.held++
+		return false, 0
+	}
+	w.next = now.Add(time.Minute)
+	held := w.held
+	w.held = 0
+	return true, held
 }
 
 // activity records when a connection last moved SFTP data.
