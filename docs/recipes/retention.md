@@ -136,13 +136,16 @@ progress (gosftpd removes those left over itself). With
 `Persistent=true`, a run missed while the machine was off starts at the
 next boot.
 
-To keep old versions longer than 30 days, add
-`-not -path '/srv/sftp/inbox/.versions/*'` to the `find` line, and for a
-longer age rather than forever, a second line that runs `find` on the
-versions directory alone:
-`ExecStart=-/usr/bin/find /srv/sftp/inbox/.versions -xdev -type f -cmin +525600 -print -delete`
-(365 days; the `-` lets the run succeed while the directory does not
-exist yet).
+To keep old versions longer than 30 days, skip the versions directory in
+the `find` line (the test has to come before `-print -delete`), and for a
+longer age rather than forever, add a second line that runs `find` on
+the versions directory alone (365 days here; the `-` lets the run succeed
+while the directory does not exist yet):
+
+```ini
+ExecStart=/usr/bin/find /srv/sftp/inbox -xdev -type f -cmin +43200 -not -name '.gosftpd-*' -not -path '/srv/sftp/inbox/.versions/*' -print -delete
+ExecStart=-/usr/bin/find /srv/sftp/inbox/.versions -xdev -type f -cmin +525600 -print -delete
+```
 
 ## Hooks
 
