@@ -42,7 +42,7 @@ serves without that mount until a later reload finds it usable.
 | Status | What to do |
 |---|---|
 | `configuration reloaded` | Nothing. |
-| `configuration reloaded; restart needed for: KEYS` | The reload worked, but the settings named keep their running value. Restart when it suits you ([Stop and restart](#stop-restart-and-interrupted-uploads)). |
+| `configuration reloaded; restart needed for: KEYS` | The reload worked, but the settings named did not take effect. A restart-only setting keeps its running value: restart when it suits you ([Stop and restart](#stop-restart-and-interrupted-uploads)). Under Landlock a mount, a hook, the audit log, or the keys or CAs of a file named there can instead be left out until the restart, so that a mount is unavailable or users cannot log in (the list below): then restart soon. |
 | `configuration reload failed, see the log` | Nothing changed. `journalctl -u gosftpd -n 20` has the reason in the line "configuration reload failed; the running configuration stays". Fix the file, check it and reload again. |
 
 The status line names at most five settings, then "and N more; see the
@@ -74,13 +74,20 @@ These keys can appear in `restart_required`:
     ([A disk mounted on a mount directory](#a-disk-mounted-on-a-mount-directory));
   - `mounts.NAME.read_only` and `mounts.NAME.create`: the mount keeps its
     running value;
-  - `audit.output`: the running audit output stays, or the audit log was
-    rotated by rename next to other files ([Log rotation](#log-rotation));
+  - `audit.output`: a new audit output is not used and the running one
+    stays; or the audit log was rotated by rename next to other files
+    ([Log rotation](#log-rotation)), and writing it fails until the
+    restart;
   - `hooks`: an exec hook that the reload added is left out;
   - `server.host_keys`, `users.NAME.authorized_keys_file`,
     `auth.trusted_user_ca_keys_file`, `hooks[N].webhook.secret_file` or
     `--authorized-keys`: a file in a shared directory was replaced by
-    rename, and is left out as an unreadable file is.
+    rename, and the reload treats it as an unreadable file. The running
+    host keys stay. The keys of an authorized_keys file are not used: its
+    users cannot log in with them, and with `--authorized-keys` nobody
+    can. The CAs of `auth.trusted_user_ca_keys_file` are not trusted, so
+    the certificates they signed are refused. A webhook keeps its running
+    secret, and one that the reload added is left out.
 
 ## Stop, restart and interrupted uploads
 
