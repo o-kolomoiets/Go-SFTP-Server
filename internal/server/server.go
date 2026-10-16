@@ -251,7 +251,7 @@ func (s *Server) newSnapshot(cfg Config) (*snapshot, error) {
 	}
 	sn.ssh = &ssh.ServerConfig{
 		Config:                  ssh.Config{KeyExchanges: s.algos.kex, Ciphers: s.algos.ciphers, MACs: s.algos.macs},
-		PublicKeyAuthAlgorithms: ssh.SupportedAlgorithms().PublicKeyAuths,
+		PublicKeyAuthAlgorithms: auth.PublicKeyAuthAlgorithms(),
 		MaxAuthTries:            cfg.MaxAuthTries,
 		ServerVersion:           serverVersion,
 	}

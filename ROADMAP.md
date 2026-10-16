@@ -394,7 +394,7 @@ flowchart LR
 - [ ] At startup, `ssh.FingerprintSHA256` and the known_hosts line are printed. The default path is `os.UserConfigDir()/gosftpd/` or `--state-dir`; a separate key is set with `--host-key` (the flag can be repeated).
 
 *SSH core (`internal/server`)*
-- [ ] `ssh.ServerConfig`: explicit KEX, Ciphers and MACs lists from the `modern` profile (§7.6); `PublicKeyAuthAlgorithms` from `ssh.SupportedAlgorithms().PublicKeyAuths`; `MaxAuthTries: 6`; `ServerVersion: "SSH-2.0-gosftpd"` without a version number; `AuthLogCallback` writes to the audit log. `PasswordCallback`, `KeyboardInteractiveCallback` and `GSSAPIWithMICConfig` are not set.
+- [ ] `ssh.ServerConfig`: explicit KEX, Ciphers and MACs lists from the `modern` profile (§7.6); `PublicKeyAuthAlgorithms` from `ssh.SupportedAlgorithms().PublicKeyAuths`, limited to the accepted key types; `MaxAuthTries: 6`; `ServerVersion: "SSH-2.0-gosftpd"` without a version number; `AuthLogCallback` writes to the audit log. `PasswordCallback`, `KeyboardInteractiveCallback` and `GSSAPIWithMICConfig` are not set.
 - [ ] Accept loop: `var lc net.ListenConfig; ln, err := lc.Listen(ctx, "tcp", addr)` (`Listen` has a pointer receiver, so `net.ListenConfig{}.Listen(...)` does not compile), `context.AfterFunc(ctx, func() { ln.Close() })`, `s.wg.Go(...)`, `recover` for each connection, connection tracking in a map under a mutex, temporary `Accept` errors are retried with backoff.
 - [ ] `nc.SetDeadline(time.Now().Add(30 * time.Second))` → `ssh.NewServerConn` → `nc.SetDeadline(time.Time{})`.
 - [ ] `go ssh.DiscardRequests(reqs)`. Only `session` channels are accepted; all others get `Reject(ssh.Prohibited, ...)`. No more than 4 sessions per connection.
@@ -1184,7 +1184,7 @@ The currently pinned `x/crypto v0.0.0-20211215153901` is affected by **23** advi
   - KEX: `mlkem768x25519-sha256`, `curve25519-sha256`;
   - Ciphers: `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`, `aes128-gcm@openssh.com`, `aes256-ctr`, `aes128-ctr`;
   - MACs: `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com`;
-  - `PublicKeyAuthAlgorithms = ssh.SupportedAlgorithms().PublicKeyAuths` (without `ssh-rsa` SHA-1 and without `ssh-dss`).
+  - `PublicKeyAuthAlgorithms` = the entries of `ssh.SupportedAlgorithms().PublicKeyAuths` whose key type gosftpd accepts (without `ssh-rsa` SHA-1, `ssh-dss` and, since x/crypto v0.58.0 with Go 1.27, the ML-DSA algorithms).
 - **`compat`** adds KEX `ecdh-sha2-nistp256/384/521`, `diffie-hellman-group16-sha512`, `diffie-hellman-group14-sha256` and MACs `hmac-sha2-256`, `hmac-sha2-512`. ssh-audit flags NIST curves (KEX and the ECDSA host key), non-ETM MACs and the 2048-bit group14 as fail or warn. Therefore the "ssh-audit without `fail`" criterion (M3, §11.1) applies only to `modern` with an ed25519 host key, and for `compat` the list of expected findings is recorded in `docs/security/hardening.md`.
 - **Never:** `diffie-hellman-group14-sha1`, `hmac-sha1`, `hmac-sha1-96`, CBC, `ssh-rsa` (SHA-1), `ssh-dss`. `SupportedAlgorithms().MACs` still contains `hmac-sha1`, so MACs are set as an explicit list. The default lists in x/crypto contain SHA-1 variants, so they must not be left `nil`.
 - ML-KEM goes first. OpenSSH 10.0 prefers `mlkem768x25519-sha256`, and 10.1 warns about non-PQ KEX (`WarnWeakCrypto`). x/crypto has had `mlkem768x25519-sha256` since v0.38.0 (the exported constant `KeyExchangeMLKEM768X25519` since v0.39.0); `sntrup761` is not implemented, and that is fine.

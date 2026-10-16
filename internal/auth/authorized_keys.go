@@ -150,12 +150,42 @@ func parsePrincipals(v string) ([]string, error) {
 	return p, nil
 }
 
+// acceptedKeyTypes are the key types checkKeyType accepts (RSA only with
+// at least MinRSABits).
+var acceptedKeyTypes = map[string]bool{
+	ssh.KeyAlgoED25519: true, ssh.KeyAlgoSKED25519: true,
+	ssh.KeyAlgoECDSA256: true, ssh.KeyAlgoECDSA384: true, ssh.KeyAlgoECDSA521: true, ssh.KeyAlgoSKECDSA256: true,
+	ssh.KeyAlgoRSA: true,
+}
+
+// PublicKeyAuthAlgorithms returns the signature algorithms the server
+// offers for public key authentication (server-sig-algs): those of
+// ssh.SupportedAlgorithms whose key type gosftpd accepts. x/crypto adds
+// algorithms over time (ML-DSA, with Go 1.27) that it would otherwise
+// announce and then refuse.
+func PublicKeyAuthAlgorithms() []string {
+	return acceptedAuthAlgorithms(ssh.SupportedAlgorithms().PublicKeyAuths)
+}
+
+func acceptedAuthAlgorithms(algos []string) []string {
+	var out []string
+	for _, a := range algos {
+		keyType := a
+		if a == ssh.KeyAlgoRSASHA256 || a == ssh.KeyAlgoRSASHA512 {
+			keyType = ssh.KeyAlgoRSA
+		} else if a == ssh.KeyAlgoRSA {
+			continue // SHA-1 signatures
+		}
+		if acceptedKeyTypes[keyType] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func checkKeyType(pub ssh.PublicKey) error {
-	switch pub.Type() {
-	case ssh.KeyAlgoED25519, ssh.KeyAlgoSKED25519,
-		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoSKECDSA256:
-		return nil
-	case ssh.KeyAlgoRSA:
+	switch t := pub.Type(); {
+	case t == ssh.KeyAlgoRSA:
 		cpk, ok := pub.(ssh.CryptoPublicKey)
 		if !ok {
 			return errors.New("cannot inspect RSA key")
@@ -168,11 +198,13 @@ func checkKeyType(pub ssh.PublicKey) error {
 			return fmt.Errorf("RSA key has %d bits, at least %d are required", bits, MinRSABits)
 		}
 		return nil
+	case acceptedKeyTypes[t]:
+		return nil
 	default:
-		if strings.HasSuffix(pub.Type(), "-cert-v01@openssh.com") {
+		if strings.HasSuffix(t, "-cert-v01@openssh.com") {
 			return errors.New("this is a certificate, not a key; trust its CA instead (cert-authority, or auth.trusted_user_ca_keys)")
 		}
-		return fmt.Errorf("key type %s is not supported", pub.Type())
+		return fmt.Errorf("key type %s is not supported", t)
 	}
 }
 
