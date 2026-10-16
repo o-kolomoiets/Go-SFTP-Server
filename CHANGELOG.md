@@ -349,7 +349,9 @@ refused (see Changed).
 - Developer tools: `tools/go.mod` requires `golang.org/x/text` v0.41.0
   instead of the v0.17.0 that gotestsum asks for (GO-2026-5970,
   GO-2026-6629). This does not change the gosftpd binary. CI and `make
-  vuln` scan the tools module with govulncheck too.
+  vuln` scan the tools module with govulncheck too, and Dependabot now
+  updates every requirement of `tools/go.mod`: the `tool` directive marks
+  them all `// indirect`, which it skipped before.
 - `osv-scanner.toml` ignores GO-2026-5932 (`golang.org/x/crypto/openpgp`,
   which has no fixed version) for osv-scanner and the OpenSSF Scorecard:
   gosftpd never imports openpgp. See
