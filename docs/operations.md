@@ -230,12 +230,22 @@ with errors such as:
 On a new host, `systemd-sysusers` may give the user gosftpd another uid.
 tar and rsync, run as root, restore owners by name unless told to keep the
 numbers (`--numeric-owner`, `--numeric-ids`). When the numbers were kept,
-give the files back to gosftpd:
+give the files back to gosftpd. OLD_UID and OLD_GID are the uid and gid
+gosftpd had on the old host; the restored `/var/lib/gosftpd` still has
+them until the `chown`:
 
 ```sh
+stat -c '%u %g' /var/lib/gosftpd     # OLD_UID OLD_GID
 sudo chown -R gosftpd:gosftpd /var/lib/gosftpd /var/log/gosftpd /srv/sftp
 sudo chgrp -R gosftpd /etc/gosftpd/config.toml /etc/gosftpd/users.d
+sudo find /etc/gosftpd -uid OLD_UID -exec chown gosftpd {} +
+sudo find /etc/gosftpd -gid OLD_GID -exec chgrp gosftpd {} +
 ```
+
+The `find` lines give gosftpd back its other files in `/etc/gosftpd`,
+such as a webhook `secret_file` ([hooks.md](hooks.md#webhook)). Do the
+same for files the configuration names elsewhere, such as an
+`authorized_keys_file`.
 
 Under Landlock, leave nothing else in `/etc/gosftpd` and `/var/lib/gosftpd`,
 such as an archive or a copy of the old configuration under another name:
