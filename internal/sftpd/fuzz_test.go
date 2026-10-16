@@ -191,6 +191,28 @@ func FuzzRequestServer(f *testing.F) {
 		pkt(fxpOpen, uint32(22), "a.txt", uint32(read|write), noAttrs),
 	)
 	f.Add(byte(1), seq(busy...))
+	// pkg/sftp serves READ and WRITE in parallel workers: one sent after the
+	// CLOSE of an atomic upload runs during the CLOSE (found by fuzzing),
+	// and those with a directory's handle list it at the same time.
+	f.Add(byte(4), seq( // atomic_uploads
+		pkt(fxpOpen, uint32(1), "b.txt", uint32(write|creat), noAttrs),
+		pkt(fxpWrite, uint32(2), "1", uint64(0), "data"),
+		pkt(fxpClose, uint32(3), "1"),
+		pkt(fxpWrite, uint32(4), "1", uint64(4), "x"),
+		pkt(fxpRead, uint32(5), "1", uint64(0), uint32(8)),
+		pkt(fxpWrite, uint32(6), "1", uint64(5), "x"),
+		pkt(fxpRead, uint32(7), "1", uint64(0), uint32(8)),
+	))
+	f.Add(byte(2), seq(
+		pkt(fxpOpendir, uint32(1), "/"),
+		pkt(fxpRead, uint32(2), "1", uint64(0), uint32(8)),
+		pkt(fxpWrite, uint32(3), "1", uint64(0), "x"),
+		pkt(fxpRead, uint32(4), "1", uint64(0), uint32(8)),
+		pkt(fxpReaddir, uint32(5), "1"),
+		pkt(fxpWrite, uint32(6), "1", uint64(0), "x"),
+		pkt(fxpClose, uint32(7), "1"),
+		pkt(fxpRead, uint32(8), "1", uint64(0), uint32(8)),
+	))
 
 	metrics := obs.NewMetrics("fuzz") // every path counts without a panic
 	f.Fuzz(func(t *testing.T, mode byte, data []byte) {
