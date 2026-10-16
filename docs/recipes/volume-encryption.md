@@ -53,15 +53,18 @@ if that file exists, and asks for the passphrase at boot otherwise;
 unlock the disk with the TPM instead. `nofail` lets the boot go on without
 the disk, so that you can still log in; gosftpd does not start without it.
 
-The first time, stop gosftpd, copy what `/srv/sftp` holds now onto the disk
-(it would be hidden below the mount point), mount it, give its root
+The first time, stop gosftpd, copy what `/srv/sftp` holds now onto the
+disk, check the copy and delete the originals: below the mount point they
+would be hidden, but not encrypted. Then mount the disk, give its root
 directory to gosftpd and start:
 
 ```sh
 sudo systemctl stop gosftpd
 sudo mount /dev/mapper/sftp-data /mnt
 sudo cp -a /srv/sftp/. /mnt/
+sudo diff -r /srv/sftp /mnt      # prints only "Only in /mnt: lost+found"
 sudo umount /mnt
+mountpoint /srv/sftp || sudo find /srv/sftp -xdev -mindepth 1 -delete
 sudo systemctl daemon-reload
 sudo mount /srv/sftp
 sudo systemd-tmpfiles --create gosftpd.conf
@@ -69,9 +72,18 @@ sudo runuser -u gosftpd -- gosftpd config validate --check-fs --config /etc/gosf
 sudo systemctl start gosftpd
 ```
 
-`systemd-tmpfiles --create` gives `/srv/sftp` to gosftpd, as for any disk
-mounted there later ([install.md](../install.md#a-data-disk-mounted-later));
-the owner is kept on the disk.
+`find` runs only while `/srv/sftp` is not a mount point, so it cannot
+delete the copy on the disk, and `-xdev` keeps it off other disks mounted
+below. `systemd-tmpfiles --create` gives `/srv/sftp` to gosftpd, as for
+any disk mounted there later
+([install.md](../install.md#a-data-disk-mounted-later)); the owner is kept
+on the disk.
+
+Deleting a file does not overwrite it: the data of the deleted originals
+can stay on the unencrypted disk until the file system reuses their
+blocks. Overwriting them first (`shred`) is not reliable on SSDs and on
+many file systems (see `man shred`). Encrypt the disk before the first
+upload, or treat the data that was there before as exposed.
 
 ### On a mount's directory
 
@@ -93,14 +105,23 @@ create = true
 require_mountpoint = true
 ```
 
-The fstab line names `/srv/sftp/inbox` instead of `/srv/sftp`. After the
-first mount, give the disk's root directory to gosftpd; the owner is kept
-on the disk:
+The fstab line names `/srv/sftp/inbox` instead of `/srv/sftp`. The first
+time, move what the inbox holds onto the disk as above (the note on the
+deleted originals applies too), mount it, give the disk's root directory
+to gosftpd and start; the owner is kept on the disk:
 
 ```sh
+sudo systemctl stop gosftpd
+sudo mount /dev/mapper/sftp-data /mnt
+sudo cp -a /srv/sftp/inbox/. /mnt/
+sudo diff -r /srv/sftp/inbox /mnt   # prints only "Only in /mnt: lost+found"
+sudo umount /mnt
+mountpoint /srv/sftp/inbox || sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete
+sudo systemctl daemon-reload
 sudo mount /srv/sftp/inbox
 sudo chown gosftpd:gosftpd /srv/sftp/inbox
 sudo chmod 0750 /srv/sftp/inbox
+sudo systemctl start gosftpd
 ```
 
 ### Unlocked by hand
@@ -215,7 +236,9 @@ unlock and mount first, then start gosftpd, as above.
 CI checks the systemd units and drop-ins on this page offline
 (`systemd-analyze verify` in
 [test/systemd/lint.sh](../../test/systemd/lint.sh)). It does not test the
-`cryptsetup`, crypttab, fstab, fscrypt or ZFS steps, nor whether a disk
-mounted on the host while gosftpd runs reaches the unit's mount namespace.
+`cryptsetup`, crypttab, fstab, fscrypt or ZFS steps. The systemd CI job
+checks that a disk mounted on the host while gosftpd runs reaches the
+unit's mount namespace
+([operations.md](../operations.md#a-disk-mounted-on-a-mount-directory)).
 The exit status 2 of `require_mountpoint` without the disk was tested by
 hand.

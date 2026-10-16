@@ -12,6 +12,7 @@ A new dependency requires removing another one or revisiting this rule.
 | `github.com/pkg/sftp`            | v1.13.11 | SFTP `RequestServer`                     | M1    |
 | `golang.org/x/sys`               | v0.49.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
+| `github.com/spf13/pflag`         | v1.0.10  | flags of `serve` that override the file  | M2    |
 | `golang.org/x/term`              | v0.47.0  | password input without echo              | M3    |
 | `github.com/pires/go-proxyproto` | v0.15.0  | PROXY protocol v1 and v2 header parser (Apache-2.0) | M4    |
 | `github.com/landlock-lsm/go-landlock` | v0.10.1 | Landlock on Linux ([below](#go-landlock-and-psx)) | M4 |

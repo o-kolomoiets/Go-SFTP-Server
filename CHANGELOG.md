@@ -14,11 +14,13 @@ Multi-user operation: reload on SIGHUP, users in `users.d`, SSH
 certificates, host key rotation, Prometheus metrics, hooks, PROXY protocol,
 a systemd unit and Landlock on Linux. It also fixes a crash that an
 authenticated client could cause (see Fixed). Read
-[docs/operations.md](docs/operations.md#upgrades) before upgrading; four
+[docs/operations.md](docs/operations.md#upgrades) before upgrading; five
 changes need attention: headers from load balancers not in
-`server.trusted_proxies` are refused, `serve` refuses trusted files inside
-mounts and two host keys of one type, and on Linux Landlock is on by
-default, so some changes need a restart instead of a reload.
+`server.trusted_proxies` are refused; `serve` refuses trusted files inside
+mounts and two host keys of one type; on Linux Landlock is on by default,
+so some changes need a restart instead of a reload; and `cert-authority`
+and `command="internal-sftp"` lines in `authorized_keys`, which v0.3
+skipped with a warning, now take effect.
 
 When upgrading a server behind a load balancer that sends PROXY protocol
 headers, add the load balancer to `server.trusted_proxies` together with
@@ -39,6 +41,11 @@ refused (see Changed).
   `landlock` = `blocked` in both cases. The shipped unit allows them; to
   move to it from the interim unit, see
   [docs/install.md](docs/install.md#upgrade-from-the-quickstart-or-the-interim-unit).
+- Check the `authorized_keys` files for `cert-authority` lines and lines
+  with `command="internal-sftp"` (or a path to `sftp-server`). v0.3
+  skipped them with a warning; v0.4 uses them, so a `cert-authority` line
+  lets in the certificates its CA signs for the user (see Changed). Remove
+  the lines that should not grant logins before upgrading.
 
 ### Added
 
@@ -162,7 +169,9 @@ refused (see Changed).
   nothing at all, as a TCP health check, is not audited. The setting is
   reloadable, and `server.start` and `server.reload` record it.
   `gosftpd healthcheck` sends a `LOCAL` header when its own address is
-  trusted. Tested with HAProxy and nginx. See
+  trusted. Tested with HAProxy and nginx. New dependency
+  `github.com/pires/go-proxyproto` v0.15.0 (Apache-2.0), used only as a
+  header parser. See
   [docs/configuration.md](docs/configuration.md#behind-a-load-balancer).
 - A systemd unit, `packaging/systemd/gosftpd.service`, with sysusers and
   tmpfiles files and a drop-in for systemd before 253, in the Linux release
@@ -209,9 +218,11 @@ refused (see Changed).
   LUKS2, fscrypt, ZFS, cloud disks). More alert rules in
   [docs/metrics.md](docs/metrics.md): target down, failed reloads,
   connection limits, PROXY protocol on one side only, bursts of bans. CI
-  checks the units and tmpfiles files of the documentation offline, tests
-  the alert rules with `promtool`, and fails when the documentation names
-  a metric that does not exist.
+  checks offline the units, drop-ins and tmpfiles files that the
+  documentation shows in a code block that begins with their path (the
+  recipes, the archive drop-in of hooks.md and the port 22 drop-in of
+  install.md), tests the alert rules with `promtool`, and fails when the
+  documentation names a metric that does not exist.
 
 ### Changed
 
