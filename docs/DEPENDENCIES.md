@@ -81,3 +81,12 @@ support as a whole added 72 KiB (73 728 bytes, linux/amd64,
 govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12.
 golangci-lint v2.14.0 is installed as a binary (CI uses
 `golangci/golangci-lint-action`).
+
+The `tool` directive marks every requirement in `tools/go.mod` as
+`// indirect`, so a module stays at the version the tools ask for until it
+is raised by hand or by Dependabot, which is configured to update these
+too. gotestsum asks for `golang.org/x/text` v0.17.0, which is affected by
+GO-2026-5970 and GO-2026-6629; `tools/go.mod` requires v0.41.0.
+`go.yaml.in/yaml/v4` stays at v4.0.0-rc.3: actionlint v1.7.12 does not
+build with a later one. CI and `make vuln` scan this module with
+govulncheck too. None of it is part of the gosftpd binary.
