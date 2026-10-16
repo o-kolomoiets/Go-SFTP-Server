@@ -259,6 +259,12 @@ refused (see Changed).
   are bound, before any hook can run, `serve` clears the ambient set on
   every thread (with `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port
   22 a hook inherited the capability).
+- Dependencies: `golang.org/x/crypto` v0.58.0, `golang.org/x/sys` v0.49.0,
+  `golang.org/x/term` v0.47.0 and `github.com/spf13/pflag` v1.0.10. Built
+  with Go 1.27, as the release binaries are, gosftpd now also lists the
+  ML-DSA algorithms `ssh-mldsa-44`, `ssh-mldsa-65` and `ssh-mldsa-87` in
+  `server-sig-algs`, since x/crypto supports them; ML-DSA keys are still
+  refused in `authorized_keys`, as CAs and in certificates.
 
 ### Fixed
 
