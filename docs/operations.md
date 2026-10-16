@@ -261,8 +261,9 @@ then counts restored files as new.
 ## Upgrades
 
 Read the [CHANGELOG](../CHANGELOG.md) of every version since yours first:
-the entries marked **BREAKING:** and the upgrade notes. Coming from the
-Quickstart or the interim unit of v0.3, take the steps in
+the introduction of each version, which names the changes that need
+attention, its Upgrading section and the entries marked **BREAKING:**.
+Coming from the Quickstart or the interim unit of v0.3, take the steps in
 [install.md](install.md#upgrade-from-the-quickstart-or-the-interim-unit)
 too.
 

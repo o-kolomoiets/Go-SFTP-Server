@@ -14,11 +14,13 @@ Multi-user operation: reload on SIGHUP, users in `users.d`, SSH
 certificates, host key rotation, Prometheus metrics, hooks, PROXY protocol,
 a systemd unit and Landlock on Linux. It also fixes a crash that an
 authenticated client could cause (see Fixed). Read
-[docs/operations.md](docs/operations.md#upgrades) before upgrading; four
+[docs/operations.md](docs/operations.md#upgrades) before upgrading; five
 changes need attention: headers from load balancers not in
-`server.trusted_proxies` are refused, `serve` refuses trusted files inside
-mounts and two host keys of one type, and on Linux Landlock is on by
-default, so some changes need a restart instead of a reload.
+`server.trusted_proxies` are refused; `serve` refuses trusted files inside
+mounts and two host keys of one type; on Linux Landlock is on by default,
+so some changes need a restart instead of a reload; and `cert-authority`
+and `command="internal-sftp"` lines in `authorized_keys`, which v0.3
+skipped with a warning, now take effect.
 
 When upgrading a server behind a load balancer that sends PROXY protocol
 headers, add the load balancer to `server.trusted_proxies` together with
@@ -39,6 +41,11 @@ refused (see Changed).
   `landlock` = `blocked` in both cases. The shipped unit allows them; to
   move to it from the interim unit, see
   [docs/install.md](docs/install.md#upgrade-from-the-quickstart-or-the-interim-unit).
+- Check the `authorized_keys` files for `cert-authority` lines and lines
+  with `command="internal-sftp"` (or a path to `sftp-server`). v0.3
+  skipped them with a warning; v0.4 uses them, so a `cert-authority` line
+  lets in the certificates its CA signs for the user (see Changed). Remove
+  the lines that should not grant logins before upgrading.
 
 ### Added
 
