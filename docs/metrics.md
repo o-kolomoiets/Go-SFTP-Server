@@ -175,11 +175,17 @@ groups:
 - `GosftpdDown`: Prometheus cannot scrape the admin listener; the job name
   is the one of the scrape configuration above.
 - `GosftpdReloadFailed` fires while the last reload has failed: the server
-  runs an older configuration than the file on disk, which a restart would
-  refuse too. `GosftpdReloadErrors` also catches a failed reload that a
-  later one fixed.
-- `GosftpdMountsUnavailable`: a mount is left out. Under Landlock a disk
-  mounted on a mount's directory after the start does this until a restart
+  runs an older configuration than the file on disk. A restart would
+  refuse the file too, unless the reload failed only because of the
+  Landlock ruleset applied at start, such as for an `include` or
+  `auth.revoked_keys_file` outside it. Then the error in the journal ends
+  with "(outside the Landlock ruleset applied at start; restart gosftpd)",
+  and a restart is the fix. `GosftpdReloadErrors` also catches a failed
+  reload that a later one fixed.
+- `GosftpdMountsUnavailable`: the last reload left a mount out. The gauge
+  changes only at a reload. Under Landlock the first reload after a disk
+  was mounted on a mount's directory leaves that mount out, and the alert
+  fires until a restart; before that reload nothing shows it
   ([operations.md](operations.md#a-disk-mounted-on-a-mount-directory)).
 - `GosftpdConnectionLimit`: connections were refused because
   `max_connections`, `max_connections_per_ip` or `max_preauth_connections`
