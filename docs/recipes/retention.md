@@ -13,34 +13,46 @@ on their next run while they still have it.
 
 ## systemd-tmpfiles
 
-Two lines in a file of their own:
+One line in a file of its own:
 
 ```
 # /etc/tmpfiles.d/gosftpd-retention.conf
 e /srv/sftp/inbox - - - c:30d
-x /srv/sftp/inbox/.versions
 ```
 
 - `e` cleans the contents of an existing directory; `c:30d` deletes a file
   when its change time (ctime) is more than 30 days old. For a file at
   rest that is when it arrived: the end of its upload, or its rename into
   place.
-- `x` leaves the versions directory of `on_conflict = "version"` alone:
-  gosftpd deletes old versions itself (`versions.max_age`). Without it,
-  tmpfiles deletes old versions too.
-- Directories stay: `c:` ages files only.
+- Old versions of `on_conflict = "version"` expire the same way. The move
+  into the versions directory sets a version's change time, so tmpfiles
+  deletes it 30 days after it was saved, the default `versions.max_age`.
+  Do not exclude the versions directory: gosftpd prunes the versions of a
+  file only when it saves the next one, so the versions of a file that
+  tmpfiles deleted would stay forever.
+- Empty directories go too. A lowercase letter such as `c` ages files
+  only; directories are aged by their access, birth and modification
+  times, and tmpfiles removes an empty one once all three are more than
+  30 days old. That includes a folder a partner created and the versions
+  directory; gosftpd creates the versions directory again when it saves
+  the next version.
 - Do not call the file `gosftpd.conf`: a file of that name in
   `/etc/tmpfiles.d` replaces the packaged
   `/usr/lib/tmpfiles.d/gosftpd.conf` ([install.md](../install.md#another-data-path)).
 
-For a home mount (`path = "/srv/sftp/home/{user}"`), each user's directory
-has its own versions directory:
+For a home mount (`path = "/srv/sftp/home/{user}"`):
 
 ```
 # /etc/tmpfiles.d/gosftpd-retention-home.conf
-e /srv/sftp/home - - - c:30d
-x /srv/sftp/home/*/.versions
+e /srv/sftp/home - - - ~c:30d
 ```
+
+The `~` keeps what is directly in `/srv/sftp/home`, the users'
+directories, and ages everything inside them as above, versions
+included. Without it, tmpfiles removes the directory of a user whose
+files have all expired, and with `create = false` (the default) that
+user's home mount is then unavailable (`fs.denied` with
+`reason = "home_missing"`).
 
 `systemd-tmpfiles-clean.timer` applies the lines 15 minutes after boot and
 then once a day. To apply them now:
@@ -81,7 +93,7 @@ RequiresMountsFor=/srv/sftp
 Type=oneshot
 User=gosftpd
 Group=gosftpd
-ExecStart=/usr/bin/find /srv/sftp/inbox -xdev -type f -cmin +43200 -not -name '.gosftpd-*' -not -path '/srv/sftp/inbox/.versions/*' -print -delete
+ExecStart=/usr/bin/find /srv/sftp/inbox -xdev -type f -cmin +43200 -not -name '.gosftpd-*' -print -delete
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/srv/sftp/inbox
@@ -110,11 +122,12 @@ sudo systemctl start gosftpd-retention.service   # once now
 journalctl -u gosftpd-retention.service          # what it deleted
 ```
 
-`-cmin +43200` is 30 days in minutes, by change time as above. `-xdev`
-stays on the inbox's file system, and the two `-not` tests skip the
-temporary files of uploads in progress (gosftpd removes those left over
-itself) and the versions directory. With `Persistent=true`, a run missed
-while the machine was off starts at the next boot.
+`-cmin +43200` is 30 days in minutes, by change time as above, also for
+old versions. `-xdev` stays on the inbox's file system, `-type f` leaves
+every directory, and `-not` skips the temporary files of uploads in
+progress (gosftpd removes those left over itself). With
+`Persistent=true`, a run missed while the machine was off starts at the
+next boot.
 
 ## Hooks
 
@@ -155,5 +168,5 @@ archiving. Before you choose hooks:
 CI checks the units and tmpfiles files on this page offline
 (`systemd-analyze verify` and `systemd-tmpfiles` in
 [test/systemd/lint.sh](../../test/systemd/lint.sh)); it runs neither the
-timer nor the cleanup. The ages above were tested by hand, with systemd 255
-on ext4.
+timer nor the cleanup. The ages above, the directories and `~` were tested
+by hand, with systemd 255 on ext4.
