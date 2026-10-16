@@ -861,9 +861,10 @@ command-line flags and environment, and checks it like `config validate
 - **Open connections** keep the configuration they logged in under, for all
   their sessions, unless `disconnect_removed_users` closes them. A changed or
   remounted mount directory is opened anew for new logins (without
-  Landlock; under Landlock a recreated or remounted mount directory is
-  unavailable until a restart, see [Landlock](#landlock)); old connections
-  keep the old directory until they end.
+  Landlock, and a remounted or recreated one is logged as `mount reopened`;
+  under Landlock a recreated or remounted mount directory is unavailable
+  until a restart, see [Landlock](#landlock)); old connections keep the old
+  directory until they end.
 - **Carried over:** bans (with the new `[auth.ban]` settings; turning bans off
   drops them), connection counts (connections above a lowered limit stay; new
   ones are refused, as `conn.reject`, until the count is below it) and

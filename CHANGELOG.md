@@ -40,7 +40,8 @@ refused (see Changed).
   configuration. A key file that is missing or unsafe on reload revokes its
   keys instead of failing the reload, and a mount that is unavailable is
   left out until the next reload. A remounted mount directory is opened
-  anew for new logins (under Landlock: after a restart, see Changed). See
+  anew for new logins, with `mount reopened` in the log (under Landlock:
+  after a restart, see Changed). See
   [docs/configuration.md](docs/configuration.md#reload)
   and [ADR 0005](docs/adr/0005-reload.md).
 - Audit event `server.reload`; `conn.close` result `revoked`.
