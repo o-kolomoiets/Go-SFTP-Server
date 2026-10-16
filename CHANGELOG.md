@@ -259,6 +259,12 @@ refused (see Changed).
   are bound, before any hook can run, `serve` clears the ambient set on
   every thread (with `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port
   22 a hook inherited the capability).
+- Dependencies: `golang.org/x/crypto` v0.58.0, `golang.org/x/sys` v0.49.0,
+  `golang.org/x/term` v0.47.0 and `github.com/spf13/pflag` v1.0.10. Built
+  with Go 1.27, as the release binaries are, gosftpd now also lists the
+  ML-DSA algorithms `ssh-mldsa-44`, `ssh-mldsa-65` and `ssh-mldsa-87` in
+  `server-sig-algs`, since x/crypto supports them; ML-DSA keys are still
+  refused in `authorized_keys`, as CAs and in certificates.
 
 ### Fixed
 
@@ -294,6 +300,17 @@ refused (see Changed).
 - A client path of 4096 bytes without a leading `/` was accepted, although
   the path the server returned for it (REALPATH) was one byte too long and
   refused; the limit now applies to the cleaned path (found by fuzzing).
+
+### Security
+
+- Developer tools: `tools/go.mod` requires `golang.org/x/text` v0.41.0
+  instead of the v0.17.0 that gotestsum asks for (GO-2026-5970,
+  GO-2026-6629). This does not change the gosftpd binary. CI and `make
+  vuln` scan the tools module with govulncheck too.
+- `osv-scanner.toml` ignores GO-2026-5932 (`golang.org/x/crypto/openpgp`,
+  which has no fixed version) for osv-scanner and the OpenSSF Scorecard:
+  gosftpd never imports openpgp. See
+  [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md#go-2026-5932-and-osv-scannertoml).
 
 ## [0.3.0] - 2026-10-09
 

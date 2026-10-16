@@ -1,12 +1,29 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    # tools/go.mod is a separate module; without it Dependabot ignores the tools.
-    directories: ["/", "/tools"]
+    directory: /
     schedule:
       interval: weekly
     groups:
       minor-and-patch:
+        update-types: [minor, patch]
+
+  # tools/go.mod is a separate module. The tool directive leaves every
+  # requirement there marked "// indirect", and Dependabot updates only
+  # direct dependencies by default, so allow all of them.
+  - package-ecosystem: gomod
+    directory: /tools
+    allow:
+      - dependency-type: all
+    ignore:
+      # actionlint v1.7.12 does not build with go.yaml.in/yaml/v4
+      # v4.0.0-rc.4 or newer; it requires rc.3. An actionlint update
+      # raises it as far as that release needs.
+      - dependency-name: go.yaml.in/yaml/v4
+    schedule:
+      interval: weekly
+    groups:
+      tools:
         update-types: [minor, patch]
 
   - package-ecosystem: github-actions

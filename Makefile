@@ -28,8 +28,9 @@ tidy: ## Tidy both modules
 	$(GO) mod tidy
 	cd tools && $(GO) mod tidy
 
-vuln: ## Scan for known vulnerabilities
+vuln: ## Scan both modules for known vulnerabilities
 	$(TOOL) govulncheck ./...
+	cd tools && $(GO) tool govulncheck tool
 
 staticcheck: ## Run staticcheck standalone (also runs inside golangci-lint)
 	$(TOOL) staticcheck ./...
