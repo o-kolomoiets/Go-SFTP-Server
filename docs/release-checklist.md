@@ -9,7 +9,11 @@ note in the CHANGELOG.
 
 1. All work for the release is merged and CI is green on `main`, including
    both interop jobs (OpenSSH 9.6 with paramiko, rclone and lftp; OpenSSH
-   10.6).
+   10.6) and the `systemd` job (the packaged unit under systemd). The
+   nightly **Fuzz** workflow is green on the commit to tag, and no `fuzz:
+   ... failed` issue is open; if the commit is newer than the last nightly
+   run, start the workflow by hand (**Actions → Fuzz → Run workflow**) and
+   wait for it.
 2. Optional until WinSCP runs in CI (M3b-02): the manual WinSCP checklist
    in [interop.md](interop.md#winscp).
 3. `CHANGELOG.md`: move the `Unreleased` entries into

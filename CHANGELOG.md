@@ -187,6 +187,18 @@ refused (see Changed).
   own, with a warning at start, which `config validate --check-fs` prints
   too. `config validate` refuses `required` with exec hooks. New
   dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
+- An operations guide, [docs/operations.md](docs/operations.md): reload
+  and its result, stop and restart with interrupted uploads, log rotation,
+  backups and restore, upgrades, and a disk mounted on a mount directory.
+  Recipes for retention ([docs/recipes/retention.md](docs/recipes/retention.md):
+  systemd-tmpfiles, a timer, hooks) and volume encryption
+  ([docs/recipes/volume-encryption.md](docs/recipes/volume-encryption.md):
+  LUKS2, fscrypt, ZFS, cloud disks). More alert rules in
+  [docs/metrics.md](docs/metrics.md): target down, failed reloads,
+  connection limits, PROXY protocol on one side only, bursts of bans. CI
+  checks the units and tmpfiles files of the documentation offline, tests
+  the alert rules with `promtool`, and fails when the documentation names
+  a metric that does not exist.
 
 ### Changed
 
