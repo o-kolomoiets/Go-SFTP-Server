@@ -302,7 +302,8 @@ happened:
   or a kernel without it), a reload opens the new directory for new
   logins: `sudo systemctl reload gosftpd`. Connections that logged in
   before the reload keep the old directory until they end. The reload
-  reports `configuration reloaded`.
+  reports `configuration reloaded`, and the log has `mount reopened` with
+  the mount's name.
 - **Under Landlock**, the kernel ties the mount's rule to the directory
   opened at start, and the new disk is outside it. A reload leaves the
   mount out instead: the status line has `restart needed for:
@@ -315,9 +316,10 @@ happened:
 A disk mounted on a directory *inside* a mount (`/srv/sftp/inbox/archive`)
 is served at once, also under Landlock, without a reload.
 
-Under the packaged unit gosftpd runs in a mount namespace of its own. That
-a disk mounted on the host while gosftpd runs reaches that namespace is not
-tested; after a restart gosftpd always sees it.
+Under the packaged unit gosftpd runs in a mount namespace of its own. A
+disk mounted on the host while gosftpd runs reaches it (the systemd CI job
+checks this on Ubuntu 24.04 with systemd 255), and after a restart gosftpd
+always sees it.
 
 **Files written below the mount point** stay on the old file system. A
 bind mount of that file system shows them; here it is the root file
