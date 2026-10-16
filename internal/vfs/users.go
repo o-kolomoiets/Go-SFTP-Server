@@ -37,14 +37,18 @@ type ownEntry struct {
 }
 
 // redirect points STAT, LSTAT and SETSTAT of a requested path at the name
-// an upload or rename actually used.
+// an upload or rename actually used. An upload that OpenWrite opened under
+// another name holds its entry while it is open: the entry does not
+// expire, and the upload's close starts its RedirectTTL.
 type redirect struct {
 	final string // mount-relative
 	until time.Time
+	open  *WriteHandle // the upload holding the entry, or nil
 }
 
 const (
-	// RedirectTTL is how long a stat redirect lasts.
+	// RedirectTTL is how long a stat redirect lasts after the upload ended
+	// or the move.
 	RedirectTTL = 60 * time.Second
 	// OwnTTL is how long a user's own upload keeps its "own" status after
 	// the user last changed it.
@@ -93,7 +97,7 @@ func (t *Table) sweep() {
 			}
 		}
 		for k, r := range st.redirects {
-			if now.After(r.until) {
+			if r.open == nil && now.After(r.until) {
 				delete(st.redirects, k)
 			}
 		}
@@ -103,21 +107,27 @@ func (t *Table) sweep() {
 
 // makeRoom keeps a map below max: expired entries go first, then the one
 // that expires soonest (the newest entry is the one a client is about to
-// use).
-func makeRoom[V ownEntry | redirect](m map[userKey]V, limit int, now time.Time, until func(V) time.Time) {
+// use). until returns when an entry expires and whether an open upload
+// holds it. A held entry is never dropped, so with every entry held the
+// map grows past max; there are no more of them than the user has uploads
+// open.
+func makeRoom[V ownEntry | redirect](m map[userKey]V, limit int, now time.Time, until func(V) (time.Time, bool)) {
 	if len(m) < limit {
 		return
 	}
 	var (
 		soonest userKey
+		first   time.Time // when soonest expires
 		found   bool
 	)
 	for k, v := range m {
+		u, held := until(v)
 		switch {
-		case now.After(until(v)):
+		case held:
+		case now.After(u):
 			delete(m, k)
-		case !found || until(v).Before(until(m[soonest])):
-			soonest, found = k, true
+		case !found || u.Before(first):
+			soonest, first, found = k, u, true
 		}
 	}
 	if len(m) >= limit && found {
@@ -125,8 +135,8 @@ func makeRoom[V ownEntry | redirect](m map[userKey]V, limit int, now time.Time, 
 	}
 }
 
-func ownUntil(e ownEntry) time.Time   { return e.until }
-func redirUntil(r redirect) time.Time { return r.until }
+func ownUntil(e ownEntry) (time.Time, bool)   { return e.until, false }
+func redirUntil(r redirect) (time.Time, bool) { return r.until, r.open != nil }
 
 // own records that the session's user created the file fi at rel;
 // arrived records that its upload was closed with result ok.
@@ -315,7 +325,7 @@ func (s *Session) redirectFor(v *view, rel string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if t.now().After(r.until) {
+	if r.open == nil && t.now().After(r.until) {
 		delete(st.redirects, k)
 		t.tidy(s.user)
 		return "", false
@@ -323,7 +333,9 @@ func (s *Session) redirectFor(v *view, rel string) (string, bool) {
 	return r.final, true
 }
 
-func (s *Session) setRedirect(v *view, requested, final string) {
+// setRedirect points requested at final. open is the upload OpenWrite
+// opened to final, which holds the redirect until it is closed, or nil.
+func (s *Session) setRedirect(v *view, requested, final string, open *WriteHandle) {
 	t := s.t
 	t.umu.Lock()
 	defer t.umu.Unlock()
@@ -336,7 +348,27 @@ func (s *Session) setRedirect(v *view, requested, final string) {
 	if _, ok := st.redirects[k]; !ok {
 		makeRoom(st.redirects, maxRedirects, now, redirUntil)
 	}
-	st.redirects[k] = redirect{final: final, until: now.Add(RedirectTTL)}
+	st.redirects[k] = redirect{final: final, until: now.Add(RedirectTTL), open: open}
+}
+
+// closedRedirect starts the RedirectTTL of the redirect h held while it
+// was open. If another open, a remove or a rename of the name ended the
+// redirect meanwhile, it is left as it is: gone, or another upload's.
+func (s *Session) closedRedirect(h *WriteHandle) {
+	if h.requested == "" {
+		return
+	}
+	t := s.t
+	t.umu.Lock()
+	defer t.umu.Unlock()
+	st := t.lookup(s.user)
+	if st == nil {
+		return
+	}
+	k := userKey{h.v.m.dir, h.requested}
+	if r, ok := st.redirects[k]; ok && r.open == h {
+		st.redirects[k] = redirect{final: r.final, until: t.now().Add(RedirectTTL)}
+	}
 }
 
 func (s *Session) clearRedirect(v *view, rel string) {

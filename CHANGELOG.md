@@ -324,8 +324,8 @@ refused (see Changed).
   the start of the upload instead of its end. After an upload longer than
   60 seconds, paramiko `put(confirm=True)` saw the original and reported a
   size mismatch, and OpenSSH `reput` after an interrupted upload appended
-  the rest of the new file to the original. The redirect now lasts 60
-  seconds after the upload ended, also after a resume.
+  the rest of the new file to the original. The redirect now lasts while
+  the upload is open and for 60 seconds after it ended, also for a resume.
 - An upload whose write failed in the file system (a full disk, an I/O
   error) was audited with `result` `ok`; it is now `error`, and an atomic
   upload with a failed write is not published. A truncation refused by the

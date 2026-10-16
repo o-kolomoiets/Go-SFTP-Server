@@ -95,12 +95,17 @@ access = { data = "full" }
 	loggedIn := make(chan struct{})
 	errc := make(chan error, 1)
 	// Until it sends on errc, the goroutine alone uses f, chunk, written
-	// and sum.
+	// and sum. It stops waiting when the test ends: a failure before
+	// close(loggedIn) does not leave it blocked.
 	go func() {
 		err := write(size - int64(len(chunk)))
 		if err == nil {
-			<-loggedIn
-			err = write(size)
+			select {
+			case <-loggedIn:
+				err = write(size)
+			case <-t.Context().Done():
+				err = t.Context().Err()
+			}
 		}
 		errc <- err
 	}()

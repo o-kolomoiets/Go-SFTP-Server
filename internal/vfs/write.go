@@ -251,6 +251,10 @@ func (h *WriteHandle) Located() Where {
 // was written to a file this upload created, the empty file is removed.
 func (h *WriteHandle) Close(aborted bool) error {
 	h.closeOnce.Do(func() {
+		// The redirect OpenWrite set for this upload lasts RedirectTTL
+		// from its end, also of an interrupted one, which a resume
+		// continues.
+		defer h.s.closedRedirect(h)
 		if h.target != "" {
 			h.closeErr = h.closeTemp(aborted)
 			return
@@ -267,11 +271,6 @@ func (h *WriteHandle) Close(aborted bool) error {
 		// it was (ADR 0010).
 		if st != nil && h.owned && (h.reserved || h.written.Load() > 0 || h.changed.Load()) {
 			h.s.closedCreated(h, st, h.arrived(aborted))
-		}
-		// As in closeTemp, the redirect lasts from the end of the upload,
-		// also of an interrupted one, which a resume continues.
-		if !removed && h.requested != "" {
-			h.s.setRedirect(h.v, h.requested, h.rel)
 		}
 		h.s.unregister(h, removed)
 	})
@@ -330,7 +329,7 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	h.key = h.virtual
 	s.register(h)
 	if name != requested && v.opts().StatRedirect {
-		s.setRedirect(v, requested, name)
+		s.setRedirect(v, requested, name, h)
 		h.requested = requested
 	}
 	return h, nil

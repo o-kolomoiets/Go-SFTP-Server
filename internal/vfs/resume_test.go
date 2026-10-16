@@ -436,6 +436,135 @@ func TestStatRedirectAfterLongUpload(t *testing.T) {
 	}
 }
 
+// Review finding: the redirect of an upload written in place expired 60
+// seconds after the open, while the upload was still running: STAT of the
+// name answered for the original. Nor does a full table drop it.
+func TestStatRedirectDuringLongUpload(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	now := time.Now()
+	tbl.now = func() time.Time { return now }
+	h, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close(false)
+	if _, err := h.WriteAt([]byte("the new data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * RedirectTTL)
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("the new data")) {
+		t.Errorf("Stat during a long upload = %v, %v; want the copy", fi, err)
+	}
+	for i := range maxRedirects {
+		s.setRedirect(s.views[0], fmt.Sprintf("f%d", i), fmt.Sprintf("f%d (1)", i), nil)
+	}
+	if got := s.redirected("/a.txt"); got != "/a (1).txt" {
+		t.Errorf("a full table dropped the redirect of an open upload: %q", got)
+	}
+}
+
+// Review finding: the close of an upload written in place set the redirect
+// again, also when a remove of the name had ended it while the upload was
+// open. After a fresh upload to the name, STAT answered for the old copy,
+// and a reput went to the copy.
+func TestRedirectEndedByRemoveDuringUpload(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: PermAll}})
+	h, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.WriteAt([]byte("the copy's data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove("/a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := upload(t, s, "/a.txt", put, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Path() != "/a.txt" {
+		t.Fatalf("fresh upload went to %q", fresh.Path())
+	}
+	if err := h.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("fresh")) {
+		t.Errorf("Stat after the first upload ended = %v, %v; want the fresh file", fi, err)
+	}
+	r, err := s.OpenWrite("/a.txt", reput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close(false)
+	if r.Path() != "/a.txt" {
+		t.Errorf("reput went to %q", r.Path())
+	}
+}
+
+// Review finding: likewise, an open of the name for reading ended the
+// redirect, and the close of the upload brought it back.
+func TestRedirectEndedByOpenDuringUpload(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: PermAll}})
+	h, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.WriteAt([]byte("the copy's data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.OpenRead("/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := h.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("original")) {
+		t.Errorf("Stat after the upload ended = %v, %v; want the original", fi, err)
+	}
+}
+
+// Review finding: the close of an upload took over the redirect that a
+// later upload of the name, still open, held.
+func TestRedirectOfLaterUploadKept(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	now := time.Now()
+	tbl.now = func() time.Time { return now }
+	first, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.OpenWrite("/a.txt", put) // -> "a (2).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close(false)
+	if _, err := second.WriteAt([]byte("the second"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(false); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * RedirectTTL)
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("the second")) {
+		t.Errorf("Stat while the second upload runs = %v, %v; want its file", fi, err)
+	}
+}
+
 // Review finding: a full redirect table drops the oldest entry, not the new.
 func TestRedirectTableFull(t *testing.T) {
 	t.Parallel()
@@ -446,10 +575,10 @@ func TestRedirectTableFull(t *testing.T) {
 	base := time.Now()
 	for i := range maxRedirects {
 		tbl.now = func() time.Time { return base.Add(time.Duration(i) * time.Millisecond) }
-		s.setRedirect(v, fmt.Sprintf("f%d", i), fmt.Sprintf("f%d (1)", i))
+		s.setRedirect(v, fmt.Sprintf("f%d", i), fmt.Sprintf("f%d (1)", i), nil)
 	}
 	tbl.now = func() time.Time { return base.Add(time.Second) }
-	s.setRedirect(v, "a.txt", "a (1).txt")
+	s.setRedirect(v, "a.txt", "a (1).txt", nil)
 	if got := s.redirected("/a.txt"); got != "/a (1).txt" {
 		t.Errorf("new redirect dropped: %q", got)
 	}
