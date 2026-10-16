@@ -332,6 +332,12 @@ jobs:
         with:
           go-version-input: stable
           check-latest: true
+      # The action scans the main module only. The developer tools are a
+      # module of their own, scanned with the govulncheck pinned there;
+      # the pattern "tool" names the packages of its tool block.
+      - name: govulncheck for tools/go.mod
+        working-directory: tools
+        run: go tool govulncheck tool
 
   # The only required status check: matrix jobs report as "test (…)",
   # so branch protection cannot require them by a stable name.

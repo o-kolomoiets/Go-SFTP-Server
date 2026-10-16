@@ -290,7 +290,8 @@ refused (see Changed).
 
 - Developer tools: `tools/go.mod` requires `golang.org/x/text` v0.41.0
   instead of the v0.17.0 that gotestsum asks for (GO-2026-5970,
-  GO-2026-6629). This does not change the gosftpd binary.
+  GO-2026-6629). This does not change the gosftpd binary. CI and `make
+  vuln` scan the tools module with govulncheck too.
 
 ## [0.3.0] - 2026-10-09
 
