@@ -439,6 +439,6 @@ exec hook leaves; it warns about it. Run the container with `docker run
   and sync-style clients (`rclone copy` or `sync`, WinSCP Synchronize,
   `lftp mirror -R`) then upload those files again on their next run: point
   such partners to `rclone move`, or keep files and expire them by age
-  (systemd-tmpfiles) instead.
+  instead ([recipes/retention.md](recipes/retention.md)).
 - **Process downloads:** `on = ["fs.download"]`, and compare `bytes` with
   the file's size before acting.
