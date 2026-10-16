@@ -44,6 +44,7 @@ const (
 
 	fxpVersion = 2
 	fxpStatus  = 101
+	fxpName    = 104
 )
 
 // pkt builds one SFTP packet from uint32, uint64, string and []byte fields.

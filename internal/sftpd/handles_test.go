@@ -5,6 +5,7 @@ package sftpd
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -116,6 +117,47 @@ func TestRequestsAfterClose(t *testing.T) {
 		}
 		if !strings.Contains(upload, `"result":"ok"`) {
 			t.Fatalf("the upload is audited as %q", upload)
+		}
+	}
+}
+
+// pkg/sftp lists a directory in its parallel workers for a READ or WRITE
+// sent with the directory's handle, also while it serves a READDIR. These
+// listings ran at the same time and could crash the process (run with
+// -race). A READ sent after the CLOSE does not list the directory (see
+// Gate).
+func TestDirectoryHandleInParallel(t *testing.T) {
+	t.Parallel()
+
+	share := t.TempDir()
+	for i := range 600 { // more than two batches of the vfs lister
+		if err := os.WriteFile(filepath.Join(share, fmt.Sprintf("f%03d", i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ps := [][]byte{pkt(fxpOpendir, uint32(1), "/")}
+	for i := range 16 {
+		ps = append(ps,
+			pkt(fxpRead, uint32(10+3*i), "1", uint64(0), uint32(8)),
+			pkt(fxpWrite, uint32(11+3*i), "1", uint64(0), "x"),
+			pkt(fxpReaddir, uint32(12+3*i), "1"),
+		)
+	}
+	ps = append(ps, pkt(fxpClose, uint32(100), "1"))
+	for i := range 8 {
+		ps = append(ps, pkt(fxpRead, uint32(101+i), "1", uint64(0), uint32(8)))
+	}
+	o := vfs.DefaultMountOptions()
+	o.MinFreeSpace = 0
+	for range 10 {
+		got := session(t, share, o, audit.Discard(), seq(ps...))
+		if typ, ok := got[100]; ok && typ != 0 {
+			t.Fatalf("CLOSE answered with type %d", typ)
+		}
+		for id := uint32(101); id < 109; id++ {
+			if got[id] == fxpName {
+				t.Fatalf("READ %d after the CLOSE listed the directory", id)
+			}
 		}
 	}
 }
