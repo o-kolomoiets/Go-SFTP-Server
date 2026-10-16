@@ -169,7 +169,9 @@ refused (see Changed).
   nothing at all, as a TCP health check, is not audited. The setting is
   reloadable, and `server.start` and `server.reload` record it.
   `gosftpd healthcheck` sends a `LOCAL` header when its own address is
-  trusted. Tested with HAProxy and nginx. See
+  trusted. Tested with HAProxy and nginx. New dependency
+  `github.com/pires/go-proxyproto` v0.15.0 (Apache-2.0), used only as a
+  header parser. See
   [docs/configuration.md](docs/configuration.md#behind-a-load-balancer).
 - A systemd unit, `packaging/systemd/gosftpd.service`, with sysusers and
   tmpfiles files and a drop-in for systemd before 253, in the Linux release
