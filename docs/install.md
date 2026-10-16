@@ -110,7 +110,11 @@ The result is in three places:
   - `configuration reloaded`;
   - `configuration reloaded; restart needed for: KEYS`: the reload worked,
     but the settings named (at most five, then "and N more; see the log")
-    keep their running value until `systemctl restart gosftpd`;
+    did not take effect. Until `systemctl restart gosftpd` some keep
+    their running value, and under Landlock others are left out, so that
+    a mount can be unavailable or users cannot log in
+    ([operations.md](operations.md#reload) says which, and when to
+    restart);
   - `configuration reload failed, see the log`;
 - the journal (`journalctl -u gosftpd`), with the reason;
 - the metric `gosftpd_config_reloads_total{result="error"}` with the admin
