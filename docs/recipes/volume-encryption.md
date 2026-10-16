@@ -236,7 +236,9 @@ unlock and mount first, then start gosftpd, as above.
 CI checks the systemd units and drop-ins on this page offline
 (`systemd-analyze verify` in
 [test/systemd/lint.sh](../../test/systemd/lint.sh)). It does not test the
-`cryptsetup`, crypttab, fstab, fscrypt or ZFS steps, nor whether a disk
-mounted on the host while gosftpd runs reaches the unit's mount namespace.
+`cryptsetup`, crypttab, fstab, fscrypt or ZFS steps. The systemd CI job
+checks that a disk mounted on the host while gosftpd runs reaches the
+unit's mount namespace
+([operations.md](../operations.md#a-disk-mounted-on-a-mount-directory)).
 The exit status 2 of `require_mountpoint` without the disk was tested by
 hand.
