@@ -377,6 +377,65 @@ func TestReputAfterRenamedPut(t *testing.T) {
 	}
 }
 
+// Review finding: the redirect of an upload written in place to another
+// name lasts 60 seconds after the upload ended, not after it was opened.
+// After a longer upload, paramiko put(confirm=True) saw the original, and a
+// reput after an interrupted one appended to it. A resume renews the
+// redirect when it ends, too.
+func TestStatRedirectAfterLongUpload(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	now := time.Now()
+	tbl.now = func() time.Time { return now }
+	long := func(h *WriteHandle, data string, off int64, aborted bool) {
+		t.Helper()
+		if _, err := h.WriteAt([]byte(data), off); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(2 * RedirectTTL)
+		if err := h.Close(aborted); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(RedirectTTL - time.Second)
+	}
+
+	h, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	long(h, "the new data", 0, false)
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("the new data")) {
+		t.Errorf("Stat after a long upload = %v, %v; want the copy", fi, err)
+	}
+
+	h, err = s.OpenWrite("/a.txt", put) // -> "a (2).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	long(h, "01234", 0, true)
+	h, err = s.OpenWrite("/a.txt", reput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Path() != "/a (2).txt" {
+		t.Fatalf("reput after a long interrupted upload went to %q", h.Path())
+	}
+	long(h, "56789", 5, false)
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != 10 {
+		t.Errorf("Stat after a long resume = %v, %v; want the copy", fi, err)
+	}
+	if got := readFile(t, filepath.Join(base, "inbox", "a.txt")); got != "original" {
+		t.Errorf("original changed: %q", got)
+	}
+
+	now = now.Add(2 * time.Second)
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("original")) {
+		t.Errorf("60 seconds after the upload: %v, %v; want the original", fi, err)
+	}
+}
+
 // Review finding: a full redirect table drops the oldest entry, not the new.
 func TestRedirectTableFull(t *testing.T) {
 	t.Parallel()

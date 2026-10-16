@@ -308,6 +308,13 @@ refused (see Changed).
   preset; likewise after a retry in place under `on_conflict =
   "overwrite"` for a user with `write` and `overwrite` but not `rename`.
   The file was no longer counted as the user's own.
+- Under `on_conflict = "rename"` without `atomic_uploads`, the stat
+  redirect of an upload that went to another name lasted 60 seconds from
+  the start of the upload instead of its end. After an upload longer than
+  60 seconds, paramiko `put(confirm=True)` saw the original and reported a
+  size mismatch, and OpenSSH `reput` after an interrupted upload appended
+  the rest of the new file to the original. The redirect now lasts 60
+  seconds after the upload ended, also after a resume.
 - An upload whose write failed in the file system (a full disk, an I/O
   error) was audited with `result` `ok`; it is now `error`, and an atomic
   upload with a failed write is not published. A truncation refused by the
