@@ -2,7 +2,8 @@
 # gosftpd under the packaged systemd unit (ADR 0011): installs the files as
 # docs/install.md does, with a binary built with -tags landlockprobe, and
 # drives the service through systemd: Landlock, uploads, reloads and their
-# status line, host key rotation, exec hooks and KillMode=mixed, port 22's
+# status line, a disk mounted on the mount's directory, host key rotation,
+# exec hooks and KillMode=mixed, port 22's
 # capability, seccomp filters without the Landlock calls, the drop-in for
 # systemd before 253, and the upgrade from the interim unit of v0.3's
 # hardening guide.
@@ -34,6 +35,9 @@ CONFIG=/etc/gosftpd/config.toml
 AUDIT=/var/log/gosftpd/audit.jsonl
 DROPINS=/etc/systemd/system/gosftpd.service.d
 HOOKS=/usr/local/libexec/gosftpd-ci
+INBOX=/srv/sftp/inbox
+# The tmpfs mounted on $INBOX while there is one, for on_exit.
+REMOUNTED=
 
 fail() { echo "FAIL: $*" >&2; FAILED=1; }
 pass() { echo "ok:   $*"; }
@@ -45,6 +49,10 @@ on_exit() {
 		echo "--- journal of gosftpd.service" >&2
 		sudo journalctl -u gosftpd -n 150 --no-pager >&2 || true
 	fi
+	if [ -n "$REMOUNTED" ]; then
+		sudo systemctl stop gosftpd || true
+		sudo umount "$REMOUNTED" || sudo umount -l "$REMOUNTED" || true
+	fi
 	rm -rf "$WORK"
 }
 trap on_exit EXIT
@@ -55,6 +63,8 @@ check() {
 	shift
 	if "$@"; then pass "$what"; else fail "$what"; fi
 }
+# refused COMMAND...: the command fails.
+refused() { ! "$@"; }
 
 # The journal of gosftpd.service only grows during the test: a mark is its
 # number of lines, and since MARK prints what came after.
@@ -214,6 +224,34 @@ sudo systemctl reload gosftpd
 check "status after adding bob" status_is "configuration reloaded"
 printf 'ls\n' >"$WORK/ls.batch"
 check "bob logs in after the reload" sftp_as bob 2022 "$WORK/ls.batch"
+
+phase "a disk mounted on the mount's directory: Landlock needs a restart"
+# A tmpfs stands for a disk mounted on the inbox while gosftpd runs; the
+# reload sees it only if it reaches the unit's mount namespace. 2 GiB,
+# since min_free_space is 1 GiB.
+sudo mount -t tmpfs -o "size=2g,mode=0750,uid=$(id -u gosftpd),gid=$(id -g gosftpd)" gosftpd-ci "$INBOX"
+REMOUNTED=$INBOX
+mark=$(journal_mark)
+sudo systemctl reload gosftpd
+check "status names mounts.inbox.path" status_is "configuration reloaded; restart needed for: mounts.inbox.path"
+check "server.reload: restart_required=mounts.inbox.path" last_reload_is '.restart_required == "mounts.inbox.path"'
+check "the journal says to restart" \
+	journal_has "$mark" "mounts\.inbox\.path: $INBOX: outside the Landlock ruleset applied at start; restart gosftpd"
+printf 'put %s remount.bin\n' "$WORK/payload" >"$WORK/remount.batch"
+check "an upload before the restart is refused" refused sftp_as alice 2022 "$WORK/remount.batch"
+mark=$(journal_mark)
+sudo systemctl restart gosftpd
+check "landlock applied after the restart" journal_has "$mark" 'landlock: ABI v[2-5] applied'
+check "an upload after the restart" sftp_as alice 2022 "$WORK/remount.batch"
+check "it is on the tmpfs" test "$(sudo stat -f -c %T "$INBOX/remount.bin")" = tmpfs
+check "it is the upload" sudo cmp -s "$WORK/payload" "$INBOX/remount.bin"
+# Back to the inbox that the phases below use.
+sudo systemctl stop gosftpd
+sudo umount "$INBOX"
+REMOUNTED=
+check "the refused upload left nothing below the mount point" sudo test ! -e "$INBOX/remount.bin"
+sudo rm -f "$INBOX/remount.bin"
+start
 
 phase "host key rotation by reload"
 as_gosftpd /usr/bin/gosftpd hostkey rotate --config "$CONFIG" >/dev/null
