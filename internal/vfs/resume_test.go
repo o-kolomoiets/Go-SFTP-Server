@@ -591,7 +591,21 @@ func TestRedirectOfRemovedCopy(t *testing.T) {
 	if _, err := s.Stat("/a.txt"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Stat after the interrupted upload = %v; want no such file", err)
 	}
-	now = now.Add(2 * time.Second)
+	// paramiko's append mode does not stat first.
+	r, err := s.OpenWrite("/a.txt", reput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Path() == "/a.txt" {
+		t.Errorf("a resume after the interrupted upload went to the original")
+	}
+	if err := r.Close(true); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(base, "inbox", "a.txt")); got != "original" {
+		t.Errorf("original changed: %q", got)
+	}
+	now = now.Add(RedirectTTL + time.Second)
 	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("original")) {
 		t.Errorf("60 seconds after the upload: %v, %v; want the original", fi, err)
 	}
