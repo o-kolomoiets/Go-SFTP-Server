@@ -59,21 +59,27 @@ would be hidden, but not encrypted.
 
 ```sh
 sudo systemctl stop gosftpd
-sudo mount /dev/mapper/sftp-data /mnt
-sudo cp -a /srv/sftp/. /mnt/ && sudo diff -r -x lost+found /srv/sftp /mnt &&
+sudo mount /dev/mapper/sftp-data /mnt &&
+  sudo cp -a /srv/sftp/. /mnt/ && sudo diff -r -x lost+found /srv/sftp /mnt &&
   sudo umount /mnt &&
-  { sudo mountpoint -q /srv/sftp || sudo find /srv/sftp -xdev -mindepth 1 -delete; }
+  if sudo mountpoint -q /srv/sftp; then
+    echo "/srv/sftp is a mount point: the originals stay"
+  else
+    sudo find /srv/sftp -xdev -mindepth 1 -delete
+  fi
 ```
 
 Go on only if these commands printed nothing. `find` deletes the originals
-only after `cp` worked and `diff` found no difference (it skips
-directories named `lost+found`, such as the disk's own), and only while
-`/srv/sftp` is not a mount point, so it cannot delete the copy on the
-disk; `-xdev` keeps it off other disks mounted below. When `cp` or `diff`
-printed something, such as "No space left on device", nothing was deleted
-and the disk is still mounted on `/mnt`: `sudo umount /mnt`, fix the cause
-and run the commands again. Then mount the disk, give its root directory
-to gosftpd and start:
+only after the disk was mounted, `cp` worked and `diff` found no
+difference (it skips directories named `lost+found`, such as the disk's
+own); `-xdev` keeps it off other disks mounted below. When `/srv/sftp` is
+the mount point of another disk, such as a data disk that is not
+encrypted, nothing is deleted and the last line says so: that disk keeps
+the originals, so wipe or retire it on its own. When a command printed an
+error, such as "No space left on device", nothing was deleted: if the disk
+is still mounted on `/mnt` (`findmnt /mnt`), `sudo umount /mnt`, then fix
+the cause and run the commands again. Then mount the disk, give its root
+directory to gosftpd and start:
 
 ```sh
 sudo systemctl daemon-reload
@@ -119,10 +125,14 @@ deleted originals applies too):
 
 ```sh
 sudo systemctl stop gosftpd
-sudo mount /dev/mapper/sftp-data /mnt
-sudo cp -a /srv/sftp/inbox/. /mnt/ && sudo diff -r -x lost+found /srv/sftp/inbox /mnt &&
+sudo mount /dev/mapper/sftp-data /mnt &&
+  sudo cp -a /srv/sftp/inbox/. /mnt/ && sudo diff -r -x lost+found /srv/sftp/inbox /mnt &&
   sudo umount /mnt &&
-  { sudo mountpoint -q /srv/sftp/inbox || sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete; }
+  if sudo mountpoint -q /srv/sftp/inbox; then
+    echo "/srv/sftp/inbox is a mount point: the originals stay"
+  else
+    sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete
+  fi
 ```
 
 Again, go on only if they printed nothing. Then mount the disk, give its
