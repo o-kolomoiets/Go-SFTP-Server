@@ -130,7 +130,10 @@ unavailable.
   a served directory may race the check.
 - **A directory replaced after start**: a mount keeps the directory it opened.
   If a disk is mounted over the path later, gosftpd keeps writing to the old
-  directory; `require_mountpoint = true` refuses to start without the mount.
+  directory until the next reload, which opens the new one for new logins;
+  under Landlock the reload leaves the mount unavailable until a restart
+  instead ([operations.md](operations.md#a-disk-mounted-on-a-mount-directory)).
+  `require_mountpoint = true` refuses to start without the mount.
 - **Times and sizes** set through SETSTAT act on a path and can, like
   `chmod` in other servers, race with a local user who swaps a file for a
   symlink.

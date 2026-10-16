@@ -276,6 +276,11 @@ so a disk in `/etc/fstab` gets the owner on its own. `config validate
 --check-fs` does not catch this case when the new root directory is
 readable (mode 0755): only creating the mount's directory fails.
 
+A disk mounted while gosftpd runs, on `/srv/sftp` or on a mount's own
+directory, is served only after a reload, or under Landlock a restart; see
+[operations.md](operations.md#a-disk-mounted-on-a-mount-directory). For an
+encrypted disk, see [recipes/volume-encryption.md](recipes/volume-encryption.md).
+
 A manual `umount /srv/sftp` does not stop gosftpd: it keeps the old view of
 the file system in its own mount namespace. Only `systemctl stop
 srv-sftp.mount` stops gosftpd first. To stop gosftpd whenever the file

@@ -3,6 +3,10 @@
 package obs
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -127,6 +131,70 @@ func TestMetricsFamilies(t *testing.T) {
 	if len(gc) != 7 || gc[0].labels["quantile"] != "0" || gc[4].labels["quantile"] != "1" {
 		t.Errorf("go_gc_duration_seconds: %v", gc)
 	}
+}
+
+// notMetrics are gosftpd_ names in the documentation that are no metrics.
+var notMetrics = map[string]bool{
+	"gosftpd_loopback": true, // an nftables table in docs/configuration.md
+}
+
+// TestMetricsDocumented keeps the documentation in step with the metrics:
+// every family is in the table of docs/metrics.md, and every gosftpd_
+// name in README.md and docs/ is a metric, so that no alert rule or query
+// there names one that does not exist.
+func TestMetricsDocumented(t *testing.T) {
+	t.Parallel()
+
+	fams := scrape(t, newTestMetrics())
+	root := filepath.Join("..", "..")
+	doc, err := os.ReadFile(filepath.Join(root, "docs", "metrics.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range fams {
+		if !regexp.MustCompile("`" + regexp.QuoteMeta(name) + `\b`).Match(doc) {
+			t.Errorf("docs/metrics.md does not describe `%s`", name)
+		}
+	}
+
+	files := []string{filepath.Join(root, "README.md")}
+	err = filepath.WalkDir(filepath.Join(root, "docs"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".md") {
+			files = append(files, p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	used := regexp.MustCompile(`\bgosftpd_[a-z][a-z0-9_]*`)
+	for _, f := range files {
+		text, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range used.FindAllString(string(text), -1) {
+			if notMetrics[name] || fams[name] != nil {
+				continue
+			}
+			// The series of a histogram.
+			if base, ok := cutAnySuffix(name, "_bucket", "_sum", "_count"); ok && fams[base] != nil && fams[base].typ == "histogram" {
+				continue
+			}
+			rel, _ := filepath.Rel(root, f)
+			t.Errorf("%s names %s, which is no metric", filepath.ToSlash(rel), name)
+		}
+	}
+}
+
+// cutAnySuffix returns s without the first of suffixes it ends with.
+func cutAnySuffix(s string, suffixes ...string) (string, bool) {
+	for _, suffix := range suffixes {
+		if before, ok := strings.CutSuffix(s, suffix); ok {
+			return before, true
+		}
+	}
+	return s, false
 }
 
 // checkName applies the naming rules that promlinter would: a prefix,

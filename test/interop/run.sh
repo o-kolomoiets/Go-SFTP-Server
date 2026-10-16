@@ -769,6 +769,14 @@ curl -fsS "$M/metrics" >"$C/metrics.txt" && pass "metrics: /metrics answers" || 
 if command -v "$PROMTOOL" >/dev/null 2>&1; then
 	"$PROMTOOL" check metrics <"$C/metrics.txt" >"$C/promtool.out" 2>&1 && pass "metrics: promtool check metrics" ||
 		fail "metrics: promtool check metrics: $(head -5 "$C/promtool.out")"
+	# The alert rules of docs/metrics.md: the yaml block that starts with
+	# "groups:".
+	awk '/^```yaml$/ { inside = 1; rules = ""; next }
+		inside && /^```$/ { inside = 0; if (rules ~ /^groups:/) printf "%s", rules; next }
+		inside { rules = rules $0 "\n" }' "$ROOT/docs/metrics.md" >"$C/alerts.yml"
+	cp "$ROOT/test/interop/alerts_test.yml" "$C/"
+	(cd "$C" && "$PROMTOOL" test rules alerts_test.yml) >"$C/promtool.out" 2>&1 && pass "metrics: the alert rules of docs/metrics.md fire" ||
+		fail "metrics: promtool test rules: $(head -20 "$C/promtool.out")"
 else
 	missing promtool
 fi

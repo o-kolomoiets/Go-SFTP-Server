@@ -358,36 +358,38 @@ for a new partner.
 
 A security tool should show its work. This is what runs in CI today:
 
-- **Fuzzed on every change.** 6 fuzz targets in v0.3.0 (8 on `main`): path
+- **Fuzzed on every change.** 6 fuzz targets in v0.3.0 (9 on `main`): path
   resolution, confinement on a tree full of symlinks, conflict names, the
   config parser, `authorized_keys`, and arbitrary SFTP packets against the
-  real handlers. Each runs 60 s with `-race` on every pull request and 10
+  real handlers; `main` adds certificates, PROXY protocol headers and host
+  key proofs. Each runs 60 s with `-race` on every pull request and 10
   minutes every night. Fuzzing has already found real bugs, among them a
   data race in pkg/sftp v1.13 that could crash a server (gosftpd works around
   it), a config parser panic and an off-by-one in the path length limit.
 - **Tested against real clients.** Every change runs OpenSSH `sftp` and `scp`
   (9.6p1 and 10.6p1), paramiko 5.0.0, rclone v1.75.0 and lftp 4.9.2 against a
   fresh build: escapes, overwrites, resume, permissions, `kill -9` in the
-  middle of an upload. The latest run on `main` passed 125 checks.
+  middle of an upload. The latest run on `main` passed more than 170 checks.
   [Details per client.](docs/interop.md)
 - **Crypto checked by ssh-audit.** ssh-audit 3.9.0 reports 0 failures on the
   default policy. Its 2 warnings are for the classic curve25519 key exchange
   (no post-quantum protection), which stays on for clients without ML-KEM.
-- **Coverage with floors.** 90.1% of the code on `main` is covered (unit and
-  interop tests merged). CI fails if the auth, config, sftpd or vfs packages
-  drop below their floors; auth is at 97.4%.
+- **Coverage with floors.** 90.9% of the code on `main` is covered (unit and
+  interop tests merged). CI fails if the auth, config, hooks, sandbox, sftpd
+  or vfs packages drop below their floors; auth is at 97.5%.
 - **All the usual gates.** Unit tests with `-race -shuffle=on` on Linux
   (amd64 and arm64) and macOS, plus Windows (without `-race`), each on two Go
   versions; goroutine leak checks, govulncheck, golangci-lint, CodeQL,
   Dependabot, and every GitHub Action pinned by commit SHA.
-- **Few dependencies.** 8 third-party Go modules in the binary (x/crypto,
-  pkg/sftp, BurntSushi/toml, cobra and their helpers), no cgo, no database.
+- **Few dependencies.** 11 third-party Go modules in the Linux binary
+  (x/crypto, pkg/sftp, BurntSushi/toml, cobra, go-proxyproto, go-landlock
+  and their helpers; 9 on macOS), no cgo, no database.
   CI fails any release binary over 12 MiB.
-- **More tests than code.** About 16.9k lines of tests for 16.3k lines of Go
-  on `main`. Tests also fail if a config key or an audit event is missing
-  from the docs.
+- **More tests than code.** Over 27k lines of tests for about 22k lines of
+  Go on `main`. Tests also fail if a config key, an audit event or a metric
+  is missing from the docs.
 - **Decisions written down.** A [threat model](docs/security/threat-model.md),
-  a [hardening guide](docs/security/hardening.md) and 9
+  a [hardening guide](docs/security/hardening.md) and 11
   [design records](docs/adr/).
 
 Found a vulnerability? Please report it privately, as described in
@@ -518,6 +520,8 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 - [Audit log](docs/audit-log.md): events, fields and the schema promise
 - [Client compatibility](docs/interop.md): what is tested, per client, and known quirks
 - [Metrics and health checks](docs/metrics.md) and [hooks](docs/hooks.md) (on `main`)
+- [Operations](docs/operations.md): reload, stop, log rotation, backups, upgrades, remounted disks (on `main`)
+- [Recipes](docs/recipes/): [retention](docs/recipes/retention.md) and [volume encryption](docs/recipes/volume-encryption.md) (on `main`)
 - [Design decisions](docs/adr/), the [changelog](CHANGELOG.md) and the [release checklist](docs/release-checklist.md)
 
 ## Roadmap
