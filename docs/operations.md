@@ -147,9 +147,11 @@ resume appends the rest of the new file to it:
 - under `on_conflict = "rename"` the upload went to a copy such as
   `report (1).pdf`. For 60 seconds after it ended, a resume by the same
   user goes to the copy (the stat redirect,
-  [configuration.md](configuration.md#upload-conflicts)). The redirect
-  lives in memory: after 60 seconds, or after a restart, `reput
-  report.pdf` appends to the original `report.pdf`;
+  [configuration.md](configuration.md#upload-conflicts)); if the upload
+  wrote nothing, its empty copy is removed and `reput` fails ("No such
+  file") for those 60 seconds. The redirect lives in memory: after 60
+  seconds, or after a restart, `reput report.pdf` appends to the original
+  `report.pdf`;
 - under `on_conflict = "version"` the upload was written to a temporary
   file, which is gone; `reput` appends to the file that was there before.
 
@@ -239,12 +241,14 @@ gosftpd had on the old host. Read them in `/etc/gosftpd`, which keeps
 the owners of the restore: OLD_GID is the group of `config.toml`, and
 OLD_UID the owner of a file there that is not root's (if there is none,
 leave out the `-uid` line). Not in `/var/lib/gosftpd` or
-`/var/log/gosftpd`: whenever the unit starts, also when gosftpd then
-fails, systemd gives them, with all their files, to the new uid and gid
-(`StateDirectory=`, `LogsDirectory=`).
+`/var/log/gosftpd`: their owners may have changed already, because
+systemd gives these directories to the new uid and gid whenever the unit
+starts, also when gosftpd then fails (`StateDirectory=`,
+`LogsDirectory=`), and the tmpfiles line of `/var/log/gosftpd` does so at
+boot.
 
 ```sh
-sudo ls -ln /etc/gosftpd     # the owner and group that are not 0
+sudo find /etc/gosftpd \( ! -uid 0 -o ! -gid 0 \) -printf '%U %G %p\n'
 sudo chown -R gosftpd:gosftpd /var/lib/gosftpd /var/log/gosftpd /srv/sftp
 sudo chgrp -R gosftpd /etc/gosftpd/config.toml /etc/gosftpd/users.d
 sudo find /etc/gosftpd -uid OLD_UID -exec chown gosftpd {} +
