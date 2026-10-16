@@ -238,6 +238,11 @@ func (r *running) apply(ctx context.Context) (restart []string, disconnected int
 	}
 	r.level.Set(level)
 	r.metrics.SetMountsUnavailable(len(unavailable))
+	// Mounts whose directory changed; under Landlock such a mount is left
+	// out as unavailable instead (checkLandlock).
+	for _, name := range mounts.Reopened() {
+		r.log.InfoContext(ctx, "mount reopened", "mount", name, "reason", "its path names another directory now, such as a disk mounted on it")
+	}
 	r.hooks.Update(hookSpecs)
 	r.metrics.SetHooksNotUpdated(staleHooks)
 	warnOrphans(ctx, r.log, hookSpecs)

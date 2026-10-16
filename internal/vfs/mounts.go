@@ -379,6 +379,8 @@ type Table struct {
 	started time.Time
 	refs    atomic.Int64     // see Acquire
 	missing map[string]error // configured mounts that are unavailable
+	// reopened names the mounts whose directory changed at Reload.
+	reopened []string
 	*registry
 }
 
@@ -409,12 +411,33 @@ func Open(specs []MountSpec, opts Options) (*Table, error) {
 
 // Reload returns the next generation of t for a new configuration. A mount
 // whose host directory is open in any generation still in use, at the same
-// path, shares it; the others are opened anew. A mount that cannot be
-// opened is unavailable in the new table, as with Options.Unavailable; the
-// returned warnings say why. t is not changed: sessions started on it keep
-// their mounts until they end. The caller must hold a reference to t.
+// path, shares it; the others are opened anew (see Reopened). A mount that
+// cannot be opened is unavailable in the new table, as with
+// Options.Unavailable; the returned warnings say why. t is not changed:
+// sessions started on it keep their mounts until they end. The caller must
+// hold a reference to t.
 func (t *Table) Reload(specs []MountSpec, opts Options) (*Table, []error, error) {
-	return open(specs, opts, t.registry, true)
+	next, warns, err := open(specs, opts, t.registry, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, m := range next.mounts {
+		old := t.byName[m.name]
+		if old != nil && old.dir != m.dir && old.dir.path == m.dir.path && old.home == m.home && !sameDir(old.root, m.root) {
+			next.reopened = append(next.reopened, m.name)
+		}
+	}
+	return next, warns, nil
+}
+
+// sameDir reports whether a and b hold the same directory.
+func sameDir(a, b *os.Root) bool {
+	afi, err := a.Stat(".")
+	if err != nil {
+		return false
+	}
+	bfi, err := b.Stat(".")
+	return err == nil && os.SameFile(afi, bfi)
 }
 
 func open(specs []MountSpec, opts Options, reg *registry, reload bool) (*Table, []error, error) {
@@ -638,6 +661,11 @@ func (t *Table) Mounts() []*Mount { return slices.Clone(t.mounts) }
 
 // Mount returns the mount called name, or nil.
 func (t *Table) Mount(name string) *Mount { return t.byName[name] }
+
+// Reopened returns the mounts of a table from Reload whose path names
+// another directory than in the table Reload was called on, such as a disk
+// mounted on it since. Sessions of that table keep the old directory.
+func (t *Table) Reopened() []string { return slices.Clone(t.reopened) }
 
 // Flattened reports whether a user who can access every mount sees it as
 // "/": flattening is on and there is exactly one mount.
