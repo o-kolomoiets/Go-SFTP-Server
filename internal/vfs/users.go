@@ -109,8 +109,8 @@ func (t *Table) sweep() {
 // that expires soonest (the newest entry is the one a client is about to
 // use). until returns when an entry expires and whether an open upload
 // holds it. A held entry is never dropped, so with every entry held the
-// map grows past max; there are no more of them than the user has uploads
-// open.
+// map grows past max, by no more than the uploads the user has open, until
+// their entries expire after the uploads ended.
 func makeRoom[V ownEntry | redirect](m map[userKey]V, limit int, now time.Time, until func(V) (time.Time, bool)) {
 	if len(m) < limit {
 		return

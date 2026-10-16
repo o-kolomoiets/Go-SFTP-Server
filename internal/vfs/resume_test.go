@@ -5,6 +5,7 @@ package vfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -562,6 +563,59 @@ func TestRedirectOfLaterUploadKept(t *testing.T) {
 	now = now.Add(2 * RedirectTTL)
 	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("the second")) {
 		t.Errorf("Stat while the second upload runs = %v, %v; want its file", fi, err)
+	}
+}
+
+// An interrupted upload that wrote nothing removes its empty copy, and its
+// redirect still lasts RedirectTTL: STAT of the name finds no file, so a
+// reput fails instead of appending the new file's tail to the original.
+func TestRedirectOfRemovedCopy(t *testing.T) {
+	t.Parallel()
+
+	tbl, base := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	now := time.Now()
+	tbl.now = func() time.Time { return now }
+	h, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * RedirectTTL)
+	if err := h.Close(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "inbox", "a (1).txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the empty copy was not removed: %v", err)
+	}
+	now = now.Add(RedirectTTL - time.Second)
+	if _, err := s.Stat("/a.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat after the interrupted upload = %v; want no such file", err)
+	}
+	now = now.Add(2 * time.Second)
+	if fi, err := s.Stat("/a.txt"); err != nil || fi.Size() != int64(len("original")) {
+		t.Errorf("60 seconds after the upload: %v, %v; want the original", fi, err)
+	}
+}
+
+// A sweep of expired entries keeps the redirect of an open upload.
+func TestSweepKeepsHeldRedirect(t *testing.T) {
+	t.Parallel()
+
+	tbl, _ := permFixture(t, DefaultMountOptions()) // a.txt = "original"
+	s := session(t, tbl, "u", []Grant{{Mount: "inbox", Perm: mustPerm(t, "upload")}})
+	now := time.Now()
+	tbl.now = func() time.Time { return now }
+	h, err := s.OpenWrite("/a.txt", put) // -> "a (1).txt"
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close(false)
+	now = now.Add(2 * RedirectTTL)
+	tbl.umu.Lock()
+	tbl.sweep()
+	tbl.umu.Unlock()
+	if got := s.redirected("/a.txt"); got != "/a (1).txt" {
+		t.Errorf("a sweep dropped the redirect of an open upload: %q", got)
 	}
 }
 
