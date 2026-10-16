@@ -51,6 +51,24 @@ GO-2026-6303, GO-2026-6354 and GO-2026-6355 (fixed in v0.55.0 and v0.56.0).
 gosftpd therefore requires x/crypto ≥ v0.56.0 itself, as a direct (not
 `// indirect`) requirement, and Dependabot keeps it current.
 
+### GO-2026-5932 and `osv-scanner.toml`
+
+GO-2026-5932 marks `golang.org/x/crypto/openpgp` as unmaintained and
+unsafe. It matches every x/crypto version and has no fix, so scanners that
+read `go.mod` report it. gosftpd never imports openpgp: `go list -deps
+-test ./...` has no openpgp package with any build tag, on any system, and
+govulncheck reports the advisory for the module only, not for code that
+gosftpd calls. `osv-scanner.toml` next to `go.mod` therefore ignores it,
+with that reason, for osv-scanner and for the OpenSSF Scorecard check that
+runs it, until 2027-04-16; review the entry by then. The file ignores
+nothing else: a vulnerability with a fix is fixed by an update instead.
+
+`govulncheck -mode binary` on a release binary does report GO-2026-5932
+as affecting the code. Release binaries are stripped (`-ldflags="-s -w"`),
+so govulncheck can match them by module only, and it names the openpgp
+packages although the binary has none of their code. Scan the source
+(`make vuln`) instead.
+
 ### Why `go-proxyproto` is used only as a parser
 
 `server.trusted_proxies` ([ADR 0011](adr/0011-proxy-systemd-landlock.md))

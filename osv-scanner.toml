@@ -1,0 +1,6 @@
+# Read by osv-scanner, and by the OpenSSF Scorecard Vulnerabilities check
+# (which runs osv-scanner), for the go.mod in this directory only.
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-04-16T00:00:00Z
+reason = "golang.org/x/crypto/openpgp is never imported: go list -deps ./... has no openpgp package, in any build. The entry matches every x/crypto version and has no fix. Review before ignoreUntil."

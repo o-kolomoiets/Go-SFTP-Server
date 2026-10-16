@@ -292,6 +292,10 @@ refused (see Changed).
   instead of the v0.17.0 that gotestsum asks for (GO-2026-5970,
   GO-2026-6629). This does not change the gosftpd binary. CI and `make
   vuln` scan the tools module with govulncheck too.
+- `osv-scanner.toml` ignores GO-2026-5932 (`golang.org/x/crypto/openpgp`,
+  which has no fixed version) for osv-scanner and the OpenSSF Scorecard:
+  gosftpd never imports openpgp. See
+  [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md#go-2026-5932-and-osv-scannertoml).
 
 ## [0.3.0] - 2026-10-09
 
