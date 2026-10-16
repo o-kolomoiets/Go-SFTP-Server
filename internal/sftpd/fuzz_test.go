@@ -41,6 +41,8 @@ const (
 	fxpReadlink = 19
 	fxpSymlink  = 20
 	fxpExtended = 200
+
+	fxpStatus = 101
 )
 
 // pkt builds one SFTP packet from uint32, uint64, string and []byte fields.
@@ -71,10 +73,44 @@ func seq(ps ...[]byte) []byte {
 }
 
 // sftpPipe is the server's side of a connection: it reads what the client
-// wrote and writes responses that a goroutine discards.
+// wrote and writes responses that a goroutine collects.
 type sftpPipe struct {
 	io.Reader
 	io.WriteCloser
+}
+
+// serve runs a request server with h's handlers behind the gate, as the
+// server does, and sends it an INIT and the client packets data. It returns
+// the answers.
+func serve(t *testing.T, h *Handler, data []byte) []byte {
+	t.Helper()
+	in, client := io.Pipe()
+	resp, out := io.Pipe()
+	answers := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(resp)
+		answers <- b
+	}()
+	rs := sftp.NewRequestServer(NewGate(sftpPipe{in, out}), h.Handlers(), sftp.WithStartDirectory("/"))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = rs.Serve()
+		_ = out.Close()
+	}()
+	go func() {
+		_, _ = client.Write(pkt(fxpInit, uint32(3)))
+		_, _ = client.Write(data)
+		_ = client.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request server did not finish")
+	}
+	_ = rs.Close()
+	_ = in.CloseWithError(io.EOF)
+	return <-answers
 }
 
 // FuzzRequestServer (ROADMAP §8.3) feeds arbitrary SFTP v3 packets to a
@@ -187,29 +223,7 @@ func FuzzRequestServer(f *testing.F) {
 		}
 		defer s.Close()
 		h := New(s, audit.Discard(), slog.New(slog.DiscardHandler), metrics, 8)
-
-		in, client := io.Pipe()
-		resp, out := io.Pipe()
-		go func() { _, _ = io.Copy(io.Discard, resp) }()
-		rs := sftp.NewRequestServer(NewGate(sftpPipe{in, out}), h.Handlers(), sftp.WithStartDirectory("/"))
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_ = rs.Serve()
-			_ = out.Close()
-		}()
-		go func() {
-			_, _ = client.Write(pkt(fxpInit, uint32(3)))
-			_, _ = client.Write(data)
-			_ = client.Close()
-		}()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the request server did not finish")
-		}
-		_ = rs.Close()
-		_ = in.CloseWithError(io.EOF)
+		serve(t, h, data)
 
 		if got, err := os.ReadFile(filepath.Join(outside, "secret.txt")); err != nil || string(got) != "secret" {
 			t.Fatalf("the file outside the mount changed: %q, %v", got, err)

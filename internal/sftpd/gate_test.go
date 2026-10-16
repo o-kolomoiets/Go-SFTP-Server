@@ -65,7 +65,7 @@ func TestGateOrdersOpens(t *testing.T) {
 	g := NewGate(rwc{bytes.NewReader(seq(read, open, stat, write, short)), &out})
 	answer := func(id uint32) {
 		t.Helper()
-		a := pkt(101, id, uint32(0), "", "")
+		a := pkt(fxpStatus, id, uint32(0), "", "")
 		// Answers may be written in parts.
 		for _, part := range [][]byte{a[:3], a[3:7], a[7:]} {
 			if _, err := g.Write(part); err != nil {
@@ -86,7 +86,7 @@ func TestGateOrdersOpens(t *testing.T) {
 	answer(7)
 	passed(t, got, write, "WRITE")
 	passed(t, readPackets(g, len(short)), short, "short packet")
-	if out.Len() != 2*len(pkt(101, uint32(7), uint32(0), "", "")) {
+	if out.Len() != 2*len(pkt(fxpStatus, uint32(7), uint32(0), "", "")) {
 		t.Fatalf("answers were not passed on: %x", out.Bytes())
 	}
 }
