@@ -231,11 +231,16 @@ On a new host, `systemd-sysusers` may give the user gosftpd another uid.
 tar and rsync, run as root, restore owners by name unless told to keep the
 numbers (`--numeric-owner`, `--numeric-ids`). When the numbers were kept,
 give the files back to gosftpd. OLD_UID and OLD_GID are the uid and gid
-gosftpd had on the old host; the restored `/var/lib/gosftpd` still has
-them until the `chown`:
+gosftpd had on the old host. Read them in `/etc/gosftpd`, which keeps
+the owners of the restore: OLD_GID is the group of `config.toml`, and
+OLD_UID the owner of a file there that is not root's (if there is none,
+leave out the `-uid` line). Not in `/var/lib/gosftpd` or
+`/var/log/gosftpd`: whenever the unit starts, also when gosftpd then
+fails, systemd gives them, with all their files, to the new uid and gid
+(`StateDirectory=`, `LogsDirectory=`).
 
 ```sh
-stat -c '%u %g' /var/lib/gosftpd     # OLD_UID OLD_GID
+sudo ls -ln /etc/gosftpd     # the owner and group that are not 0
 sudo chown -R gosftpd:gosftpd /var/lib/gosftpd /var/log/gosftpd /srv/sftp
 sudo chgrp -R gosftpd /etc/gosftpd/config.toml /etc/gosftpd/users.d
 sudo find /etc/gosftpd -uid OLD_UID -exec chown gosftpd {} +
