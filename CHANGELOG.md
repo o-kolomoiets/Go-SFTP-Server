@@ -262,6 +262,15 @@ refused (see Changed).
 
 ### Fixed
 
+- An authenticated client could crash the server: `pkg/sftp` serves READ
+  and WRITE requests with the handle of a directory in parallel, and the
+  directory was listed concurrently. A directory is now listed for one
+  request at a time. A READ or WRITE sent after the CLOSE of its handle
+  was also served during the CLOSE: WRITEs sent after the CLOSE of an
+  atomic upload could still reach the published file, and a published
+  upload could be audited as `error`, without its hooks. Such a request
+  now waits for the CLOSE's answer, and fails. Both were data races; the
+  nightly fuzzing found the second.
 - After an interrupted upload to a temporary name was resumed (OpenSSH
   `reput`), the client's rename was refused for a user with the `upload`
   preset; likewise after a retry in place under `on_conflict =

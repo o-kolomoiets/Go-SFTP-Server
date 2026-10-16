@@ -71,12 +71,17 @@ resolution inside and outside a tree with symlinks, names of conflict
 copies, the configuration, `authorized_keys`, certificates offered at
 login, and a stream of arbitrary SFTP packets against the real handlers,
 with the race detector. Fuzzing
-found a data race in `pkg/sftp` v1.13: a request with a guessed handle that
+found data races in `pkg/sftp` v1.13: a request with a guessed handle that
 is processed while an OPEN is in progress races with it, which could crash
-the server. gosftpd keeps them apart: an OPEN is passed on once every
-earlier request is answered, and a request with a handle once the latest
-OPEN is answered. Clients learn handles from that answer, so they are not
-slowed down.
+the server, and a READ or WRITE sent after the CLOSE of its handle is
+served during the CLOSE. gosftpd keeps them apart: an OPEN is passed on
+once every earlier request is answered, and a request with a handle once
+the latest OPEN or CLOSE is answered. Clients learn handles from the answer
+to their OPEN and do not use them after their CLOSE; only a request on
+another handle sent right after an OPEN or CLOSE waits for its answer.
+`pkg/sftp` also serves READ and WRITE requests with the handle of a
+directory in parallel, by listing it, which could crash the server too:
+gosftpd lists a directory for one request at a time.
 
 ## Confinement
 
