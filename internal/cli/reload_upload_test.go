@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,9 +21,11 @@ import (
 const uploadBytesEnv = "GOSFTPD_TEST_UPLOAD_BYTES"
 
 // TestServeReloadDuringUpload (ROADMAP M4 DoD): a reload that adds a user
-// while an upload is half written lets the user log in, and the upload
-// completes, whole. The size is $GOSFTPD_TEST_UPLOAD_BYTES, 64 MiB by
-// default; one cell of the CI job test uploads the DoD's 1 GiB.
+// during an upload lets the user log in, and the upload completes, whole.
+// The second half of the upload is written while the reload is applied and
+// the user logs in, and its last chunk once the user has listed the mount.
+// The size is $GOSFTPD_TEST_UPLOAD_BYTES, 64 MiB by default; one cell of
+// the CI job test uploads the DoD's 1 GiB.
 func TestServeReloadDuringUpload(t *testing.T) {
 	isolate(t)
 	size := int64(64 << 20)
@@ -74,19 +77,33 @@ access = { data = "full" }
 	chunk := bytes.Repeat([]byte("gosftpd!"), 128<<10)
 	sum := sha256.New()
 	var written int64
-	write := func(until int64) {
-		t.Helper()
+	write := func(until int64) error {
 		for written < until {
 			binary.BigEndian.PutUint64(chunk, uint64(written))
 			p := chunk[:min(int64(len(chunk)), until-written)]
 			if _, err := f.Write(p); err != nil {
-				t.Fatalf("write at %d: %v", written, err)
+				return fmt.Errorf("write at %d: %w", written, err)
 			}
 			sum.Write(p)
 			written += int64(len(p))
 		}
+		return nil
 	}
-	write(size / 2)
+	if err := write(size / 2); err != nil {
+		t.Fatal(err)
+	}
+	loggedIn := make(chan struct{})
+	errc := make(chan error, 1)
+	// Until it sends on errc, the goroutine alone uses f, chunk, written
+	// and sum.
+	go func() {
+		err := write(size - int64(len(chunk)))
+		if err == nil {
+			<-loggedIn
+			err = write(size)
+		}
+		errc <- err
+	}()
 
 	writeFile(t, path, base+`[users.bob]
 authorized_keys = ["`+authorizedKey(bob)+`"]
@@ -109,7 +126,10 @@ access = { data = "read" }
 	bc.Close()
 	bconn.Close()
 
-	write(size)
+	close(loggedIn)
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("the upload does not complete: %v", err)
 	}
