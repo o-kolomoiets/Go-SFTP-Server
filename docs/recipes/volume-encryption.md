@@ -55,16 +55,26 @@ the disk, so that you can still log in; gosftpd does not start without it.
 
 The first time, stop gosftpd, copy what `/srv/sftp` holds now onto the
 disk, check the copy and delete the originals: below the mount point they
-would be hidden, but not encrypted. Then mount the disk, give its root
-directory to gosftpd and start:
+would be hidden, but not encrypted.
 
 ```sh
 sudo systemctl stop gosftpd
 sudo mount /dev/mapper/sftp-data /mnt
 sudo cp -a /srv/sftp/. /mnt/
-sudo diff -r /srv/sftp /mnt      # prints only "Only in /mnt: lost+found"
-sudo umount /mnt
-mountpoint /srv/sftp || sudo find /srv/sftp -xdev -mindepth 1 -delete
+sudo diff -r -x lost+found /srv/sftp /mnt && sudo umount /mnt &&
+  { mountpoint -q /srv/sftp || sudo find /srv/sftp -xdev -mindepth 1 -delete; }
+```
+
+Go on only if these commands printed nothing. `find` deletes the originals
+only after `diff` found no difference (the disk's `lost+found` aside), and
+only while `/srv/sftp` is not a mount point, so it cannot delete the copy
+on the disk; `-xdev` keeps it off other disks mounted below. When `cp` or
+`diff` printed something, such as "No space left on device", nothing was
+deleted and the disk is still mounted on `/mnt`: `sudo umount /mnt`, fix
+the cause and run the commands again. Then mount the disk, give its root
+directory to gosftpd and start:
+
+```sh
 sudo systemctl daemon-reload
 sudo mount /srv/sftp
 sudo systemd-tmpfiles --create gosftpd.conf
@@ -72,12 +82,9 @@ sudo runuser -u gosftpd -- gosftpd config validate --check-fs --config /etc/gosf
 sudo systemctl start gosftpd
 ```
 
-`find` runs only while `/srv/sftp` is not a mount point, so it cannot
-delete the copy on the disk, and `-xdev` keeps it off other disks mounted
-below. `systemd-tmpfiles --create` gives `/srv/sftp` to gosftpd, as for
-any disk mounted there later
-([install.md](../install.md#a-data-disk-mounted-later)); the owner is kept
-on the disk.
+`systemd-tmpfiles --create` gives `/srv/sftp` to gosftpd, as for any disk
+mounted there later ([install.md](../install.md#a-data-disk-mounted-later));
+the owner is kept on the disk.
 
 Deleting a file does not overwrite it: the data of the deleted originals
 can stay on the unencrypted disk until the file system reuses their
@@ -107,16 +114,20 @@ require_mountpoint = true
 
 The fstab line names `/srv/sftp/inbox` instead of `/srv/sftp`. The first
 time, move what the inbox holds onto the disk as above (the note on the
-deleted originals applies too), mount it, give the disk's root directory
-to gosftpd and start; the owner is kept on the disk:
+deleted originals applies too):
 
 ```sh
 sudo systemctl stop gosftpd
 sudo mount /dev/mapper/sftp-data /mnt
 sudo cp -a /srv/sftp/inbox/. /mnt/
-sudo diff -r /srv/sftp/inbox /mnt   # prints only "Only in /mnt: lost+found"
-sudo umount /mnt
-mountpoint /srv/sftp/inbox || sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete
+sudo diff -r -x lost+found /srv/sftp/inbox /mnt && sudo umount /mnt &&
+  { mountpoint -q /srv/sftp/inbox || sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete; }
+```
+
+Again, go on only if they printed nothing. Then mount the disk, give its
+root directory to gosftpd and start; the owner is kept on the disk:
+
+```sh
 sudo systemctl daemon-reload
 sudo mount /srv/sftp/inbox
 sudo chown gosftpd:gosftpd /srv/sftp/inbox
@@ -241,4 +252,5 @@ checks that a disk mounted on the host while gosftpd runs reaches the
 unit's mount namespace
 ([operations.md](../operations.md#a-disk-mounted-on-a-mount-directory)).
 The exit status 2 of `require_mountpoint` without the disk was tested by
-hand.
+hand, and so was the first-time copy on a loop-mounted ext4 image, also
+onto one too small for the data: nothing was deleted.

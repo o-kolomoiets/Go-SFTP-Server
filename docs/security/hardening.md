@@ -204,4 +204,8 @@ exchange (`kex-strict-s-v00@openssh.com`) protects against Terrapin
 - Watch the repository's releases and security advisories, and update when
   a release fixes a vulnerability that is reachable in your setup.
 - CI runs `govulncheck` on every change; run it against your binary too
-  (`govulncheck -mode=binary "$(command -v gosftpd)"`).
+  (`govulncheck -mode=binary "$(command -v gosftpd)"`). On a release
+  binary, which is stripped, it always reports GO-2026-5932
+  (`golang.org/x/crypto/openpgp`, no fix) as affecting the code, although
+  gosftpd never calls it: a known false positive
+  ([DEPENDENCIES.md](../DEPENDENCIES.md#go-2026-5932-and-osv-scannertoml)).

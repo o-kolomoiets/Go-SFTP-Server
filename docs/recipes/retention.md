@@ -29,7 +29,13 @@ e /srv/sftp/inbox - - - c:30d
   deletes it 30 days after it was saved, the default `versions.max_age`.
   Do not exclude the versions directory: gosftpd prunes the versions of a
   file only when it saves the next one, so the versions of a file that
-  tmpfiles deleted would stay forever.
+  tmpfiles deleted would stay forever. With a longer `versions.max_age`,
+  or `"0s"`, this line and the timer below still delete versions after
+  30 days. Raise their age, or add to this file a line with the longer
+  age for the versions directory, such as
+  `e /srv/sftp/inbox/.versions - - - c:365d` (`/srv/sftp/home/*/.versions`
+  in the file for a home mount below): tmpfiles then ages that directory
+  by that line only.
 - Empty directories go too. A lowercase letter such as `c` ages files
   only; directories are aged by their access, birth and modification
   times, and tmpfiles removes an empty one once all three are more than
