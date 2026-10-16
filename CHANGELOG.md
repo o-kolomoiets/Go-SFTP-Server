@@ -8,6 +8,18 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-16
+
+Multi-user operation: reload on SIGHUP, users in `users.d`, SSH
+certificates, host key rotation, Prometheus metrics, hooks, PROXY protocol,
+a systemd unit and Landlock on Linux. It also fixes a crash that an
+authenticated client could cause (see Fixed). Read
+[docs/operations.md](docs/operations.md#upgrades) before upgrading; four
+changes need attention: headers from load balancers not in
+`server.trusted_proxies` are refused, `serve` refuses trusted files inside
+mounts and two host keys of one type, and on Linux Landlock is on by
+default, so some changes need a restart instead of a reload.
+
 When upgrading a server behind a load balancer that sends PROXY protocol
 headers, add the load balancer to `server.trusted_proxies` together with
 the new binary (v0.3 refuses the key), or turn PROXY protocol off on the
@@ -273,11 +285,12 @@ refused (see Changed).
   every thread (with `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port
   22 a hook inherited the capability).
 - Dependencies: `golang.org/x/crypto` v0.58.0, `golang.org/x/sys` v0.49.0,
-  `golang.org/x/term` v0.47.0 and `github.com/spf13/pflag` v1.0.10. Built
-  with Go 1.27, as the release binaries are, gosftpd now also lists the
-  ML-DSA algorithms `ssh-mldsa-44`, `ssh-mldsa-65` and `ssh-mldsa-87` in
-  `server-sig-algs`, since x/crypto supports them; ML-DSA keys are still
-  refused in `authorized_keys`, as CAs and in certificates.
+  `golang.org/x/term` v0.47.0 and `github.com/spf13/pflag` v1.0.10.
+- `server-sig-algs` lists only the signature algorithms of key types that
+  gosftpd accepts. Built with Go 1.27, as the release binaries are, x/crypto
+  v0.58.0 supports ML-DSA (`ssh-mldsa-44`, `-65`, `-87`), which gosftpd
+  would have announced and then refused, as it refuses ML-DSA keys in
+  `authorized_keys`, as CAs and in certificates.
 
 ### Fixed
 
@@ -305,7 +318,6 @@ refused (see Changed).
 - An `include` whose directory exists but cannot be read is an error
   instead of silently adding no users; names that start with a dot are
   skipped (editor and temporary files).
-
 - TOML errors no longer print control characters or "line 0" for an escape
   cut off at the end of the file.
 - A data race between an upload being opened and another session checking
@@ -530,7 +542,8 @@ without `--allow-root`, and uploads stop below 1 GiB of free space unless
 - The non-functional 2023 skeleton (`main.go`, `cmd/server`, `pkg/`).
 - The JSON configuration promised by the old README; configuration will use TOML.
 
-[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.1.0-alpha...v0.2.0
 [0.1.0-alpha]: https://github.com/o-kolomoiets/go-sftp-server/releases/tag/v0.1.0-alpha
