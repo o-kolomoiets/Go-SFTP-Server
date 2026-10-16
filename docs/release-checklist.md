@@ -69,3 +69,12 @@ note in the CHANGELOG.
 A patch release is due within 7 days when `govulncheck -mode=binary` on the
 latest release finds a reachable vulnerability in a dependency or the Go
 standard library; otherwise fixes ship with the next planned release.
+
+Release binaries are stripped, so binary mode matches them by module only.
+It always reports GO-2026-5932 (`golang.org/x/crypto/openpgp`, no fix) as
+affecting the code: a known false positive
+([DEPENDENCIES.md](DEPENDENCIES.md#go-2026-5932-and-osv-scannertoml)). A
+finding counts as reachable only when a source scan of the tag reports it
+as called: `go tool -modfile=tools/go.mod govulncheck ./...` on a checkout
+of `vX.Y.Z`, with the Go version that built the release (`go version
+./gosftpd`).
