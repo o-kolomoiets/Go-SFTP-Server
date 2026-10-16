@@ -60,19 +60,20 @@ would be hidden, but not encrypted.
 ```sh
 sudo systemctl stop gosftpd
 sudo mount /dev/mapper/sftp-data /mnt
-sudo cp -a /srv/sftp/. /mnt/
-sudo diff -r -x lost+found /srv/sftp /mnt && sudo umount /mnt &&
-  { mountpoint -q /srv/sftp || sudo find /srv/sftp -xdev -mindepth 1 -delete; }
+sudo cp -a /srv/sftp/. /mnt/ && sudo diff -r -x lost+found /srv/sftp /mnt &&
+  sudo umount /mnt &&
+  { sudo mountpoint -q /srv/sftp || sudo find /srv/sftp -xdev -mindepth 1 -delete; }
 ```
 
 Go on only if these commands printed nothing. `find` deletes the originals
-only after `diff` found no difference (the disk's `lost+found` aside), and
-only while `/srv/sftp` is not a mount point, so it cannot delete the copy
-on the disk; `-xdev` keeps it off other disks mounted below. When `cp` or
-`diff` printed something, such as "No space left on device", nothing was
-deleted and the disk is still mounted on `/mnt`: `sudo umount /mnt`, fix
-the cause and run the commands again. Then mount the disk, give its root
-directory to gosftpd and start:
+only after `cp` worked and `diff` found no difference (it skips
+directories named `lost+found`, such as the disk's own), and only while
+`/srv/sftp` is not a mount point, so it cannot delete the copy on the
+disk; `-xdev` keeps it off other disks mounted below. When `cp` or `diff`
+printed something, such as "No space left on device", nothing was deleted
+and the disk is still mounted on `/mnt`: `sudo umount /mnt`, fix the cause
+and run the commands again. Then mount the disk, give its root directory
+to gosftpd and start:
 
 ```sh
 sudo systemctl daemon-reload
@@ -119,9 +120,9 @@ deleted originals applies too):
 ```sh
 sudo systemctl stop gosftpd
 sudo mount /dev/mapper/sftp-data /mnt
-sudo cp -a /srv/sftp/inbox/. /mnt/
-sudo diff -r -x lost+found /srv/sftp/inbox /mnt && sudo umount /mnt &&
-  { mountpoint -q /srv/sftp/inbox || sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete; }
+sudo cp -a /srv/sftp/inbox/. /mnt/ && sudo diff -r -x lost+found /srv/sftp/inbox /mnt &&
+  sudo umount /mnt &&
+  { sudo mountpoint -q /srv/sftp/inbox || sudo find /srv/sftp/inbox -xdev -mindepth 1 -delete; }
 ```
 
 Again, go on only if they printed nothing. Then mount the disk, give its
