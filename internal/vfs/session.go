@@ -626,7 +626,7 @@ func (s *Session) Move(src, dst string, posix bool) (Moved, error) {
 		// rclone checks the size of the target after a move and deletes
 		// "a failed copy" at the requested name: that would be the original.
 		if sv.opts().StatRedirect {
-			s.setRedirect(sv, drel, final)
+			s.setRedirect(sv, drel, final, nil)
 		}
 		return done(final, ConflictRenamed)
 	}

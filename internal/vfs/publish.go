@@ -136,7 +136,7 @@ func (h *WriteHandle) closeTemp(aborted bool) error {
 	// Not the name's Lstat: another rename may have put a file there.
 	h.info = info
 	if h.rel != h.target && v.opts().StatRedirect {
-		s.setRedirect(v, h.target, h.rel)
+		s.setRedirect(v, h.target, h.rel, nil)
 	}
 	h.virtual = s.virtual(v, h.rel)
 	s.unregister(h, false)

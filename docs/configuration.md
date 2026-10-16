@@ -236,15 +236,17 @@ What happens when an upload targets an existing file (`on_conflict`):
   without APPEND is it a plain write.
 - While an upload has a file open, other uploads cannot write it in place
   ("file is busy").
-- **stat_redirect**: tools check an upload by its name. After an upload or move
-  went to `report (1).pdf`, STAT, LSTAT and SETSTAT of `report.pdf` by the
-  same user answer for `report (1).pdf` for 60 seconds after the upload ended
-  or the move, in all of the user's connections (rclone uses several).
+- **stat_redirect**: tools check an upload by its name. When an upload or move
+  goes to `report (1).pdf`, STAT, LSTAT and SETSTAT of `report.pdf` by the
+  same user answer for `report (1).pdf` while the upload is open and for 60
+  seconds after it ended, or for 60 seconds after the move, in all of the
+  user's connections (rclone uses several). An upload with `atomic_uploads`
+  gets its name, and so the redirect, only when it ends.
   Listing, opening, removing and renaming are never redirected, with one
   exception: a resume (APPEND, or WRITE without CREAT and TRUNC, as OpenSSH
   `reput` sends after the redirected STAT gave it the copy's size) continues
   the copy and renews the redirect. Any other open, a remove or a rename of
-  the name ends the redirect.
+  the name ends the redirect, also while the upload is open.
   Without it, paramiko `put(confirm=True)` reports a size mismatch and rclone
   may delete what it takes for a failed copy: the original.
 - `rename` plus a sync tool (`rclone sync`, `rsync`-like clients) creates a
