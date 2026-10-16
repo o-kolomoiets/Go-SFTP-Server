@@ -82,12 +82,16 @@ These keys can appear in `restart_required`:
   - `server.host_keys`, `users.NAME.authorized_keys_file`,
     `auth.trusted_user_ca_keys_file`, `hooks[N].webhook.secret_file` or
     `--authorized-keys`: a file in a shared directory was replaced by
-    rename, and the reload treats it as an unreadable file. The running
-    host keys stay. The keys of an authorized_keys file are not used: its
-    users cannot log in with them, and with `--authorized-keys` nobody
-    can. The CAs of `auth.trusted_user_ca_keys_file` are not trusted, so
-    the certificates they signed are refused. A webhook keeps its running
-    secret, and one that the reload added is left out.
+    rename, and the reload treats it as an unreadable file. For a current
+    host key, all the running host keys stay. A `.next` or `.old` key or
+    a `-cert.pub` file is left out instead, and the reload uses the rest
+    of the new host keys: a key left out is not announced, and a current
+    key whose certificate is left out is served without it. The keys of
+    an authorized_keys file are not used: its users cannot log in with
+    them, and with `--authorized-keys` nobody can. The CAs of
+    `auth.trusted_user_ca_keys_file` are not trusted, so the certificates
+    they signed are refused. A webhook keeps its running secret, and one
+    that the reload added is left out.
 
 ## Stop, restart and interrupted uploads
 
