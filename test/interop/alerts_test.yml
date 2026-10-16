@@ -74,3 +74,14 @@ tests:
         alertname: GosftpdHooksNotUpdated
         exp_alerts:
           - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+
+  # A reload that stays failed.
+  - interval: 1m
+    input_series:
+      - series: 'gosftpd_config_last_reload_successful{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '1 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GosftpdReloadFailed
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
