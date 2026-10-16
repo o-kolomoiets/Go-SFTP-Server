@@ -32,14 +32,20 @@ var errGateClosed = errors.New("sftp connection closed")
 // goroutine than the one serving READ and WRITE. A client that sends a
 // request with a guessed handle while an OPEN is in progress races with it
 // (Request.Method is written and read unsynchronized), and a torn read can
-// crash the process.
+// crash the process. Likewise, a READ or WRITE sent after the CLOSE of its
+// handle runs in parallel with the CLOSE: it uses the upload or directory
+// while it is closed, and an atomic upload is published then.
 //
-// The gate keeps OPEN and OPENDIR apart from every request that uses a
-// handle: an OPEN passes once every earlier request is answered, and a
-// request with a handle once the latest OPEN is answered. pkg/sftp answers
-// in request order, so the gate counts requests and answers instead of
-// trusting the ids clients choose. Clients learn handles from the answer
-// to their OPEN, so they are not delayed.
+// The gate keeps OPEN, OPENDIR and CLOSE apart from every request that uses
+// a handle: an OPEN passes once every earlier request is answered, and a
+// request with a handle once the latest OPEN, OPENDIR or CLOSE is answered.
+// pkg/sftp answers in request order, so the gate counts requests and
+// answers instead of trusting the ids clients choose. It waits only for
+// requests already passed on, which pkg/sftp answers without reading more.
+// pkg/sftp forgets a handle before it answers its CLOSE, so a request sent
+// after the CLOSE fails. Clients learn handles from the answer to their
+// OPEN and do not use them after their CLOSE, so they wait only when they
+// use another handle right after an OPEN or CLOSE.
 type Gate struct {
 	r io.Reader
 	w io.Writer
@@ -49,7 +55,7 @@ type Gate struct {
 	cond     sync.Cond
 	sent     uint64 // requests passed to the server
 	answered uint64 // answers written
-	lastOpen uint64 // number of the latest OPEN or OPENDIR (1-based)
+	barrier  uint64 // number of the latest OPEN, OPENDIR or CLOSE (1-based)
 	closed   bool
 
 	buf []byte // the packet being passed to the server
@@ -113,7 +119,7 @@ func (g *Gate) next() error {
 }
 
 // admit holds an OPEN or OPENDIR until every earlier request is answered,
-// and a request with a handle until the latest OPEN or OPENDIR is.
+// and a request with a handle until the latest OPEN, OPENDIR or CLOSE is.
 func (g *Gate) admit(typ byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -122,7 +128,7 @@ func (g *Gate) admit(typ byte) error {
 	case typeOpen, typeOpendir:
 		wait = func() bool { return g.answered < g.sent }
 	case typeClose, typeRead, typeWrite, typeFstat, typeFsetstat, typeReaddir:
-		wait = func() bool { return g.answered < g.lastOpen }
+		wait = func() bool { return g.answered < g.barrier }
 	default:
 		wait = func() bool { return false }
 	}
@@ -133,8 +139,9 @@ func (g *Gate) admit(typ byte) error {
 		return errGateClosed
 	}
 	g.sent++
-	if typ == typeOpen || typ == typeOpendir {
-		g.lastOpen = g.sent
+	switch typ {
+	case typeOpen, typeOpendir, typeClose:
+		g.barrier = g.sent
 	}
 	return nil
 }

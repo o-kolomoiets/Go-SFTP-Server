@@ -107,3 +107,36 @@ func TestGateCloseReleases(t *testing.T) {
 		t.Fatal("a held READDIR passed after Close")
 	}
 }
+
+// A request with a handle also waits for the answer to the latest CLOSE:
+// pkg/sftp would serve a READ or WRITE in parallel with the CLOSE of its
+// handle. CLOSEs sent in a row pass one at a time.
+func TestGateOrdersCloses(t *testing.T) {
+	t.Parallel()
+
+	close1 := pkt(fxpClose, uint32(1), "1")
+	stat := pkt(fxpStat, uint32(2), "a")
+	close2 := pkt(fxpClose, uint32(3), "2")
+	write := pkt(fxpWrite, uint32(4), "1", uint64(0), "x")
+	g := NewGate(rwc{bytes.NewReader(seq(close1, stat, close2, write)), io.Discard})
+	answer := func(id uint32) {
+		t.Helper()
+		if _, err := g.Write(pkt(fxpStatus, id, uint32(0), "", "")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	passed(t, readPackets(g, len(close1)), close1, "CLOSE")
+	passed(t, readPackets(g, len(stat)), stat, "STAT")
+	got := readPackets(g, len(close2))
+	held(t, got, "CLOSE before the earlier CLOSE is answered")
+	answer(1)
+	passed(t, got, close2, "second CLOSE")
+
+	got = readPackets(g, len(write))
+	held(t, got, "WRITE before the CLOSE is answered")
+	answer(2)
+	held(t, got, "WRITE before the second CLOSE is answered")
+	answer(3)
+	passed(t, got, write, "WRITE")
+}
