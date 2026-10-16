@@ -218,9 +218,11 @@ refused (see Changed).
   LUKS2, fscrypt, ZFS, cloud disks). More alert rules in
   [docs/metrics.md](docs/metrics.md): target down, failed reloads,
   connection limits, PROXY protocol on one side only, bursts of bans. CI
-  checks the units and tmpfiles files of the documentation offline, tests
-  the alert rules with `promtool`, and fails when the documentation names
-  a metric that does not exist.
+  checks offline the units, drop-ins and tmpfiles files that the
+  documentation shows in a code block that begins with their path (the
+  recipes, the archive drop-in of hooks.md and the port 22 drop-in of
+  install.md), tests the alert rules with `promtool`, and fails when the
+  documentation names a metric that does not exist.
 
 ### Changed
 
