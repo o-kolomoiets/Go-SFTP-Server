@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/pkg/sftp"
+
 	"github.com/o-kolomoiets/go-sftp-server/internal/audit"
 	"github.com/o-kolomoiets/go-sftp-server/internal/vfs"
 )
@@ -35,11 +37,19 @@ func (b *syncBuffer) String() string {
 	return b.b.String()
 }
 
+// answer is the type of an answer and, for a STATUS, its code.
+type answer struct {
+	typ  byte
+	code uint32
+}
+
+// ok reports whether a is a STATUS with SSH_FX_OK.
+func (a answer) ok() bool { return a.typ == fxpStatus && a.code == uint32(sftp.ErrSSHFxOk) }
+
 // session serves the client packets data on a flattened mount of share and
-// returns the type of each answer by request id; a STATUS with SSH_FX_OK is
-// 0. The last answers may be missing: Serve can return before they are
-// written.
-func session(t *testing.T, share string, o vfs.MountOptions, al *audit.Logger, data []byte) map[uint32]byte {
+// returns each answer by request id. The last answers may be missing: Serve
+// can return before they are written.
+func session(t *testing.T, share string, o vfs.MountOptions, al *audit.Logger, data []byte) map[uint32]answer {
 	t.Helper()
 	tbl, err := vfs.Open([]vfs.MountSpec{{Name: "share", Path: share, Options: o}}, vfs.Options{Flatten: true})
 	if err != nil {
@@ -57,18 +67,18 @@ func session(t *testing.T, share string, o vfs.MountOptions, al *audit.Logger, d
 		t.Fatalf("%d handles still open after the session", n)
 	}
 
-	got := map[uint32]byte{}
+	got := map[uint32]answer{}
 	for len(b) >= 9 {
 		n := 4 + int(binary.BigEndian.Uint32(b))
 		if n < 9 || n > len(b) {
 			break // cut off
 		}
-		typ := b[4]
-		if typ == fxpStatus && n >= 13 && binary.BigEndian.Uint32(b[9:]) == 0 {
-			typ = 0
+		a := answer{typ: b[4]}
+		if a.typ == fxpStatus && n >= 13 {
+			a.code = binary.BigEndian.Uint32(b[9:])
 		}
-		if typ != fxpVersion { // the answer to INIT has no id
-			got[binary.BigEndian.Uint32(b[5:])] = typ
+		if a.typ != fxpVersion { // the answer to INIT has no id
+			got[binary.BigEndian.Uint32(b[5:])] = a
 		}
 		b = b[n:]
 	}
@@ -101,8 +111,8 @@ func TestRequestsAfterClose(t *testing.T) {
 		share := t.TempDir()
 		var log syncBuffer
 		got := session(t, share, o, audit.New(&log, slog.New(slog.DiscardHandler)), seq(ps...))
-		for id, typ := range got {
-			if id >= 10 && typ == 0 {
+		for id, a := range got {
+			if id >= 10 && a.ok() {
 				t.Fatalf("request %d after the CLOSE succeeded", id)
 			}
 		}
@@ -125,7 +135,8 @@ func TestRequestsAfterClose(t *testing.T) {
 // sent with the directory's handle, also while it serves a READDIR. These
 // listings ran at the same time and could crash the process (run with
 // -race). A READ sent after the CLOSE does not list the directory (see
-// Gate).
+// Gate): it finds no handle and fails with SSH_FX_FAILURE. One that listed
+// it would get SSH_FX_EOF, as the earlier requests use up the listing.
 func TestDirectoryHandleInParallel(t *testing.T) {
 	t.Parallel()
 
@@ -151,12 +162,12 @@ func TestDirectoryHandleInParallel(t *testing.T) {
 	o.MinFreeSpace = 0
 	for range 10 {
 		got := session(t, share, o, audit.Discard(), seq(ps...))
-		if typ, ok := got[100]; ok && typ != 0 {
-			t.Fatalf("CLOSE answered with type %d", typ)
+		if a, ok := got[100]; ok && !a.ok() {
+			t.Fatalf("CLOSE answered with %+v", a)
 		}
 		for id := uint32(101); id < 109; id++ {
-			if got[id] == fxpName {
-				t.Fatalf("READ %d after the CLOSE listed the directory", id)
+			if a, ok := got[id]; ok && (a.typ != fxpStatus || a.code != uint32(sftp.ErrSSHFxFailure)) {
+				t.Fatalf("READ %d after the CLOSE answered with %+v, want SSH_FX_FAILURE", id, a)
 			}
 		}
 	}

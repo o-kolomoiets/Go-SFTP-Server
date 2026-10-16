@@ -341,6 +341,27 @@ func TestCryptoPolicies(t *testing.T) {
 	}
 }
 
+// TestServerSigAlgs: server-sig-algs lists the algorithms of
+// auth.PublicKeyAuthAlgorithms, not those of x/crypto (ML-DSA with Go 1.27)
+// or its default when the list is empty (ssh-rsa and ssh-dss).
+func TestServerSigAlgs(t *testing.T) {
+	t.Parallel()
+
+	srv, err := New(Config{HostKeys: []ssh.Signer{signer(t)}, Auth: auth.New("", nil), Mounts: &vfs.Table{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, want := srv.snap.Load().ssh.PublicKeyAuthAlgorithms, auth.PublicKeyAuthAlgorithms()
+	if len(got) == 0 || !slices.Equal(got, want) {
+		t.Errorf("server-sig-algs = %v, want %v", got, want)
+	}
+	for _, a := range got {
+		if a == ssh.KeyAlgoRSA || a == "ssh-dss" || strings.HasPrefix(a, "ssh-mldsa") {
+			t.Errorf("server-sig-algs offers %s", a)
+		}
+	}
+}
+
 // pipeServer runs ServeConn on one end of a net.Pipe inside a synctest
 // bubble and returns an SFTP client on the other end.
 func pipeServer(t *testing.T, cfg Config, wrap func(net.Conn) net.Conn) (*ssh.Client, *sftp.Client, *syncBuffer, func()) {
