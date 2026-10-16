@@ -31,11 +31,12 @@ e /srv/sftp/inbox - - - c:30d
   file only when it saves the next one, so the versions of a file that
   tmpfiles deleted would stay forever. With a longer `versions.max_age`,
   or `"0s"`, this line and the timer below still delete versions after
-  30 days. Raise their age, or add to this file a line with the longer
-  age for the versions directory, such as
-  `e /srv/sftp/inbox/.versions - - - c:365d` (`/srv/sftp/home/*/.versions`
-  in the file for a home mount below): tmpfiles then ages that directory
-  by that line only.
+  30 days. To keep them longer, add to this file a line of its own for
+  the versions directory: `e /srv/sftp/inbox/.versions - - - c:365d` with
+  the longer age, or `x /srv/sftp/inbox/.versions` for `"0s"`, which
+  leaves them to gosftpd (`/srv/sftp/home/*/.versions` in the file for a
+  home mount below). tmpfiles then treats that directory by its own line
+  only. For the timer, see below.
 - Empty directories go too. A lowercase letter such as `c` ages files
   only; directories are aged by their access, birth and modification
   times, and tmpfiles removes an empty one once all three are more than
@@ -134,6 +135,14 @@ every directory, and `-not` skips the temporary files of uploads in
 progress (gosftpd removes those left over itself). With
 `Persistent=true`, a run missed while the machine was off starts at the
 next boot.
+
+To keep old versions longer than 30 days, add
+`-not -path '/srv/sftp/inbox/.versions/*'` to the `find` line, and for a
+longer age rather than forever, a second line that runs `find` on the
+versions directory alone:
+`ExecStart=-/usr/bin/find /srv/sftp/inbox/.versions -xdev -type f -cmin +525600 -print -delete`
+(365 days; the `-` lets the run succeed while the directory does not
+exist yet).
 
 ## Hooks
 
