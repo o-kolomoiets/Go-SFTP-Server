@@ -8,7 +8,7 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-10-16
+## [0.4.0] - 2026-10-17
 
 Multi-user operation: reload on SIGHUP, users in `users.d`, SSH
 certificates, host key rotation, Prometheus metrics, hooks, PROXY protocol,
