@@ -143,15 +143,28 @@ histogram_quantile(0.95, sum by (le, direction) (rate(gosftpd_transfer_duration_
 groups:
   - name: gosftpd
     rules:
+      - alert: GosftpdDown
+        expr: up{job="gosftpd"} == 0
+        for: 2m
       - alert: GosftpdAuditLogFailing
         expr: gosftpd_audit_log_failing == 1
         for: 1m
       - alert: GosftpdReloadFailed
         expr: gosftpd_config_last_reload_successful == 0
         for: 5m
+      - alert: GosftpdReloadErrors
+        expr: increase(gosftpd_config_reloads_total{result="error"}[15m]) > 0
       - alert: GosftpdMountsUnavailable
         expr: gosftpd_mounts_unavailable > 0
         for: 5m
+      - alert: GosftpdConnectionLimit
+        expr: increase(gosftpd_connections_refused_total{reason=~"max_.*"}[10m]) > 0
+      - alert: GosftpdProxyMisconfigured
+        expr: |
+          sum by (job, instance) (increase(gosftpd_connections_refused_total{reason="proxy_header"}[10m]))
+            + sum by (job, instance) (increase(gosftpd_connections_total{result="untrusted_proxy"}[10m])) > 0
+      - alert: GosftpdBanBurst
+        expr: increase(gosftpd_bans_total[1h]) > 20
       - alert: GosftpdHooksFailing
         expr: increase(gosftpd_hook_deliveries_total{result=~"failed|dropped"}[15m]) > 0
       - alert: GosftpdHooksNotUpdated
@@ -159,10 +172,39 @@ groups:
         for: 5m
 ```
 
-`GosftpdHooksNotUpdated` clears once a reload fixes the hook's program or
-secret file. An exec hook that a reload added under Landlock is counted at
-every reload until a restart, which is the remedy then (the reload's
-warning names the hook, and `restart_required` has `hooks`).
+- `GosftpdDown`: Prometheus cannot scrape the admin listener; the job name
+  is the one of the scrape configuration above.
+- `GosftpdReloadFailed` fires while the last reload has failed: the server
+  runs an older configuration than the file on disk. A restart would
+  refuse the file too, unless the reload failed only because of the
+  Landlock ruleset applied at start, such as for an `include` or
+  `auth.revoked_keys_file` outside it. Then the error in the journal ends
+  with "(outside the Landlock ruleset applied at start; restart gosftpd)",
+  and a restart is the fix. `GosftpdReloadErrors` also catches a failed
+  reload that a later one fixed.
+- `GosftpdMountsUnavailable`: the last reload left a mount out. The gauge
+  changes only at a reload. Under Landlock the first reload after a disk
+  was mounted on a mount's directory leaves that mount out, and the alert
+  fires until a restart; before that reload nothing shows it
+  ([operations.md](operations.md#a-disk-mounted-on-a-mount-directory)).
+- `GosftpdConnectionLimit`: connections were refused because
+  `max_connections`, `max_connections_per_ip` or `max_preauth_connections`
+  was reached ([`[limits]`](configuration.md#limits)).
+- `GosftpdProxyMisconfigured`: PROXY protocol is set up on one side only
+  ([Behind a load balancer](configuration.md#behind-a-load-balancer)). The
+  two counters have different labels, so the rule sums each of them first.
+- `GosftpdBanBurst`: more sources banned than usual, such as a password
+  guessing campaign from many addresses; set the threshold to what is
+  normal for the server.
+- `GosftpdHooksNotUpdated` clears once a reload fixes the hook's program or
+  secret file. An exec hook that a reload added under Landlock is counted
+  at every reload until a restart, which is the remedy then (the reload's
+  warning names the hook, and `restart_required` has `hooks`).
+
+A setting that needs a restart has no metric: after a reload, the status
+line of `systemctl status gosftpd`, the journal and `restart_required` in
+the `server.reload` audit event name it
+([operations.md](operations.md#reload)).
 
 ## Kubernetes
 

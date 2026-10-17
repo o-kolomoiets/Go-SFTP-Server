@@ -1,0 +1,87 @@
+# promtool test rules for the alert rules of docs/metrics.md, which
+# test/interop/run.sh copies to alerts.yml next to this file. Each alert
+# fires on series with the labels a scrape gives them.
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '1 1 0 0 0 0 0'
+      - series: 'gosftpd_audit_log_failing{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '0 0 1 1 1 1 1'
+      # A failed reload, fixed by the next one: only the counter shows it.
+      - series: 'gosftpd_config_reloads_total{job="gosftpd", instance="127.0.0.1:9090", result="error"}'
+        values: '0 0 1 1 1 1 1'
+      - series: 'gosftpd_config_last_reload_successful{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '1 1 0 1 1 1 1'
+      - series: 'gosftpd_mounts_unavailable{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '1 1 1 1 1 1 1'
+      - series: 'gosftpd_connections_refused_total{job="gosftpd", instance="127.0.0.1:9090", reason="max_connections_per_ip"}'
+        values: '0 0 3 3 3 3 3'
+      - series: 'gosftpd_connections_refused_total{job="gosftpd", instance="127.0.0.1:9090", reason="banned"}'
+        values: '0 0 5 5 5 5 5'
+      # One side of PROXY protocol moves, the other does not: the rule
+      # must add series that have different labels.
+      - series: 'gosftpd_connections_refused_total{job="gosftpd", instance="127.0.0.1:9090", reason="proxy_header"}'
+        values: '0 0 0 0 0 0 0'
+      - series: 'gosftpd_connections_total{job="gosftpd", instance="127.0.0.1:9090", result="untrusted_proxy"}'
+        values: '0 0 2 2 2 2 2'
+      - series: 'gosftpd_bans_total{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '0 10 40 40 40 40 40'
+      - series: 'gosftpd_hook_deliveries_total{job="gosftpd", instance="127.0.0.1:9090", type="webhook", result="failed"}'
+        values: '0 0 1 1 1 1 1'
+      - series: 'gosftpd_hooks_not_updated{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GosftpdDown
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+      - eval_time: 6m
+        alertname: GosftpdAuditLogFailing
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+      - eval_time: 6m
+        alertname: GosftpdReloadFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: GosftpdReloadErrors
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090", result: error }
+      - eval_time: 6m
+        alertname: GosftpdMountsUnavailable
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+      - eval_time: 6m
+        alertname: GosftpdConnectionLimit
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090", reason: max_connections_per_ip }
+      - eval_time: 6m
+        alertname: GosftpdProxyMisconfigured
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+      - eval_time: 6m
+        alertname: GosftpdBanBurst
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+      - eval_time: 6m
+        alertname: GosftpdHooksFailing
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090", type: webhook, result: failed }
+      - eval_time: 6m
+        alertname: GosftpdHooksNotUpdated
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }
+
+  # A reload that stays failed.
+  - interval: 1m
+    input_series:
+      - series: 'gosftpd_config_last_reload_successful{job="gosftpd", instance="127.0.0.1:9090"}'
+        values: '1 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: GosftpdReloadFailed
+        exp_alerts:
+          - exp_labels: { job: gosftpd, instance: "127.0.0.1:9090" }

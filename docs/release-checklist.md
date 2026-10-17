@@ -9,7 +9,11 @@ note in the CHANGELOG.
 
 1. All work for the release is merged and CI is green on `main`, including
    both interop jobs (OpenSSH 9.6 with paramiko, rclone and lftp; OpenSSH
-   10.6).
+   10.6) and the `systemd` job (the packaged unit under systemd). The
+   nightly **Fuzz** workflow is green on the commit to tag, and no `fuzz:
+   ... failed` issue is open; if the commit is newer than the last nightly
+   run, start the workflow by hand (**Actions → Fuzz → Run workflow**) and
+   wait for it.
 2. Optional until WinSCP runs in CI (M3b-02): the manual WinSCP checklist
    in [interop.md](interop.md#winscp).
 3. `CHANGELOG.md`: move the `Unreleased` entries into
@@ -65,3 +69,12 @@ note in the CHANGELOG.
 A patch release is due within 7 days when `govulncheck -mode=binary` on the
 latest release finds a reachable vulnerability in a dependency or the Go
 standard library; otherwise fixes ship with the next planned release.
+
+Release binaries are stripped, so binary mode matches them by module only.
+It always reports GO-2026-5932 (`golang.org/x/crypto/openpgp`, no fix) as
+affecting the code: a known false positive
+([DEPENDENCIES.md](DEPENDENCIES.md#go-2026-5932-and-osv-scannertoml)). A
+finding counts as reachable only when a source scan of the tag reports it
+as called: `go tool -modfile=tools/go.mod govulncheck ./...` on a checkout
+of `vX.Y.Z`, with the Go version that built the release (`go version
+./gosftpd`).

@@ -120,7 +120,9 @@ func probeChild(w io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(w, "abi %d\n", v)
-	attr := unix.LandlockRulesetAttr{Access_fs: unix.LANDLOCK_ACCESS_FS_READ_FILE}
+	// The struct follows the newest kernel headers; an older kernel
+	// accepts it while the fields it does not know are zero.
+	attr := unix.LandlockRulesetAttr{Handled_access_fs: unix.LANDLOCK_ACCESS_FS_READ_FILE}
 	fd, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
 	if !report("ruleset", errno) {
 		return 0

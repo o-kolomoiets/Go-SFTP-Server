@@ -110,7 +110,11 @@ The result is in three places:
   - `configuration reloaded`;
   - `configuration reloaded; restart needed for: KEYS`: the reload worked,
     but the settings named (at most five, then "and N more; see the log")
-    keep their running value until `systemctl restart gosftpd`;
+    did not take effect. Until `systemctl restart gosftpd` some keep
+    their running value, and under Landlock others are left out, so that
+    a mount can be unavailable or users cannot log in
+    ([operations.md](operations.md#reload) says which, and when to
+    restart);
   - `configuration reload failed, see the log`;
 - the journal (`journalctl -u gosftpd`), with the reason;
 - the metric `gosftpd_config_reloads_total{result="error"}` with the admin
@@ -275,6 +279,11 @@ At boot, systemd runs tmpfiles after the local file systems are mounted,
 so a disk in `/etc/fstab` gets the owner on its own. `config validate
 --check-fs` does not catch this case when the new root directory is
 readable (mode 0755): only creating the mount's directory fails.
+
+A disk mounted while gosftpd runs, on `/srv/sftp` or on a mount's own
+directory, is served only after a reload, or under Landlock a restart; see
+[operations.md](operations.md#a-disk-mounted-on-a-mount-directory). For an
+encrypted disk, see [recipes/volume-encryption.md](recipes/volume-encryption.md).
 
 A manual `umount /srv/sftp` does not stop gosftpd: it keeps the old view of
 the file system in its own mount namespace. Only `systemctl stop

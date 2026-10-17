@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -352,6 +353,32 @@ func TestKeyRefusalReasons(t *testing.T) {
 	} {
 		if _, err := tt.a.VerifiedKey(conn, k, perms); reasonOf(err) != tt.reason {
 			t.Errorf("%s: VerifiedKey = %v, want reason %s", tt.name, err, tt.reason)
+		}
+	}
+}
+
+// TestPublicKeyAuthAlgorithms: server-sig-algs lists only algorithms for
+// key types gosftpd accepts, whatever x/crypto adds (ML-DSA with Go 1.27).
+func TestPublicKeyAuthAlgorithms(t *testing.T) {
+	t.Parallel()
+	accepted := []string{
+		ssh.KeyAlgoED25519, ssh.KeyAlgoSKED25519, ssh.KeyAlgoSKECDSA256,
+		ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
+		ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512,
+	}
+	in := append(slices.Clone(accepted), ssh.KeyAlgoRSA, "ssh-dss", "ssh-mldsa-44", "ssh-mldsa-65", "ssh-mldsa-87")
+	if got := acceptedAuthAlgorithms(in); !slices.Equal(got, accepted) {
+		t.Errorf("acceptedAuthAlgorithms = %v, want %v", got, accepted)
+	}
+	got := PublicKeyAuthAlgorithms()
+	for _, a := range got {
+		if !slices.Contains(accepted, a) {
+			t.Errorf("PublicKeyAuthAlgorithms offers %s, whose keys are refused", a)
+		}
+	}
+	for _, a := range []string{ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512} {
+		if !slices.Contains(got, a) {
+			t.Errorf("PublicKeyAuthAlgorithms = %v, want %s in it", got, a)
 		}
 	}
 }

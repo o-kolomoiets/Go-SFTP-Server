@@ -65,7 +65,7 @@ func TestGateOrdersOpens(t *testing.T) {
 	g := NewGate(rwc{bytes.NewReader(seq(read, open, stat, write, short)), &out})
 	answer := func(id uint32) {
 		t.Helper()
-		a := pkt(101, id, uint32(0), "", "")
+		a := pkt(fxpStatus, id, uint32(0), "", "")
 		// Answers may be written in parts.
 		for _, part := range [][]byte{a[:3], a[3:7], a[7:]} {
 			if _, err := g.Write(part); err != nil {
@@ -86,7 +86,7 @@ func TestGateOrdersOpens(t *testing.T) {
 	answer(7)
 	passed(t, got, write, "WRITE")
 	passed(t, readPackets(g, len(short)), short, "short packet")
-	if out.Len() != 2*len(pkt(101, uint32(7), uint32(0), "", "")) {
+	if out.Len() != 2*len(pkt(fxpStatus, uint32(7), uint32(0), "", "")) {
 		t.Fatalf("answers were not passed on: %x", out.Bytes())
 	}
 }
@@ -106,4 +106,37 @@ func TestGateCloseReleases(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatal("a held READDIR passed after Close")
 	}
+}
+
+// A request with a handle also waits for the answer to the latest CLOSE:
+// pkg/sftp would serve a READ or WRITE in parallel with the CLOSE of its
+// handle. CLOSEs sent in a row pass one at a time.
+func TestGateOrdersCloses(t *testing.T) {
+	t.Parallel()
+
+	close1 := pkt(fxpClose, uint32(1), "1")
+	stat := pkt(fxpStat, uint32(2), "a")
+	close2 := pkt(fxpClose, uint32(3), "2")
+	write := pkt(fxpWrite, uint32(4), "1", uint64(0), "x")
+	g := NewGate(rwc{bytes.NewReader(seq(close1, stat, close2, write)), io.Discard})
+	answer := func(id uint32) {
+		t.Helper()
+		if _, err := g.Write(pkt(fxpStatus, id, uint32(0), "", "")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	passed(t, readPackets(g, len(close1)), close1, "CLOSE")
+	passed(t, readPackets(g, len(stat)), stat, "STAT")
+	got := readPackets(g, len(close2))
+	held(t, got, "CLOSE before the earlier CLOSE is answered")
+	answer(1)
+	passed(t, got, close2, "second CLOSE")
+
+	got = readPackets(g, len(write))
+	held(t, got, "WRITE before the CLOSE is answered")
+	answer(2)
+	held(t, got, "WRITE before the second CLOSE is answered")
+	answer(3)
+	passed(t, got, write, "WRITE")
 }

@@ -339,14 +339,20 @@ func (l statLister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	return copy(ls, l[offset:]), io.EOF
 }
 
+// lister is an open directory. pkg/sftp lists it for a READDIR, and in its
+// parallel workers for a READ or WRITE that a client sends with the
+// directory's handle: mu keeps the vfs lister to one call at a time.
 type lister struct {
 	vfs.Lister
 	h    *Handler
+	mu   sync.Mutex
 	once sync.Once
 }
 
 func (l *lister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
+	l.mu.Lock()
 	n, err := l.Lister.ListAt(ls, offset)
+	l.mu.Unlock()
 	for i := range ls[:n] {
 		ls[i] = ownedInfo{ls[i]}
 	}
@@ -360,7 +366,9 @@ func (l *lister) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 func (l *lister) Close() error {
 	var err error
 	l.once.Do(func() {
+		l.mu.Lock()
 		err = l.Lister.Close()
+		l.mu.Unlock()
 		l.h.release()
 	})
 	return err

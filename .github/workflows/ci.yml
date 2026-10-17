@@ -90,6 +90,13 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -shuffle=on -count=1 ./internal/sandbox/... ./internal/cli/...
+      # ROADMAP M4 DoD: a user added by a reload logs in while a 1 GiB
+      # upload completes; the other runs upload 64 MiB.
+      - name: reload during a 1 GiB upload
+        if: matrix.os == 'ubuntu-24.04' && matrix.go == '1.27.x'
+        env:
+          GOSFTPD_TEST_UPLOAD_BYTES: "1073741824"
+        run: go test -count=1 -run '^TestServeReloadDuringUpload$' ./internal/cli/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.COVERAGE
         with:
@@ -332,6 +339,12 @@ jobs:
         with:
           go-version-input: stable
           check-latest: true
+      # The action scans the main module only. The developer tools are a
+      # module of their own, scanned with the govulncheck pinned there;
+      # the pattern "tool" names the packages of its tool block.
+      - name: govulncheck for tools/go.mod
+        working-directory: tools
+        run: go tool govulncheck tool
 
   # The only required status check: matrix jobs report as "test (…)",
   # so branch protection cannot require them by a stable name.

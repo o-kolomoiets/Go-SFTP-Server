@@ -67,6 +67,9 @@ func TestReloadGenerations(t *testing.T) {
 	if t2.Mount("move").dir == t1.Mount("move").dir {
 		t.Error("a repointed mount kept its directory")
 	}
+	if r := t2.Reopened(); len(r) != 0 {
+		t.Errorf("Reopened = %v; a repointed mount was not reopened", r)
+	}
 	if t2.Mount("keep").Options().OnConflict != ConflictOverwrite {
 		t.Error("the new options do not apply")
 	}
@@ -109,7 +112,8 @@ func TestReloadGenerations(t *testing.T) {
 }
 
 // A directory replaced at the same path, as by a disk mounted over it, is
-// opened anew; the old generation keeps the old one.
+// opened anew and named by Reopened, also after a reload that was dropped;
+// the old generation keeps the old one.
 func TestReloadReplacedDirectory(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
@@ -124,6 +128,12 @@ func TestReloadReplacedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(keep, "f.txt"), "replaced")
+	// A reload that fails after building its table closes the table.
+	dropped, _, err := t1.Reload([]MountSpec{spec("keep", keep, ConflictRename)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = dropped.Close()
 	t2, _, err := t1.Reload([]MountSpec{spec("keep", keep, ConflictRename)}, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -132,11 +142,38 @@ func TestReloadReplacedDirectory(t *testing.T) {
 	if t2.Mount("keep").dir == t1.Mount("keep").dir {
 		t.Error("a replaced directory was reused")
 	}
+	if r := t2.Reopened(); len(r) != 1 || r[0] != "keep" {
+		t.Errorf("Reopened = %v, want [keep]", r)
+	}
 	if got := readVirtual(t, session(t, t2, "alice", t2.FullAccess()), "/keep/f.txt"); got != "replaced" {
 		t.Errorf("new generation reads %q", got)
 	}
 	if got := readVirtual(t, old, "/keep/f.txt"); got != "keep" {
 		t.Errorf("old generation reads %q", got)
+	}
+	t3, _, err := t2.Reload([]MountSpec{spec("keep", keep, ConflictRename)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t3.Close() })
+	if r := t3.Reopened(); len(r) != 0 || t3.Mount("keep").dir != t2.Mount("keep").dir {
+		t.Errorf("the next reload reopened %v", r)
+	}
+
+	// The first directory back at the path: it is t1's.
+	if err := os.Rename(keep, filepath.Join(base, "keep.replaced")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(base, "keep.old"), keep); err != nil {
+		t.Fatal(err)
+	}
+	t4, _, err := t1.Reload([]MountSpec{spec("keep", keep, ConflictRename)}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t4.Close() })
+	if r := t4.Reopened(); len(r) != 0 {
+		t.Errorf("Reopened = %v for the directory of t1", r)
 	}
 }
 

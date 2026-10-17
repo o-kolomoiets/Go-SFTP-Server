@@ -41,6 +41,9 @@ const (
 	fxpReadlink = 19
 	fxpSymlink  = 20
 	fxpExtended = 200
+
+	fxpVersion = 2
+	fxpStatus  = 101
 )
 
 // pkt builds one SFTP packet from uint32, uint64, string and []byte fields.
@@ -71,10 +74,44 @@ func seq(ps ...[]byte) []byte {
 }
 
 // sftpPipe is the server's side of a connection: it reads what the client
-// wrote and writes responses that a goroutine discards.
+// wrote and writes responses that a goroutine collects.
 type sftpPipe struct {
 	io.Reader
 	io.WriteCloser
+}
+
+// serve runs a request server with h's handlers behind the gate, as the
+// server does, and sends it an INIT and the client packets data. It returns
+// the answers.
+func serve(t *testing.T, h *Handler, data []byte) []byte {
+	t.Helper()
+	in, client := io.Pipe()
+	resp, out := io.Pipe()
+	answers := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(resp)
+		answers <- b
+	}()
+	rs := sftp.NewRequestServer(NewGate(sftpPipe{in, out}), h.Handlers(), sftp.WithStartDirectory("/"))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = rs.Serve()
+		_ = out.Close()
+	}()
+	go func() {
+		_, _ = client.Write(pkt(fxpInit, uint32(3)))
+		_, _ = client.Write(data)
+		_ = client.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the request server did not finish")
+	}
+	_ = rs.Close()
+	_ = in.CloseWithError(io.EOF)
+	return <-answers
 }
 
 // FuzzRequestServer (ROADMAP §8.3) feeds arbitrary SFTP v3 packets to a
@@ -153,6 +190,28 @@ func FuzzRequestServer(f *testing.F) {
 		pkt(fxpOpen, uint32(22), "a.txt", uint32(read|write), noAttrs),
 	)
 	f.Add(byte(1), seq(busy...))
+	// pkg/sftp serves READ and WRITE in parallel workers: one sent after the
+	// CLOSE of an atomic upload runs during the CLOSE (found by fuzzing),
+	// and those with a directory's handle list it at the same time.
+	f.Add(byte(4), seq( // atomic_uploads
+		pkt(fxpOpen, uint32(1), "b.txt", uint32(write|creat), noAttrs),
+		pkt(fxpWrite, uint32(2), "1", uint64(0), "data"),
+		pkt(fxpClose, uint32(3), "1"),
+		pkt(fxpWrite, uint32(4), "1", uint64(4), "x"),
+		pkt(fxpRead, uint32(5), "1", uint64(0), uint32(8)),
+		pkt(fxpWrite, uint32(6), "1", uint64(5), "x"),
+		pkt(fxpRead, uint32(7), "1", uint64(0), uint32(8)),
+	))
+	f.Add(byte(2), seq(
+		pkt(fxpOpendir, uint32(1), "/"),
+		pkt(fxpRead, uint32(2), "1", uint64(0), uint32(8)),
+		pkt(fxpWrite, uint32(3), "1", uint64(0), "x"),
+		pkt(fxpRead, uint32(4), "1", uint64(0), uint32(8)),
+		pkt(fxpReaddir, uint32(5), "1"),
+		pkt(fxpWrite, uint32(6), "1", uint64(0), "x"),
+		pkt(fxpClose, uint32(7), "1"),
+		pkt(fxpRead, uint32(8), "1", uint64(0), uint32(8)),
+	))
 
 	metrics := obs.NewMetrics("fuzz") // every path counts without a panic
 	f.Fuzz(func(t *testing.T, mode byte, data []byte) {
@@ -187,29 +246,7 @@ func FuzzRequestServer(f *testing.F) {
 		}
 		defer s.Close()
 		h := New(s, audit.Discard(), slog.New(slog.DiscardHandler), metrics, 8)
-
-		in, client := io.Pipe()
-		resp, out := io.Pipe()
-		go func() { _, _ = io.Copy(io.Discard, resp) }()
-		rs := sftp.NewRequestServer(NewGate(sftpPipe{in, out}), h.Handlers(), sftp.WithStartDirectory("/"))
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_ = rs.Serve()
-			_ = out.Close()
-		}()
-		go func() {
-			_, _ = client.Write(pkt(fxpInit, uint32(3)))
-			_, _ = client.Write(data)
-			_ = client.Close()
-		}()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			t.Fatal("the request server did not finish")
-		}
-		_ = rs.Close()
-		_ = in.CloseWithError(io.EOF)
+		serve(t, h, data)
 
 		if got, err := os.ReadFile(filepath.Join(outside, "secret.txt")); err != nil || string(got) != "secret" {
 			t.Fatalf("the file outside the mount changed: %q, %v", got, err)

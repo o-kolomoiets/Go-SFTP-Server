@@ -8,11 +8,12 @@ A new dependency requires removing another one or revisiting this rule.
 | Module                           | Version  | Purpose                                  | Since |
 |----------------------------------|----------|------------------------------------------|-------|
 | `github.com/spf13/cobra`         | v1.10.2  | CLI                                      | M0    |
-| `golang.org/x/crypto`            | v0.57.0  | `ssh`; later `argon2`, `bcrypt`          | M1    |
+| `golang.org/x/crypto`            | v0.58.0  | `ssh`; later `argon2`, `bcrypt`          | M1    |
 | `github.com/pkg/sftp`            | v1.13.11 | SFTP `RequestServer`                     | M1    |
-| `golang.org/x/sys`               | v0.48.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
+| `golang.org/x/sys`               | v0.49.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
-| `golang.org/x/term`              | v0.46.0  | password input without echo              | M3    |
+| `github.com/spf13/pflag`         | v1.0.10  | flags of `serve` that override the file  | M2    |
+| `golang.org/x/term`              | v0.47.0  | password input without echo              | M3    |
 | `github.com/pires/go-proxyproto` | v0.15.0  | PROXY protocol v1 and v2 header parser (Apache-2.0) | M4    |
 | `github.com/landlock-lsm/go-landlock` | v0.10.1 | Landlock on Linux ([below](#go-landlock-and-psx)) | M4 |
 
@@ -51,6 +52,24 @@ GO-2026-6303, GO-2026-6354 and GO-2026-6355 (fixed in v0.55.0 and v0.56.0).
 gosftpd therefore requires x/crypto ≥ v0.56.0 itself, as a direct (not
 `// indirect`) requirement, and Dependabot keeps it current.
 
+### GO-2026-5932 and `osv-scanner.toml`
+
+GO-2026-5932 marks `golang.org/x/crypto/openpgp` as unmaintained and
+unsafe. It matches every x/crypto version and has no fix, so scanners that
+read `go.mod` report it. gosftpd never imports openpgp: `go list -deps
+-test ./...` has no openpgp package with any build tag, on any system, and
+govulncheck reports the advisory for the module only, not for code that
+gosftpd calls. `osv-scanner.toml` next to `go.mod` therefore ignores it,
+with that reason, for osv-scanner and for the OpenSSF Scorecard check that
+runs it, until 2027-04-16; review the entry by then. The file ignores
+nothing else: a vulnerability with a fix is fixed by an update instead.
+
+`govulncheck -mode binary` on a release binary does report GO-2026-5932
+as affecting the code. Release binaries are stripped (`-ldflags="-s -w"`),
+so govulncheck can match them by module only, and it names the openpgp
+packages although the binary has none of their code. Scan the source
+(`make vuln`) instead.
+
 ### Why `go-proxyproto` is used only as a parser
 
 `server.trusted_proxies` ([ADR 0011](adr/0011-proxy-systemd-landlock.md))
@@ -81,3 +100,12 @@ support as a whole added 72 KiB (73 728 bytes, linux/amd64,
 govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12.
 golangci-lint v2.14.0 is installed as a binary (CI uses
 `golangci/golangci-lint-action`).
+
+The `tool` directive marks every requirement in `tools/go.mod` as
+`// indirect`, so a module stays at the version the tools ask for until it
+is raised by hand or by Dependabot, which is configured to update these
+too. gotestsum asks for `golang.org/x/text` v0.17.0, which is affected by
+GO-2026-5970 and GO-2026-6629; `tools/go.mod` requires v0.41.0.
+`go.yaml.in/yaml/v4` stays at v4.0.0-rc.3: actionlint v1.7.12 does not
+build with a later one. CI and `make vuln` scan this module with
+govulncheck too. None of it is part of the gosftpd binary.

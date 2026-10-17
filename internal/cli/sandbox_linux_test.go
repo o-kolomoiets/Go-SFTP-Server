@@ -80,6 +80,7 @@ func needLandlock(t *testing.T) {
 //	write PATH     open an existing file for writing
 //	create PATH    create a file
 //	list PATH      list a directory
+//	pid            the child's process ID, for nsenter
 //	rootread NAME  read a file through the os.Root opened before serving
 //	stop           stop serving; the answer is "exit CODE"
 //
@@ -165,6 +166,8 @@ func serveChild(t *testing.T) bool {
 		case "list":
 			_, err := os.ReadDir(arg)
 			result(err)
+		case "pid":
+			reply(strconv.Itoa(os.Getpid()))
 		case "rootread":
 			_, err := before.ReadFile(arg)
 			result(err)

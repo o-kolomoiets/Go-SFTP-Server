@@ -8,6 +8,20 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-16
+
+Multi-user operation: reload on SIGHUP, users in `users.d`, SSH
+certificates, host key rotation, Prometheus metrics, hooks, PROXY protocol,
+a systemd unit and Landlock on Linux. It also fixes a crash that an
+authenticated client could cause (see Fixed). Read
+[docs/operations.md](docs/operations.md#upgrades) before upgrading; five
+changes need attention: headers from load balancers not in
+`server.trusted_proxies` are refused; `serve` refuses trusted files inside
+mounts and two host keys of one type; on Linux Landlock is on by default,
+so some changes need a restart instead of a reload; and `cert-authority`
+and `command="internal-sftp"` lines in `authorized_keys`, which v0.3
+skipped with a warning, now take effect.
+
 When upgrading a server behind a load balancer that sends PROXY protocol
 headers, add the load balancer to `server.trusted_proxies` together with
 the new binary (v0.3 refuses the key), or turn PROXY protocol off on the
@@ -27,6 +41,11 @@ refused (see Changed).
   `landlock` = `blocked` in both cases. The shipped unit allows them; to
   move to it from the interim unit, see
   [docs/install.md](docs/install.md#upgrade-from-the-quickstart-or-the-interim-unit).
+- Check the `authorized_keys` files for `cert-authority` lines and lines
+  with `command="internal-sftp"` (or a path to `sftp-server`). v0.3
+  skipped them with a warning; v0.4 uses them, so a `cert-authority` line
+  lets in the certificates its CA signs for the user (see Changed). Remove
+  the lines that should not grant logins before upgrading.
 
 ### Added
 
@@ -40,7 +59,8 @@ refused (see Changed).
   configuration. A key file that is missing or unsafe on reload revokes its
   keys instead of failing the reload, and a mount that is unavailable is
   left out until the next reload. A remounted mount directory is opened
-  anew for new logins (under Landlock: after a restart, see Changed). See
+  anew for new logins, with `mount reopened` in the log (under Landlock:
+  after a restart, see Changed). See
   [docs/configuration.md](docs/configuration.md#reload)
   and [ADR 0005](docs/adr/0005-reload.md).
 - Audit event `server.reload`; `conn.close` result `revoked`.
@@ -149,7 +169,9 @@ refused (see Changed).
   nothing at all, as a TCP health check, is not audited. The setting is
   reloadable, and `server.start` and `server.reload` record it.
   `gosftpd healthcheck` sends a `LOCAL` header when its own address is
-  trusted. Tested with HAProxy and nginx. See
+  trusted. Tested with HAProxy and nginx. New dependency
+  `github.com/pires/go-proxyproto` v0.15.0 (Apache-2.0), used only as a
+  header parser. See
   [docs/configuration.md](docs/configuration.md#behind-a-load-balancer).
 - A systemd unit, `packaging/systemd/gosftpd.service`, with sysusers and
   tmpfiles files and a drop-in for systemd before 253, in the Linux release
@@ -187,6 +209,20 @@ refused (see Changed).
   own, with a warning at start, which `config validate --check-fs` prints
   too. `config validate` refuses `required` with exec hooks. New
   dependency `github.com/landlock-lsm/go-landlock` v0.10.1 (MIT).
+- An operations guide, [docs/operations.md](docs/operations.md): reload
+  and its result, stop and restart with interrupted uploads, log rotation,
+  backups and restore, upgrades, and a disk mounted on a mount directory.
+  Recipes for retention ([docs/recipes/retention.md](docs/recipes/retention.md):
+  systemd-tmpfiles, a timer, hooks) and volume encryption
+  ([docs/recipes/volume-encryption.md](docs/recipes/volume-encryption.md):
+  LUKS2, fscrypt, ZFS, cloud disks). More alert rules in
+  [docs/metrics.md](docs/metrics.md): target down, failed reloads,
+  connection limits, PROXY protocol on one side only, bursts of bans. CI
+  checks offline the units, drop-ins and tmpfiles files that the
+  documentation shows in a code block that begins with their path (the
+  recipes, the archive drop-in of hooks.md and the port 22 drop-in of
+  install.md), tests the alert rules with `promtool`, and fails when the
+  documentation names a metric that does not exist.
 
 ### Changed
 
@@ -259,14 +295,37 @@ refused (see Changed).
   are bound, before any hook can run, `serve` clears the ambient set on
   every thread (with `AmbientCapabilities=CAP_NET_BIND_SERVICE` for port
   22 a hook inherited the capability).
+- Dependencies: `golang.org/x/crypto` v0.58.0, `golang.org/x/sys` v0.49.0,
+  `golang.org/x/term` v0.47.0 and `github.com/spf13/pflag` v1.0.10.
+- `server-sig-algs` lists only the signature algorithms of key types that
+  gosftpd accepts. Built with Go 1.27, as the release binaries are, x/crypto
+  v0.58.0 supports ML-DSA (`ssh-mldsa-44`, `-65`, `-87`), which gosftpd
+  would have announced and then refused, as it refuses ML-DSA keys in
+  `authorized_keys`, as CAs and in certificates.
 
 ### Fixed
 
+- An authenticated client could crash the server: `pkg/sftp` serves READ
+  and WRITE requests with the handle of a directory in parallel, and the
+  directory was listed concurrently. A directory is now listed for one
+  request at a time. A READ or WRITE sent after the CLOSE of its handle
+  was also served during the CLOSE: WRITEs sent after the CLOSE of an
+  atomic upload could still reach the published file, and a published
+  upload could be audited as `error`, without its hooks. Such a request
+  now waits for the CLOSE's answer, and fails. Both were data races; the
+  nightly fuzzing found the second.
 - After an interrupted upload to a temporary name was resumed (OpenSSH
   `reput`), the client's rename was refused for a user with the `upload`
   preset; likewise after a retry in place under `on_conflict =
   "overwrite"` for a user with `write` and `overwrite` but not `rename`.
   The file was no longer counted as the user's own.
+- Under `on_conflict = "rename"` without `atomic_uploads`, the stat
+  redirect of an upload that went to another name lasted 60 seconds from
+  the start of the upload instead of its end. After an upload longer than
+  60 seconds, paramiko `put(confirm=True)` saw the original and reported a
+  size mismatch, and OpenSSH `reput` after an interrupted upload appended
+  the rest of the new file to the original. The redirect now lasts while
+  the upload is open and for 60 seconds after it ended, also for a resume.
 - An upload whose write failed in the file system (a full disk, an I/O
   error) was audited with `result` `ok`; it is now `error`, and an atomic
   upload with a failed write is not published. A truncation refused by the
@@ -277,7 +336,6 @@ refused (see Changed).
 - An `include` whose directory exists but cannot be read is an error
   instead of silently adding no users; names that start with a dot are
   skipped (editor and temporary files).
-
 - TOML errors no longer print control characters or "line 0" for an escape
   cut off at the end of the file.
 - A data race between an upload being opened and another session checking
@@ -285,6 +343,19 @@ refused (see Changed).
 - A client path of 4096 bytes without a leading `/` was accepted, although
   the path the server returned for it (REALPATH) was one byte too long and
   refused; the limit now applies to the cleaned path (found by fuzzing).
+
+### Security
+
+- Developer tools: `tools/go.mod` requires `golang.org/x/text` v0.41.0
+  instead of the v0.17.0 that gotestsum asks for (GO-2026-5970,
+  GO-2026-6629). This does not change the gosftpd binary. CI and `make
+  vuln` scan the tools module with govulncheck too, and Dependabot now
+  updates every requirement of `tools/go.mod`: the `tool` directive marks
+  them all `// indirect`, which it skipped before.
+- `osv-scanner.toml` ignores GO-2026-5932 (`golang.org/x/crypto/openpgp`,
+  which has no fixed version) for osv-scanner and the OpenSSF Scorecard:
+  gosftpd never imports openpgp. See
+  [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md#go-2026-5932-and-osv-scannertoml).
 
 ## [0.3.0] - 2026-10-09
 
@@ -491,7 +562,8 @@ without `--allow-root`, and uploads stop below 1 GiB of free space unless
 - The non-functional 2023 skeleton (`main.go`, `cmd/server`, `pkg/`).
 - The JSON configuration promised by the old README; configuration will use TOML.
 
-[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.1.0-alpha...v0.2.0
 [0.1.0-alpha]: https://github.com/o-kolomoiets/go-sftp-server/releases/tag/v0.1.0-alpha

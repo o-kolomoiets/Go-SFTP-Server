@@ -53,6 +53,7 @@ type WriteHandle struct {
 	target    string
 	version   string // where publishing moved the replaced file
 	key       string // the session's writers map key: the virtual path at open
+	requested string // the opened name, if OpenWrite redirected it to this upload
 	written   atomic.Int64
 	refused   atomic.Bool // a write or truncation past max_file_size
 	immutable atomic.Bool // a write or truncation refused by the append-only guard
@@ -250,6 +251,10 @@ func (h *WriteHandle) Located() Where {
 // was written to a file this upload created, the empty file is removed.
 func (h *WriteHandle) Close(aborted bool) error {
 	h.closeOnce.Do(func() {
+		// The redirect OpenWrite set for this upload lasts RedirectTTL
+		// from its end, also of an interrupted one, which a resume
+		// continues.
+		defer h.s.closedRedirect(h)
 		if h.target != "" {
 			h.closeErr = h.closeTemp(aborted)
 			return
@@ -324,7 +329,8 @@ func (s *Session) OpenWrite(vp string, fl OpenFlags) (*WriteHandle, error) {
 	h.key = h.virtual
 	s.register(h)
 	if name != requested && v.opts().StatRedirect {
-		s.setRedirect(v, requested, name)
+		s.setRedirect(v, requested, name, h)
+		h.requested = requested
 	}
 	return h, nil
 }
