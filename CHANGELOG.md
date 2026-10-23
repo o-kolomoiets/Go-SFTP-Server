@@ -14,7 +14,8 @@ Incompatible changes are prefixed with **BREAKING:**.
   `make generate` writes them into `out/` (not committed) with
   `internal/cli/gendocs`, from the command definitions, dated by the
   commit (`SOURCE_DATE_EPOCH`), so that the same commit gives the same
-  files. The release archives and packages will carry them (ADR 0012).
+  files. Every release archive carries them in `man/` and `completions/`;
+  the packages will install them (ADR 0012).
 - `THIRD_PARTY_LICENSES`: `make generate` also writes the name, version,
   license and license text of every Go module in the Linux binary into
   `out/THIRD_PARTY_LICENSES`, with go-licenses v2.0.1 (a tool in
@@ -24,10 +25,16 @@ Incompatible changes are prefixed with **BREAKING:**.
   linux/amd64 build on every host, so a release rebuilt elsewhere keeps its
   checksums. libcap/psx appears once, under BSD-3-Clause, the license
   gosftpd uses it under. A license go-licenses cannot classify fails
-  `make generate`.
+  `make generate`. Every release archive carries the file.
+- Release archives for FreeBSD (amd64, arm64): Tier 2, cross-built and not
+  tested (ADR 0012).
 
 ### Changed
 
+- Releases are built with GoReleaser v2.19.0, as a draft whose notes are
+  the version's section of CHANGELOG.md (for a pre-release without one,
+  the Unreleased section); `.github/scripts/release-notes.sh` extracts it
+  and fails when there are no notes (ADR 0012).
 - A missing configuration file is explained: when `--config` or
   `$GOSFTPD_CONFIG` names a file that does not exist, when the
   configuration file is a directory, or when no file is found, the error

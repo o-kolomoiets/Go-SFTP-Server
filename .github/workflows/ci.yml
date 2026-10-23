@@ -300,12 +300,13 @@ jobs:
           check-latest: true
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: v2.18.2
+          version: v2.19.0
           args: check
+      # Snapshot mode skips publishing, not signing (ADR 0012).
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: v2.18.2
-          args: release --snapshot --clean
+          version: v2.19.0
+          args: release --snapshot --clean --skip=sign
       # make generate, a before hook, writes only to out/, which git
       # ignores; a change elsewhere would mark the build as modified
       # (vcs.modified, ADR 0012).
@@ -338,17 +339,42 @@ jobs:
             echo "::error file=out/THIRD_PARTY_LICENSES::the last entry is not the Go standard library and runtime with $license"; status=1
           fi
           exit $status
-      - name: Only the Linux archives hold the systemd files (ADR 0011)
+      # Six archives, each with exactly the binary, the documents, the
+      # license file, the man pages and the completions; only the Linux
+      # ones add the systemd files (ADR 0011). Every entry belongs to root
+      # (uid 0) with mode 0644, or 0755 for the binary, and carries the
+      # commit time, so that the archive does not depend on the checkout
+      # (ADR 0012).
+      - name: The archives hold the release files, with fixed owner, mode and time
         run: |
+          version="$(jq -r .version dist/metadata.json)"
+          mtime="$(TZ=UTC date -d "@$(git log -1 --format=%ct)" '+%F %T')"
+          common=(gosftpd LICENSE README.md CHANGELOG.md THIRD_PARTY_LICENSES man/gosftpd.1.gz
+            completions/_gosftpd completions/gosftpd.bash completions/gosftpd.fish)
+          mapfile -t man < <(cd out && ls man/*.1.gz)
+          linux=(packaging/config.toml packaging/gosftpd.sysusers packaging/gosftpd.tmpfiles
+            packaging/systemd/gosftpd.service packaging/systemd/legacy-notify.conf)
           status=0
-          for f in dist/*_linux_*.tar.gz; do
-            for p in packaging/config.toml packaging/gosftpd.sysusers packaging/gosftpd.tmpfiles \
-              packaging/systemd/gosftpd.service packaging/systemd/legacy-notify.conf; do
-              if ! tar -tzf "$f" | grep -qx "$p"; then echo "::error file=$f::$p is missing"; status=1; fi
+          set -- dist/*.tar.gz
+          if [ $# -ne 6 ]; then echo "::error::$# archives, want 6:"; ls dist/*.tar.gz; status=1; fi
+          for os in linux darwin freebsd; do
+            for arch in amd64 arm64; do
+              f="dist/gosftpd_${version}_${os}_${arch}.tar.gz"
+              if [ ! -f "$f" ]; then echo "::error::$f is missing"; status=1; continue; fi
+              want=("${common[@]}" "${man[@]}")
+              if [ "$os" = linux ]; then want+=("${linux[@]}"); fi
+              if ! diff -u <(printf '%s\n' "${want[@]}" | sort -u) <(tar -tzf "$f" | sort); then
+                echo "::error file=$f::the entries differ from the list above (+ is in the archive)"; status=1
+              fi
+              bad="$(TZ=UTC tar --numeric-owner --full-time -tvzf "$f" | awk -v mtime="$mtime" '{
+                mode = $6 == "gosftpd" ? "-rwxr-xr-x" : "-rw-r--r--"
+                if ($1 != mode || $2 != "0/0" || $4 " " $5 != mtime) print
+              }')"
+              if [ -n "$bad" ]; then
+                echo "::error file=$f::entries not owned by 0/0 with mode 0644 (0755 for gosftpd) and time $mtime UTC"
+                echo "$bad"; status=1
+              fi
             done
-          done
-          for f in dist/*_darwin_*.tar.gz; do
-            if tar -tzf "$f" | grep -q '^packaging/'; then echo "::error file=$f::has the systemd files"; status=1; fi
           done
           exit $status
       - name: Release binaries stay within 12 MiB (ROADMAP §11.1, D21)
@@ -360,6 +386,25 @@ jobs:
             if [ "$size" -gt 12582912 ]; then echo "::error file=$f::$size bytes is over the 12 MiB budget"; status=1; fi
           done
           exit $status
+      # git.prerelease_suffix (ADR 0012): without GORELEASER_CURRENT_TAG,
+      # GoReleaser takes the first tag on HEAD in git's version sort, which
+      # ranks v0.5.0-rc.1 above v0.5.0; the suffix makes a local or snapshot
+      # run on a final tagged on its rc's commit build the final. The build
+      # runs in a worktree, so that dist/ stays for the steps after it.
+      - name: Tag a final and its rc on HEAD (local tags, never pushed)
+        run: |
+          git worktree add --quiet --detach "$RUNNER_TEMP/suffix"
+          git tag v999.0.0-rc.1 && git tag v999.0.0
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.19.0
+          workdir: ${{ runner.temp }}/suffix
+          args: build --snapshot --clean --single-target --id gosftpd --skip=before
+      - name: The build took the final
+        run: |
+          tag="$(jq -r .tag "$RUNNER_TEMP/suffix/dist/metadata.json")"
+          git tag -d v999.0.0-rc.1 v999.0.0
+          if [ "$tag" != v999.0.0 ]; then echo "::error::the build took $tag, want v999.0.0"; exit 1; fi
 
   vuln:
     runs-on: ubuntu-24.04

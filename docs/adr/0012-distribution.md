@@ -95,8 +95,14 @@
   release that is complete and checked.
 - **Release notes** come from CHANGELOG.md: a step extracts the section
   `## [X.Y.Z]` (for a pre-release without its own section, `## [Unreleased]`)
-  into a file and passes it with `goreleaser release --release-notes FILE`
-  (the flag exists in v2.19.0). `changelog.disable: true` stays.
+  into a file with `.github/scripts/release-notes.sh`, which fails when
+  that leaves no notes, and passes it with `goreleaser release
+  --release-notes FILE` (the flag exists in v2.19.0). The configuration
+  has no `changelog.disable: true`: GoReleaser v2.19.0 reads the file in
+  its changelog step, which `disable` skips, so the draft got empty notes
+  (internal/pipe/changelog; reproduced against a stand-in for the GitHub
+  API). Without the flag that step writes a list of commits to
+  `dist/CHANGELOG.md` and uses it as the notes.
 - **Images are public before the release is.** `release.yml` pushes the
   `vX.Y.Z` image while the release is still a draft and, for a stable
   version, points `latest` at it once the verification step has passed
@@ -230,7 +236,7 @@ release:
   prerelease: auto
   preflight: { fail_on_error: true }
 
-changelog: { disable: true }
+# No changelog.disable: it would skip --release-notes (Release notes above).
 ```
 
 - What it keeps from today's file, against the ROADMAP §9.3 fragment:
@@ -431,7 +437,7 @@ jobs:
         with: { name: out, path: "${{ runner.temp }}/generated" }      # never into the checkout
       - run: ...                 # the artifact checked against the exact file list and copied into a new out/;
                                  # mkdir -p out/docker/empty out/docker/home-root/home; go mod tidy -diff; go mod verify;
-                                 # git status --porcelain empty; CHANGELOG section > $RUNNER_TEMP/notes.md
+                                 # git status --porcelain empty; .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > $RUNNER_TEMP/notes.md
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with: { cosign-release: v3.1.4 }
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -583,7 +589,8 @@ jobs:
   `^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$` and is higher
   than every other tag in that format, in the guard's order (`0.4.1-rc.1`
   after v0.5.0 is refused); CHANGELOG.md has the version's section (a
-  pre-release: or a non-empty Unreleased section); the `ci-ok` check run
+  pre-release: or a non-empty Unreleased section), which
+  `release-notes.sh` checks as the release job does; the `ci-ok` check run
   succeeded on `github.sha`, the commit the run started on; and the tag
   does not exist yet, unless it is `github-actions[bot]`'s annotated tag
   on `github.sha`, left by a run that failed to dispatch, in which case a
@@ -1466,7 +1473,8 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   `packaging/needrestart.conf`; the unit's `Documentation=` and its check
   in `internal/config/packaging_test.go`;
   `.github/workflows/{release,ci,tag,verify-release}.yml`,
-  `.github/scripts/release-guard.sh`; `.github/dependabot.yml`;
+  `.github/scripts/release-guard.sh` and `release-notes.sh` (tested in
+  `test/release/`); `.github/dependabot.yml`;
   `test/packages/`, `test/docker/` (every `FROM` pinned by digest);
   `test/docs/run-block.sh` and the marked blocks of docs/install.md.
 - **C, ephemeral and atmoz:** `internal/atmoz` (parser, mount builder and

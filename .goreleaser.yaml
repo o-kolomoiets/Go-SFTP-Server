@@ -1,6 +1,6 @@
-# GoReleaser configuration (minimal, M2): Linux and macOS binaries, archives
-# and checksums.txt. Windows follows once the isolation tests pass there
-# (M3b); packages, Docker image and signatures come in M5.
+# GoReleaser v2.19.0 configuration (ADR 0012): archives for Linux, macOS and
+# FreeBSD, checksums.txt and a draft GitHub release. Windows follows once
+# the isolation tests pass there (M3b).
 # Check with: goreleaser check && goreleaser release --snapshot --clean
 version: 2
 project_name: gosftpd
@@ -8,68 +8,89 @@ project_name: gosftpd
 before:
   hooks:
     - go mod tidy -diff
-    # Man pages, completions and THIRD_PARTY_LICENSES into out/, which git
-    # ignores (ADR 0012).
+    # Man pages, completions and THIRD_PARTY_LICENSES into out/ (ignored by
+    # git), and the empty directories the image copies (ADR 0012).
     - make generate
 
-# One build per system, so that only the Linux archives get the systemd
-# files (ADR 0011).
+# Linux apart, so that only the Linux archives carry the packaging files
+# (ADR 0011). -trimpath and mod_timestamp make the binaries reproducible.
 builds:
   - &build
     id: gosftpd
     main: ./cmd/gosftpd
     binary: gosftpd
-    env:
-      - CGO_ENABLED=0
+    env: [CGO_ENABLED=0]
     goos: [linux]
     goarch: [amd64, arm64]
-    flags:
-      - -trimpath
+    flags: [-trimpath]
     ldflags:
       - -s -w
       - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Version={{ .Tag }}
       - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Commit={{ .FullCommit }}
       - -X github.com/o-kolomoiets/go-sftp-server/internal/version.Date={{ .CommitDate }}
     mod_timestamp: "{{ .CommitTimestamp }}"
+  # FreeBSD is Tier 2: cross-built and not tested (ROADMAP §9.4).
   - <<: *build
-    id: gosftpd-darwin
-    goos: [darwin]
+    id: gosftpd-other
+    goos: [darwin, freebsd]
 
+# Every entry has a fixed owner, group, mode and time, so that an archive
+# does not depend on the checkout: with only the time fixed, a checkout made
+# under umask 002 changed every archive (ADR 0012). The files under out/
+# come from make generate. A missing THIRD_PARTY_LICENSES fails the build,
+# a pattern that matches nothing does not: goreleaser-check lists the
+# archives.
 archives:
   # The packaging files in the layout docs/install.md installs them from.
   - id: gosftpd
     ids: [gosftpd]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info: { owner: root, group: root, mode: 0755, mtime: "{{ .CommitDate }}" }
     files:
-      - LICENSE
-      - README.md
-      - CHANGELOG.md
-      - packaging/config.toml
-      - packaging/gosftpd.sysusers
-      - packaging/gosftpd.tmpfiles
-      - packaging/systemd/gosftpd.service
-      - packaging/systemd/legacy-notify.conf
-  - id: gosftpd-darwin
-    ids: [gosftpd-darwin]
+      - { src: LICENSE, info: &info { owner: root, group: root, mode: 0644, mtime: "{{ .CommitDate }}" } }
+      - { src: README.md, info: *info }
+      - { src: CHANGELOG.md, info: *info }
+      - { src: out/THIRD_PARTY_LICENSES, strip_parent: true, info: *info }
+      - { src: "out/man/*.1.gz", dst: man, strip_parent: true, info: *info }
+      - { src: "out/completions/*", dst: completions, strip_parent: true, info: *info }
+      - { src: packaging/config.toml, info: *info }
+      - { src: packaging/gosftpd.sysusers, info: *info }
+      - { src: packaging/gosftpd.tmpfiles, info: *info }
+      - { src: packaging/systemd/gosftpd.service, info: *info }
+      - { src: packaging/systemd/legacy-notify.conf, info: *info }
+  - id: gosftpd-other
+    ids: [gosftpd-other]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files:
-      - LICENSE
-      - README.md
-      - CHANGELOG.md
+    builds_info: { owner: root, group: root, mode: 0755, mtime: "{{ .CommitDate }}" }
+    files: # the first six entries of the Linux archive
+      - { src: LICENSE, info: *info }
+      - { src: README.md, info: *info }
+      - { src: CHANGELOG.md, info: *info }
+      - { src: out/THIRD_PARTY_LICENSES, strip_parent: true, info: *info }
+      - { src: "out/man/*.1.gz", dst: man, strip_parent: true, info: *info }
+      - { src: "out/completions/*", dst: completions, strip_parent: true, info: *info }
 
-checksum:
-  name_template: checksums.txt
-  algorithm: sha256
+checksum: { name_template: checksums.txt, algorithm: sha256 }
 
-# The owner publishes the release (title and notes from CHANGELOG.md) in the
-# GitHub interface; the release workflow only attaches the files.
+# The SBOMs and signatures (sboms, signs), the packages (nfpms) and the image
+# (dockers_v2, docker_signs, docker_digest) go here, in this order (ADR 0012).
+
+# Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit (git's
+# version sort ranks the rc higher).
+git: { prerelease_suffix: "-" }
+
+# A draft, which the owner publishes once it is complete and checked
+# (ADR 0012). Its notes are the version's section of CHANGELOG.md, given
+# with --release-notes: .github/scripts/release-notes.sh VERSION writes it.
 release:
-  mode: keep-existing
-  # Follow the tag: v1.2.3-rc.1 stays a pre-release (GoReleaser would
-  # otherwise update the release published in the interface to a full one).
+  draft: true
+  replace_existing_draft: true # a re-run replaces its own draft
   prerelease: auto
+  preflight: { fail_on_error: true } # an immutable release stops the run before the build
 
-changelog:
-  disable: true
+# No changelog.disable: GoReleaser reads --release-notes in its changelog
+# step, which disable skips, so the draft would get no notes. Without the
+# flag that step writes a list of commits to dist/CHANGELOG.md and uses it
+# as the notes.
