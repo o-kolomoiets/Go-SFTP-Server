@@ -15,6 +15,12 @@ Incompatible changes are prefixed with **BREAKING:**.
   `internal/cli/gendocs`, from the command definitions, dated by the
   commit (`SOURCE_DATE_EPOCH`), so that the same commit gives the same
   files. The release archives and packages will carry them (ADR 0012).
+- `THIRD_PARTY_LICENSES`: `make generate` also writes the name, version,
+  license and license text of every Go module in the Linux binary into
+  `out/THIRD_PARTY_LICENSES`, with go-licenses v2.0.1 (a tool in
+  `tools/go.mod`) and the template `packaging/third_party_licenses.tpl`.
+  libcap/psx appears once, under BSD-3-Clause, the license gosftpd uses
+  it under.
 
 ### Changed
 

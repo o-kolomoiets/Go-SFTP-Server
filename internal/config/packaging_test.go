@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -282,6 +283,84 @@ func TestLegacyNotifyDropIn(t *testing.T) {
 	for k, v := range want {
 		if !slices.Equal(u[k], v) {
 			t.Errorf("%s=%q, want %q", k, u[k], v)
+		}
+	}
+}
+
+// license is what go-licenses v2.0.1 passes to a report template for each
+// module and license (libraryDataFlat in its report.go).
+type license struct {
+	Name, Version, LicensePath, LicenseURL, LicenseName string
+}
+
+func (l license) LicenseText() (string, error) {
+	data, err := os.ReadFile(l.LicensePath)
+	return string(data), err
+}
+
+// The template of THIRD_PARTY_LICENSES prints each module once, with its
+// version, license and license text, never the URL that go-licenses looks
+// up online, and libcap/psx, which go-licenses lists under both of its
+// licenses, only under BSD-3-Clause (ADR 0012).
+func TestThirdPartyLicensesTemplate(t *testing.T) {
+	t.Parallel()
+
+	tpl, err := os.ReadFile(filepath.Join(packaging, "third_party_licenses.tpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := template.New("").Parse(string(tpl)) // as go-licenses parses it
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	file := func(name, text string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	toml := license{"github.com/BurntSushi/toml", "v1.6.0", file("COPYING", "MIT text\n"), "https://example.com/toml", "MIT"}
+	psx := file("License", "BSD-3-Clause or GPL-2.0 text\n")
+	psxGPL := license{"kernel.org/pub/linux/libs/security/libcap/psx", "v1.2.77", psx, "Unknown", "GPL-2.0"}
+	psxBSD := psxGPL
+	psxBSD.LicenseName = "BSD-3-Clause"
+	sys := license{"golang.org/x/sys", "v0.49.0", file("LICENSE", "BSD text without a final newline"), "https://example.com/sys", "BSD-3-Clause"}
+	other := license{"example.com/other", "v1.0.0", file("OTHER", "Apache text\n"), "Unknown", "Apache-2.0"}
+
+	entry := func(l license, text string) string {
+		return "\n" + strings.Repeat("=", 80) + "\n" + l.Name + " " + l.Version + "\nLicense: " + l.LicenseName + "\n\n" + text
+	}
+	header := "gosftpd is licensed under the Apache License 2.0 (see LICENSE). Its binary\n" +
+		"includes the following Go modules, each under the license named with it.\n"
+	for _, tt := range []struct {
+		name string
+		libs []license
+		want string
+	}{
+		{
+			"go-licenses' order",
+			[]license{toml, psxGPL, psxBSD, sys, other},
+			header + entry(toml, "MIT text\n") + entry(psxBSD, "BSD-3-Clause or GPL-2.0 text\n") +
+				entry(sys, "BSD text without a final newline") + entry(other, "Apache text\n"),
+		},
+		{
+			"psx BSD first",
+			[]license{psxBSD, psxGPL, toml},
+			header + entry(psxBSD, "BSD-3-Clause or GPL-2.0 text\n") + entry(toml, "MIT text\n"),
+		},
+		{"none", nil, header},
+	} {
+		var out strings.Builder
+		if err := tmpl.Execute(&out, tt.libs); err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if out.String() != tt.want {
+			t.Errorf("%s:\n%s\nwant:\n%s", tt.name, out.String(), tt.want)
+		}
+		if strings.Contains(out.String(), "example.com/toml") || strings.Contains(out.String(), "Unknown") {
+			t.Errorf("%s: the output names a license URL:\n%s", tt.name, out.String())
 		}
 	}
 }

@@ -37,9 +37,16 @@ staticcheck: ## Run staticcheck standalone (also runs inside golangci-lint)
 
 # The files a release adds to the binary, into out/ (ignored by git): the
 # GoReleaser before hook and the release's generate job run this (ADR 0012).
-# SOURCE_DATE_EPOCH, the commit time, dates the man pages.
-generate: ## Man pages, completions and the image's empty directories into out/
+# SOURCE_DATE_EPOCH, the commit time, dates the man pages. go-licenses
+# reports the Linux build on every host (GOOS=linux; on darwin go-landlock
+# and psx would drop out) and needs GOROOT to tell the standard library
+# apart. go tool -n builds it for this host and prints its path: go tool
+# would build it for GOOS.
+generate: ## Man pages, completions, THIRD_PARTY_LICENSES and the image's empty directories into out/
 	SOURCE_DATE_EPOCH="$$(git log -1 --format=%ct)" $(GO) generate ./...
+	licenses="$$($(TOOL) -n go-licenses)" && GOOS=linux GOROOT="$$($(GO) env GOROOT)" "$$licenses" report ./cmd/gosftpd \
+		--ignore github.com/o-kolomoiets/go-sftp-server \
+		--template=packaging/third_party_licenses.tpl > out/THIRD_PARTY_LICENSES
 	mkdir -p out/docker/empty out/docker/home-root/home
 
 clean:

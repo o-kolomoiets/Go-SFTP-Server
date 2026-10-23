@@ -107,9 +107,12 @@ version -m`), but govulncheck scans them with the rest of the module.
 
 ## Developer tools (`tools/go.mod`)
 
-govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12.
-golangci-lint v2.14.0 is installed as a binary (CI uses
-`golangci/golangci-lint-action`).
+govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12,
+go-licenses v2.0.1 (`github.com/google/go-licenses/v2`, which writes
+`THIRD_PARTY_LICENSES` in `make generate`; it brings
+`github.com/google/licenseclassifier/v2`, klog, OpenCensus and cobra v1.7.0
+and raises `golang.org/x/net` to v0.61.0). golangci-lint v2.14.0 is
+installed as a binary (CI uses `golangci/golangci-lint-action`).
 
 The `tool` directive marks every requirement in `tools/go.mod` as
 `// indirect`, so a module stays at the version the tools ask for until it
