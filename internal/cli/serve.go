@@ -44,6 +44,7 @@ type serveOptions struct {
 	hostKeys       []string
 	stateDir       string
 	listen         string
+	listenCount    int // how often --listen was given
 	readOnly       bool
 	onConflict     string
 	user           string
@@ -51,12 +52,16 @@ type serveOptions struct {
 	logFormat      string
 	auditOutput    string
 	allowRoot      bool
+	ephemeral      bool
+	usersConf      string
+	// specs are the atmoz user specs given to the root command.
+	specs []string
 }
 
 func newServeCmd() *cobra.Command {
 	var o serveOptions
 	cmd := &cobra.Command{
-		Use:   "serve [--config FILE | --dir [NAME=]PATH...]",
+		Use:   "serve [--config FILE | --dir [NAME=]PATH... | --ephemeral | --users-conf FILE]",
 		Short: "Serve directories over SFTP",
 		Long: `Serve directories over SFTP.
 
@@ -66,32 +71,97 @@ directories. Otherwise the configuration file is --config, $GOSFTPD_CONFIG,
 ./gosftpd.toml, /etc/gosftpd/config.toml or <user config dir>/gosftpd/config.toml,
 whichever comes first.
 
+When none of these exists, gosftpd serves the users of atmoz/sftp user specs
+in --users-conf or $SFTP_USERS, and in its container image in
+/etc/sftp/users.conf, as the atmoz/sftp image does (atmoz mode, see
+'gosftpd --help' and docs/migrate-from-atmoz.md). A path that --config or
+$GOSFTPD_CONFIG names must exist; in the image, so must config.toml in a
+mounted /etc/gosftpd.
+
+With --ephemeral, gosftpd serves a new temporary directory, or the one
+--dir names, to the user test, who logs in with a random password or a
+generated key, and prints the connection details as one JSON line on stdout
+once it serves; logs and the audit log go to stderr. It listens on
+127.0.0.1:0 unless --listen says otherwise, ignores $GOSFTPD_CONFIG,
+$GOSFTPD_LISTEN and SIGHUP, and on SIGINT or SIGTERM deletes the key and
+the temporary data.
+
 Flags override the environment ($GOSFTPD_LISTEN, $GOSFTPD_LOG_LEVEL,
 $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 		Example: `  gosftpd serve --dir ./share
   gosftpd serve --dir inbox=/srv/inbox --dir docs=/srv/docs --read-only
-  gosftpd serve --config /etc/gosftpd/config.toml`,
+  gosftpd serve --config /etc/gosftpd/config.toml
+  gosftpd serve --ephemeral
+  gosftpd serve --users-conf ./users.conf`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runServe(cmd.Context(), cmd.Flags(), o, os.Getenv, cmd.ErrOrStderr(), cmd.OutOrStdout())
 		},
 	}
-	f := cmd.Flags()
-	f.StringVar(&o.config, "config", "", "configuration file")
-	f.StringArrayVar(&o.dirs, "dir", nil, "directory to serve without a configuration file, as PATH or NAME=PATH (repeatable)")
-	f.StringVar(&o.authorizedKeys, "authorized-keys", "", "with --dir: authorized_keys file (default ~/.ssh/authorized_keys)")
-	f.StringVar(&o.user, "user", "", "with --dir: accept only this SSH user name (default: any)")
-	f.StringVar(&o.stateDir, "state-dir", "", "with --dir: directory for the generated host key (default <user config dir>/gosftpd)")
-	f.StringArrayVar(&o.hostKeys, "host-key", nil, "host private key file (repeatable)")
-	f.StringVar(&o.listen, "listen", ":2022", "address to listen on")
-	f.BoolVar(&o.readOnly, "read-only", false, "refuse all modifications on every mount")
-	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject, overwrite or version")
-	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
-	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
-	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path")
-	f.BoolVar(&o.allowRoot, "allow-root", false, "run even as root (not recommended: run as a dedicated user)")
+	serveFlags(cmd.Flags(), &o, false)
 	return cmd
 }
+
+// serveFlags defines the flags of serve on f. With atmoz, only those that
+// apply in atmoz mode (atmozFlags), for the root command's form, whose
+// uploads overwrite by default.
+func serveFlags(f *pflag.FlagSet, o *serveOptions, atmoz bool) {
+	root := f
+	if atmoz {
+		f = pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	}
+	f.StringVar(&o.config, "config", "", "configuration file")
+	f.StringArrayVar(&o.dirs, "dir", nil, "directory to serve without a configuration file, as PATH or NAME=PATH (repeatable; once with --ephemeral)")
+	f.StringVar(&o.authorizedKeys, "authorized-keys", "", "with --dir: authorized_keys file (default ~/.ssh/authorized_keys)")
+	f.StringVar(&o.user, "user", "", "with --dir: accept only this SSH user name (default: any)")
+	f.StringVar(&o.stateDir, "state-dir", "", "with --dir or in atmoz mode: directory for the generated host key (default <user config dir>/gosftpd)")
+	f.StringArrayVar(&o.hostKeys, "host-key", nil, "host private key file (repeatable)")
+	o.listen = ":2022"
+	f.Var(&countedString{&o.listen, &o.listenCount}, "listen", "address to listen on (once with --ephemeral, whose default is 127.0.0.1:0)")
+	f.BoolVar(&o.readOnly, "read-only", false, "refuse all modifications on every mount")
+	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject, overwrite or version (atmoz mode: overwrite)")
+	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
+	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
+	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path (with --ephemeral: stderr or a file path)")
+	f.BoolVar(&o.allowRoot, "allow-root", false, "run even as root (not recommended: run as a dedicated user)")
+	f.BoolVar(&o.ephemeral, "ephemeral", false, "serve a temporary directory to user test, for tests; the connection details go to stdout as one JSON line")
+	f.StringVar(&o.usersConf, "users-conf", "", "atmoz mode: a users file of atmoz/sftp user specs, one per line (in the image /etc/sftp/users.conf by default)")
+	if !atmoz {
+		return
+	}
+	o.onConflict = string(vfs.ConflictOverwrite)
+	f.Lookup("on-conflict").DefValue = o.onConflict
+	f.Lookup("on-conflict").Usage = "when an upload targets an existing file: overwrite, rename, reject or version"
+	f.Lookup("state-dir").Usage = "directory for the generated host key (default <user config dir>/gosftpd; in the image /etc/ssh's keys, else /var/lib/gosftpd)"
+	f.Lookup("users-conf").Usage = "a users file of atmoz/sftp user specs, one per line (in the image /etc/sftp/users.conf by default)"
+	f.Lookup("listen").Usage = "address to listen on"
+	f.Lookup("audit-output").Usage = "audit log destination: stdout or a file path"
+	for _, name := range atmozFlags {
+		root.AddFlag(f.Lookup(name))
+	}
+}
+
+// countedString is a string flag that counts how often it is given: the
+// last value wins, which --ephemeral does not accept for --listen.
+type countedString struct {
+	value *string
+	count *int
+}
+
+func (s *countedString) String() string {
+	if s.value == nil {
+		return ""
+	}
+	return *s.value
+}
+
+func (s *countedString) Set(v string) error {
+	*s.value = v
+	*s.count++
+	return nil
+}
+
+func (*countedString) Type() string { return "string" }
 
 // buildConfig assembles the configuration: a file, or zero-config with
 // --dir; then the environment; then flags that were set explicitly. For a
@@ -145,7 +215,27 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 	}
 	// What the file says, before the environment and flags override it.
 	file := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
-	set := applyEnv(c, getenv)
+	set := applyOverrides(c, flags, o, getenv)
+	var masked []string
+	if reload {
+		final := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
+		for _, k := range slices.Sorted(maps.Keys(set)) {
+			if c.File != "" && c.Defined(k) && file[k] != final[k] {
+				masked = append(masked, fmt.Sprintf("%s = %q in %s has no effect: %s overrides it", k, file[k], c.File, set[k]))
+			}
+		}
+		if fileHostKeys != nil && !slices.Equal(fileHostKeys, c.Server.HostKeys) {
+			masked = append(masked, fmt.Sprintf("server.host_keys in %s has no effect: --host-key overrides it", c.File))
+		}
+	}
+	return c, masked, nil
+}
+
+// applyOverrides applies the environment and then the flags that were set.
+// It returns the keys of reloadable settings they set, with the variable
+// or the flag.
+func applyOverrides(c *config.Config, flags *pflag.FlagSet, o serveOptions, getenv func(string) string) (set map[string]string) {
+	set = applyEnv(c, getenv)
 	if flags.Changed("listen") {
 		c.Server.Listen = []string{o.listen}
 	}
@@ -163,19 +253,7 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 		}
 		set["audit.output"] = "--audit-output"
 	}
-	var masked []string
-	if reload {
-		final := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
-		for _, k := range slices.Sorted(maps.Keys(set)) {
-			if c.File != "" && c.Defined(k) && file[k] != final[k] {
-				masked = append(masked, fmt.Sprintf("%s = %q in %s has no effect: %s overrides it", k, file[k], c.File, set[k]))
-			}
-		}
-		if fileHostKeys != nil && !slices.Equal(fileHostKeys, c.Server.HostKeys) {
-			masked = append(masked, fmt.Sprintf("server.host_keys in %s has no effect: --host-key overrides it", c.File))
-		}
-	}
-	return c, masked, nil
+	return set
 }
 
 // applyEnv applies the environment variables that override the file. It
@@ -214,16 +292,22 @@ func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
 func loadConfig(explicit string, getenv func(string) string) (*config.Config, error) {
 	path, err := config.Find(explicit, getenv)
 	if err != nil {
-		if h := configHint(err, getenv); h != nil {
-			err = h
-		}
-		return nil, configError{err}
+		return nil, findError(err, getenv)
 	}
 	c, err := config.Load(path)
 	if err != nil {
 		return nil, configError{err}
 	}
 	return c, nil
+}
+
+// findError is the error of config.Find, with a hint when there is no
+// file or it is a directory.
+func findError(err error, getenv func(string) string) error {
+	if h := configHint(err, getenv); h != nil {
+		err = h
+	}
+	return configError{err}
 }
 
 // zeroConfig builds the configuration of serve --dir. On reload, a missing
@@ -340,7 +424,7 @@ func checkConfig(c *config.Config, checkFS bool) ([]string, error) {
 	return warns, nil
 }
 
-func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv func(string) string, stderr, stdout io.Writer) error {
+func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv func(string) string, stderr, stdout io.Writer) (err error) {
 	// SIGHUP reloads. Its default action would kill the process, so it is
 	// caught from the start; a signal during startup waits for the loop.
 	hup, injected := ctx.Value(hupKey{}).(<-chan os.Signal)
@@ -356,9 +440,36 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
 		return err
 	}
-	c, _, err := buildConfig(flags, o, getenv, false)
+	mode, modeWarns, err := selectMode(flags, o, getenv)
 	if err != nil {
 		return err
+	}
+	var (
+		c   *config.Config
+		eph *ephemeral // serve --ephemeral
+		atm *atmozMode // atmoz mode
+	)
+	switch mode {
+	case modeEphemeral:
+		if c, eph, err = newEphemeral(flags, o, getenv); err != nil {
+			return err
+		}
+		// Last, once the server has stopped, whatever the result.
+		defer func() {
+			if rerr := eph.remove(ctx); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
+		}()
+		modeWarns = append(modeWarns, eph.warnings...)
+	case modeAtmoz:
+		if c, atm, err = newAtmoz(flags, o, getenv); err != nil {
+			return err
+		}
+		modeWarns = append(modeWarns, atm.warnings...)
+	case modeFile, modeDir:
+		if c, _, err = buildConfig(flags, o, getenv, false); err != nil {
+			return err
+		}
 	}
 	warns, err := checkConfig(c, true)
 	if err != nil {
@@ -368,7 +479,13 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return configError{err}
 	}
-	for _, w := range warns {
+	if eph != nil {
+		eph.log = log
+	}
+	if atm != nil {
+		atm.logMode(ctx, log)
+	}
+	for _, w := range slices.Concat(modeWarns, warns) {
 		log.WarnContext(ctx, "configuration", "detail", w)
 	}
 
@@ -386,16 +503,23 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return configError{err}
 	}
+	if eph != nil {
+		keys = eph.hostKeys() // only in memory: server.host_keys is empty
+	}
 	specs, err := c.MountSpecs()
 	if err != nil {
 		return configError{err}
 	}
-	mounts, err := vfs.Open(specs, vfs.Options{Flatten: c.Defaults.Flatten})
+	mounts, err := vfs.Open(specs, vfs.Options{Flatten: c.Defaults.Flatten, Unavailable: c.Unavailable, AllowEmpty: c.Atmoz})
 	if err != nil {
 		return configError{err}
 	}
 
-	out, err := openAuditOutput(c.Audit.Output, stdout)
+	auditStdout := stdout
+	if eph != nil {
+		auditStdout = stderr // stdout carries only the connection details
+	}
+	out, err := openAuditOutput(c.Audit.Output, auditStdout)
 	if err != nil {
 		_ = mounts.Close()
 		return configError{err}
@@ -479,7 +603,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 
 	// The sandbox step (ADR 0011): everything gosftpd opens at start is
 	// open, and no hook, background goroutine or connection runs yet.
-	sb, err := applySandbox(ctx, c, mounts, log)
+	sb, err := applySandbox(ctx, c, mounts, eph.heldDir(), log)
 	if err != nil {
 		for _, l := range listeners {
 			_ = l.Close()
@@ -491,6 +615,13 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	r.ruleset = sb.Ruleset
 	ruleset.Store(sb.Ruleset)
+	if eph != nil {
+		eph.landlocked = sb.Ruleset != nil
+		r.noReload = ephemeralNoReload
+	}
+	if atm != nil {
+		r.noReload = atmozNoReload
+	}
 	dispatcher.Update(hookSpecs)
 	warnOrphans(ctx, log, hookSpecs)
 
@@ -525,16 +656,23 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	for _, ln := range listeners {
 		go func() { served <- srv.Serve(serveCtx, ln) }()
 	}
-	health.SetReady()
-	if err := sdnotify.Ready(); err != nil {
-		log.DebugContext(ctx, "sd_notify", "err", err)
-	}
 	var serveErr error
 	pending := len(listeners)
-	select {
-	case serveErr = <-served:
-		pending--
-	case <-ctx.Done():
+	// serve --ephemeral prints its line now that it serves, just before
+	// it reports ready; if it cannot, it stops at once.
+	if eph != nil {
+		serveErr = eph.announce(stdout, listeners[0].Addr())
+	}
+	if serveErr == nil {
+		health.SetReady()
+		if err := sdnotify.Ready(); err != nil {
+			log.DebugContext(ctx, "sd_notify", "err", err)
+		}
+		select {
+		case serveErr = <-served:
+			pending--
+		case <-ctx.Done():
+		}
 	}
 	health.SetStopping()
 	if err := sdnotify.Stopping(); err != nil {
@@ -717,7 +855,10 @@ func printBanner(w io.Writer, b bannerInfo) {
 	}
 	for _, k := range b.keys {
 		info := k.cur.path
-		if k.cur.generated {
+		switch {
+		case info == "":
+			info = "in memory (generated, never written)"
+		case k.cur.generated:
 			info += " (generated, 0600)"
 		}
 		fmt.Fprintf(w, "host key: %s\n", info)
@@ -748,21 +889,30 @@ func printBanner(w io.Writer, b bannerInfo) {
 	} else {
 		fmt.Fprintf(w, "auth:    %s, %d users, %d keys\n", strings.Join(b.c.Auth.Methods, ", "), len(b.c.Users), b.auth.Len())
 	}
+	if b.c.EphemeralDir != "" {
+		user = ephemeralUser
+	}
+	if b.c.Atmoz && len(b.c.Users) == 1 {
+		user = slices.Collect(maps.Keys(b.c.Users))[0]
+	}
 	for _, m := range b.mounts.Mounts() {
 		mode := "rw"
 		if m.ReadOnly() {
 			mode = "ro"
 		}
-		vpath := "/" + m.Name()
+		vpath := "/" + m.Display()
 		if b.mounts.Flattened() {
 			vpath = "/"
 		}
 		o := m.Options()
-		atomic := ""
+		extra := ""
 		if o.AtomicUploads {
-			atomic = ", atomic_uploads"
+			extra = ", atomic_uploads"
 		}
-		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s%s)\n", vpath, m.HostPath(), mode, o.OnConflict, atomic)
+		if user := atmozUser(b.c, m.Name()); user != "" {
+			extra += ", user " + user
+		}
+		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s%s)\n", vpath, m.HostPath(), mode, o.OnConflict, extra)
 	}
 	addrs := make([]string, len(b.listeners))
 	for i, ln := range b.listeners {

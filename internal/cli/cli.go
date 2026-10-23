@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // Exit codes are part of the public contract (see ROADMAP.md §6.7).
@@ -54,21 +56,55 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // Run executes it; exported for the generator of the man pages and shell
 // completions (ADR 0012).
 func NewRootCommand() *cobra.Command {
+	var o serveOptions
 	root := &cobra.Command{
-		Use:           "gosftpd",
-		Short:         "Turn a folder into an SFTP drop-box with an audit log",
-		Args:          noArgs,
+		Use:   "gosftpd [USER:PASS[:e][:UID[:GID[:DIR[,DIR]...]]]...]",
+		Short: "Turn a folder into an SFTP drop-box with an audit log",
+		Long: `Turn a folder into an SFTP drop-box with an audit log.
+
+Given atmoz/sftp user specs as arguments, gosftpd serves those users as the
+atmoz/sftp image does (atmoz mode): user foo with directory upload sees
+/upload, stored in /home/foo/upload, and logs in with the password or with
+the keys in /home/foo/.ssh/keys/. Uploads overwrite an existing file. The
+users of --users-conf and $SFTP_USERS are added, and a configuration file
+is ignored. The users, keys and directories are read once, at start;
+SIGHUP changes nothing. See docs/migrate-from-atmoz.md.`,
+		Example: `  gosftpd 'foo:pass:::upload'
+  gosftpd --listen :2222 'foo::1001:100:share' 'bar:$2b$10$...:e:::inbox'`,
+		Args:          rootArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				if cmd.Flags().NFlag() > 0 {
+					return usageError{errors.New("these flags need atmoz user specs as arguments; without specs use 'gosftpd serve'")}
+				}
+				return cmd.Help()
+			}
+			o.specs = args
+			return runServe(cmd.Context(), cmd.Flags(), o, os.Getenv, cmd.ErrOrStderr(), cmd.OutOrStdout())
 		},
 	}
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return usageError{err}
-	})
+	serveFlags(root.Flags(), &o, true)
+	root.SetFlagErrorFunc(flagError)
 	root.AddCommand(newVersionCmd(), newServeCmd(), newInitCmd(), newConfigCmd(), newUserCmd(), newHostkeyCmd(), newHealthcheckCmd())
 	return root
+}
+
+// flagError makes a flag error a usage error. pflag repeats an unknown
+// flag whole: one with ':', such as -x:pass, may be an atmoz user spec with
+// its password, and is not shown (ADR 0012).
+func flagError(_ *cobra.Command, err error) error {
+	var (
+		ne *pflag.NotExistError
+		se *pflag.InvalidSyntaxError
+	)
+	switch {
+	case errors.As(err, &ne) && strings.Contains(ne.GetSpecifiedName()+ne.GetSpecifiedShortnames(), ":"),
+		errors.As(err, &se) && strings.Contains(se.GetSpecifiedFlag(), ":"):
+		err = errors.New("unknown flag (not shown: it contains ':', as an atmoz user spec does)")
+	}
+	return usageError{err}
 }
 
 // usageError marks errors caused by invalid command-line usage.
@@ -88,7 +124,17 @@ func (e configError) Unwrap() error { return e.err }
 func showHelp(cmd *cobra.Command, _ []string) error { return cmd.Help() }
 
 // noArgs rejects positional arguments, including unknown subcommands.
+// cobra's message repeats the first argument; one with ':' may be an atmoz
+// user spec with its password, given after a command or with a space
+// before it, and only its position is given (ADR 0012).
 func noArgs(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 && strings.Contains(args[0], ":") {
+		if !cmd.HasParent() {
+			return usageError{errors.New("unknown command (argument 1, not shown: it looks like an atmoz user spec, but a spec starts with the user name and ':', without white space)")}
+		}
+		path := strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" ")
+		return usageError{fmt.Errorf("unknown command (argument 1, not shown: it looks like an atmoz user spec; give specs directly after the image name, without '%s')", path)}
+	}
 	if err := cobra.NoArgs(cmd, args); err != nil {
 		return usageError{err}
 	}

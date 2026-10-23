@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Interop test: real OpenSSH sftp, scp and ssh clients against a freshly
 # built gosftpd. Usage: test/interop/run.sh (from anywhere). Needs bash,
-# openssh-client and Go. KEEP_WORK=1 keeps the work directory for inspection.
+# openssh-client, jq and Go. KEEP_WORK=1 keeps the work directory for
+# inspection.
 #
 # paramiko, rclone and lftp are tested when available (PYTHON with paramiko,
 # RCLONE, lftp in PATH), and so are HAProxy and nginx with its stream module
@@ -1347,6 +1348,73 @@ set -e
 [ "$(wc -l <"$P/audit/audit.jsonl")" = "$lines" ] && pass "proxy: the probes leave no trace in the audit log" ||
 	fail "proxy: probes audited: $(tail -n +$((lines + 1)) "$P/audit/audit.jsonl")"
 
+# --- serve --ephemeral (ADR 0012) -------------------------------------------
+# One JSON line on stdout once it serves. OpenSSH logs in with its key and
+# with its password, checking the host key against its known_hosts line;
+# SIGHUP changes nothing; SIGTERM removes the key and the data, and under
+# Landlock the empty directory stays.
+E="$WORK/ephemeral"
+mkdir -p "$E/tmp"
+TMPDIR="$E/tmp" "$WORK/gosftpd" serve --ephemeral "${ROOT_FLAG[@]}" >"$E/details.json" 2>"$E/server.log" &
+EPHEMERAL_PID=$!
+PIDS+=("$EPHEMERAL_PID")
+for _ in $(seq 100); do
+	if [ "$(wc -l <"$E/details.json")" -ge 1 ]; then break; fi
+	sleep 0.1
+done
+landlock_logged ephemeral "$E/server.log"
+details() { jq -r ".$1" "$E/details.json"; }
+[ "$(jq -c keys_unsorted "$E/details.json")" = '["host","port","user","password","private_key_path","dir","host_key_fingerprint","known_hosts","pid","version"]' ] &&
+	[ "$(wc -l <"$E/details.json")" = 1 ] && [ "$(details host)" = 127.0.0.1 ] && [ "$(details user)" = test ] &&
+	[ "$(details pid)" = "$EPHEMERAL_PID" ] &&
+	pass "ephemeral: one JSON line with the connection details" || fail "ephemeral: details: $(cat "$E/details.json")"
+EPORT=$(details port)
+EKEY=$(details private_key_path)
+EDIR=$(dirname "$EKEY")
+EDATA=$(details dir)
+details known_hosts >"$E/known_hosts"
+printf '#!/bin/sh\necho "%s"\n' "$(details password)" >"$E/askpass"; chmod 700 "$E/askpass"
+[ "$(stat -c %a "$EKEY")" = 600 ] && pass "ephemeral: the client key is 0600" || fail "ephemeral: client key mode $(stat -c %a "$EKEY")"
+ephemeral_logins() { # ephemeral_logins TAG: a key login uploads; a password login uploads and downloads
+	local tag=$1
+	printf 'put %s key-%s.bin\n' "$WORK/local/upload.bin" "$tag" >"$E/key.batch"
+	if sftp -P "$EPORT" -o "UserKnownHostsFile=$E/known_hosts" -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+		-o BatchMode=yes -i "$EKEY" -b "$E/key.batch" test@127.0.0.1 >"$E/key.out" 2>&1 &&
+		cmp -s "$WORK/local/upload.bin" "$EDATA/key-$tag.bin"; then
+		pass "ephemeral: key login and upload ($tag)"
+	else
+		fail "ephemeral: key login ($tag): $(tail -3 "$E/key.out")"
+	fi
+	printf 'put %s password-%s.txt\nget key-%s.bin %s\n' "$WORK/local/short.txt" "$tag" "$tag" "$E/got-$tag.bin" >"$E/password.batch"
+	if SSH_ASKPASS="$E/askpass" SSH_ASKPASS_REQUIRE=force sftp -P "$EPORT" -o BatchMode=no -o "UserKnownHostsFile=$E/known_hosts" \
+		-o StrictHostKeyChecking=yes -o PreferredAuthentications=password -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
+		-b "$E/password.batch" test@127.0.0.1 </dev/null >"$E/password.out" 2>&1 &&
+		cmp -s "$WORK/local/short.txt" "$EDATA/password-$tag.txt" && cmp -s "$WORK/local/upload.bin" "$E/got-$tag.bin"; then
+		pass "ephemeral: password login, upload and download ($tag)"
+	else
+		fail "ephemeral: password login ($tag): $(tail -3 "$E/password.out")"
+	fi
+}
+ephemeral_logins start
+kill -HUP "$EPHEMERAL_PID"
+for _ in $(seq 100); do
+	if grep -q 'msg="SIGHUP ignored"' "$E/server.log"; then break; fi
+	sleep 0.1
+done
+grep -q 'msg="SIGHUP ignored"' "$E/server.log" && kill -0 "$EPHEMERAL_PID" 2>/dev/null &&
+	pass "ephemeral: SIGHUP is logged and ignored" || fail "ephemeral: SIGHUP: $(grep -i hup "$E/server.log")"
+ephemeral_logins hup # the same password, key and host key
+grep -q '"event":"fs.upload"' "$E/server.log" && pass "ephemeral: the audit log goes to stderr" || fail "ephemeral: no fs.upload on stderr"
+kill -TERM "$EPHEMERAL_PID"
+if wait "$EPHEMERAL_PID"; then pass "ephemeral: SIGTERM exits 0"; else fail "ephemeral: SIGTERM exit code $?"; fi
+[ ! -e "$EKEY" ] && [ ! -e "$EDATA" ] && pass "ephemeral: SIGTERM removes the key and the data" || fail "ephemeral: left behind: $(ls -A "$EDIR")"
+if grep -q 'landlock: ABI v[0-9]* applied' "$E/server.log"; then
+	[ -d "$EDIR" ] && [ -z "$(ls -A "$EDIR")" ] && pass "ephemeral: under Landlock the empty directory stays" || fail "ephemeral: $EDIR is gone or not empty"
+else
+	[ ! -e "$EDIR" ] && pass "ephemeral: without Landlock the directory is removed too" || fail "ephemeral: $EDIR stays"
+fi
+[ "$(wc -l <"$E/details.json")" = 1 ] && pass "ephemeral: nothing else on stdout" || fail "ephemeral: stdout: $(cat "$E/details.json")"
+
 if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (rename)"; cat "$WORK/rename/server.log"
 	echo "--- server log (config)"; cat "$C/server.log"
@@ -1354,6 +1422,7 @@ if [ "$FAILED" -ne 0 ]; then
 	echo "--- server log (shared)"; cat "$WORK/shared/server.log"
 	if [ -f "$WORK/hooks/server.log" ]; then echo "--- server log (hooks)"; cat "$WORK/hooks/server.log"; fi
 	echo "--- server log (proxy)"; cat "$P/server.log"
+	echo "--- server log (ephemeral)"; cat "$E/server.log"
 	for f in "$P/haproxy/haproxy.log" "$P/nginx/error.log"; do
 		if [ -f "$f" ]; then echo "--- $f"; cat "$f"; fi
 	done

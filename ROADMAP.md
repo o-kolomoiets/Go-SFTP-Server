@@ -1250,6 +1250,7 @@ Per-version results are kept in `docs/interop.md`, including a "known limitation
 | `FuzzResolveInRoot` | `internal/vfs` | On a temporary tree with symlinks, any opened file lies under the root |
 | `FuzzConflictName` | `internal/vfs` | The name is in the same directory, ≤ 255 bytes, and for n > 0 differs from the input |
 | `FuzzParseConfig` | `internal/config` | No panic on arbitrary bytes; `Validate()` does not panic |
+| `FuzzAtmozSpec` | `internal/atmoz` | M5 (ADR 0012): a user and the rest of an atmoz user spec with a sentinel password between them, read as an argument, a `SFTP_USERS` entry and a users file line, alone and twice: no error or warning contains the sentinel; a raw spec does not panic |
 | `FuzzAuthorizedKeys` | `internal/auth` | No panic; the options allowlist is enforced |
 | `FuzzCertificate` | `internal/auth` | Arbitrary bytes offered as a certificate (M4): a login is accepted, or a reason recorded, only when the CA signature verifies; an accepted certificate has an allowed principal, is valid now, carries no refused option, and nothing of its own options but `source-address` reaches `Permissions` |
 | `FuzzHostKeyProof` | `internal/server` | Arbitrary bytes as a `hostkeys-prove-00@openssh.com` request (M4): it is answered only when it lists announced keys, each once, with nothing left over, and the keys proved are exactly those listed, in order |
@@ -1281,7 +1282,7 @@ Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run on
 | v0.2.0 | ≥ 60% | ≥ 80% | ≥ 70% |
 | v1.0.0 | ≥ 80% | ≥ 90% | ≥ 90% |
 
-Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd`, `hooks` (M4, ADR 0010) and `sandbox` (M4, ADR 0011) ≥ 85%, `internal/auth` ≥ 90%.
+Unit test coverage is merged with e2e coverage in binary format: `mkdir -p coverage/unit coverage/e2e`; `go test -cover -coverpkg=./... ./... -args -test.gocoverdir=$PWD/coverage/unit`; the binary for interop is built with `go build -cover` and run with `GOCOVERDIR=$PWD/coverage/e2e`; then `go tool covdata textfmt -i=coverage/unit,coverage/e2e -o cover.out` and `go tool cover -func=cover.out`. A text `-coverprofile` cannot be merged with `GOCOVERDIR` data. The summary is published to `$GITHUB_STEP_SUMMARY`. Merge is blocked only if the coverage of security packages drops below the threshold; fluctuations in the overall percentage do not block merge. `test/coverage.sh` holds the current floors: `internal/vfs`, `config`, `sftpd`, `hooks` (M4, ADR 0010), `sandbox` (M4, ADR 0011) and `atmoz` (M5, ADR 0012) ≥ 85%, `internal/auth` ≥ 90%.
 
 ### 8.6 Benchmarks
 

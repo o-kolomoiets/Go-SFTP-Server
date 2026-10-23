@@ -54,7 +54,11 @@ type Input struct {
 	// validate, a mount directory is found by its path and one that
 	// does not exist yet gets no rule.
 	Mounts []MountDir
-	FS     FS
+	// Ephemeral is the directory of serve --ephemeral
+	// (Config.EphemeralDir) as gosftpd holds it open. With nil it is
+	// found by its path.
+	Ephemeral *MountDir
+	FS        FS
 	// Home is the home directory of the user running gosftpd, "" if none.
 	Home string
 	// Linux adds the rows of /proc/self and name resolution, and keeps
@@ -78,7 +82,8 @@ type Rule struct {
 	// Dev and Ino identify Path when the rule was computed.
 	Dev, Ino uint64
 	// For lists what needs the rule: configuration keys, "configuration",
-	// "include", "/proc/self", "name resolution", "coverage".
+	// "include", "/proc/self", "name resolution", "coverage",
+	// "--ephemeral".
 	For []string
 }
 
@@ -107,6 +112,7 @@ const (
 	keyProcSelf   = "/proc/self"
 	keyResolver   = "name resolution"
 	keyCoverage   = "coverage"
+	keyEphemeral  = "--ephemeral"
 	maxNamedShown = 3
 )
 
@@ -123,7 +129,7 @@ const auditRotationWarning = "rotation by rename (logrotate's create, as in docs
 // an error: it is not dedicated.
 func Compute(in Input) (Plan, error) {
 	p := newPlanner(in)
-	for _, row := range []func() error{p.mountRules, p.configRules, p.includeRules, p.trustedRules, p.auditRules} {
+	for _, row := range []func() error{p.mountRules, p.ephemeralRule, p.configRules, p.includeRules, p.trustedRules, p.auditRules} {
 		if err := row(); err != nil {
 			return Plan{}, err
 		}
@@ -623,19 +629,28 @@ func (p *planner) place(key, path string, fileRights, dirRights Rights) error {
 }
 
 // mountRules: a mount's directory, for a {user} mount its parent, through
-// the descriptor the mount holds open.
+// the descriptor the mount holds open. A mount that is unavailable from the
+// start (Config.Unavailable) is not open and gets none.
 func (p *planner) mountRules() error {
 	byName := map[string]MountDir{}
 	for _, m := range p.in.Mounts {
 		byName[m.Name] = m
 	}
 	for _, name := range sortedKeys(p.c.Mounts) {
-		m := p.c.Mounts[name]
-		key := toml.Key{"mounts", name, "path"}.String()
-		if p.c.AnyUser != nil {
-			key = "--dir " + name
+		if slices.Contains(p.c.Unavailable, name) {
+			continue
 		}
+		m := p.c.Mounts[name]
 		dir := filepath.Clean(m.Path)
+		key := toml.Key{"mounts", name, "path"}.String()
+		switch {
+		case p.c.EphemeralDir != "" && beneath(dir, filepath.Clean(p.c.EphemeralDir)):
+			key = keyEphemeral + " " + name
+		case p.c.AnyUser != nil, p.c.EphemeralDir != "":
+			key = "--dir " + name
+		case p.c.Atmoz:
+			key = config.AtmozKey(m)
+		}
 		home := filepath.Base(dir) == vfs.UserPlaceholder
 		if home {
 			dir = filepath.Dir(dir)
@@ -651,7 +666,7 @@ func (p *planner) mountRules() error {
 			return &RootError{Key: key}
 		}
 		if p.special(dir) {
-			p.notes = append(p.notes, &note{text: key + ": " + dir + ` is under /dev or /proc, which never get a Landlock rule: the mount cannot be used; serve another directory or set server.landlock = "off"`})
+			p.notes = append(p.notes, &note{text: key + ": " + dir + " is under /dev or /proc, which never get a Landlock rule: the mount cannot be used; " + p.elsewhere()})
 			continue
 		}
 		r, err := p.resolve(dir)
@@ -661,7 +676,7 @@ func (p *planner) mountRules() error {
 		case r.exists && isRoot(r.path):
 			return &RootError{Key: key}
 		case r.exists && p.special(r.path):
-			p.notes = append(p.notes, &note{text: key + ": " + dir + " resolves to " + r.path + ` under /dev or /proc, which never get a Landlock rule: the mount cannot be used; serve another directory or set server.landlock = "off"`})
+			p.notes = append(p.notes, &note{text: key + ": " + dir + " resolves to " + r.path + " under /dev or /proc, which never get a Landlock rule: the mount cannot be used; " + p.elsewhere()})
 			continue
 		case p.in.Mounts == nil:
 			if r.exists {
@@ -682,6 +697,59 @@ func (p *planner) mountRules() error {
 		}
 		p.rules = append(p.rules, rule)
 	}
+	return nil
+}
+
+// elsewhere says what to do about a mount under /dev or /proc. serve
+// --ephemeral has no server.landlock to turn off.
+func (p *planner) elsewhere() string {
+	switch {
+	case p.c.EphemeralDir != "":
+		return "set TMPDIR to another directory, or serve another one with --dir"
+	case p.c.Atmoz:
+		return "make it a directory, or mount one there"
+	}
+	return `serve another directory or set server.landlock = "off"`
+}
+
+// ephemeralRule: serve --ephemeral removes the client key and the data
+// directory at exit, and removing an entry is a right of the directory
+// that holds it: the directory it created gets remove_file and
+// remove_dir, through the descriptor it holds. The directory holds
+// nothing else, and itself stays: removing it would need remove_dir on
+// its parent, $TMPDIR, which would let gosftpd remove other empty
+// directories there (ADR 0012).
+func (p *planner) ephemeralRule() error {
+	if p.c.EphemeralDir == "" {
+		return nil
+	}
+	dir := filepath.Clean(p.c.EphemeralDir)
+	if p.special(dir) {
+		p.notes = append(p.notes, &note{text: keyEphemeral + ": " + dir + " is under /dev or /proc, which never get a Landlock rule: the client key and the data stay there at exit; set TMPDIR to another directory"})
+		return nil
+	}
+	r, err := p.resolve(dir)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s: %w", keyEphemeral, err)
+	case !r.exists || !r.info.IsDir():
+		return fmt.Errorf("%s: %s is no longer the directory gosftpd created", keyEphemeral, dir)
+	case isRoot(r.path):
+		return &RootError{Key: keyEphemeral}
+	case p.special(r.path):
+		p.notes = append(p.notes, &note{text: keyEphemeral + ": " + dir + " resolves to " + r.path + " under /dev or /proc, which never get a Landlock rule: the client key and the data stay there at exit; set TMPDIR to another directory"})
+		return nil
+	}
+	rule := Rule{Path: r.path, Open: r.path, Rights: RemoveFile | RemoveDir, Dir: true, Dev: r.info.Dev, Ino: r.info.Ino, For: []string{keyEphemeral}}
+	if held := p.in.Ephemeral; held != nil {
+		if r.info.Dev != held.Dev || r.info.Ino != held.Ino {
+			return fmt.Errorf("%s: %s is no longer the directory gosftpd created", keyEphemeral, dir)
+		}
+		if held.FD >= 0 {
+			rule.Open = "/proc/self/fd/" + strconv.Itoa(held.FD)
+		}
+	}
+	p.rules = append(p.rules, rule)
 	return nil
 }
 

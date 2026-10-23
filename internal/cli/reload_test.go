@@ -35,11 +35,18 @@ type testServer struct {
 
 func startServe(t *testing.T, args ...string) *testServer {
 	t.Helper()
+	return startRun(t, append([]string{"serve", "--allow-root"}, args...)...)
+}
+
+// startRun runs the command line args, which serves, and waits for the
+// listen address in its banner.
+func startRun(t *testing.T, args ...string) *testServer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	hup := make(chan os.Signal, 1)
 	ctx = context.WithValue(ctx, hupKey{}, (<-chan os.Signal)(hup))
 	ts := &testServer{stdout: &lockedBuffer{}, stderr: &lockedBuffer{}, hup: hup, cancel: cancel, done: make(chan int, 1)}
-	go func() { ts.done <- run(ctx, append([]string{"serve", "--allow-root"}, args...), ts.stdout, ts.stderr) }()
+	go func() { ts.done <- run(ctx, args, ts.stdout, ts.stderr) }()
 	t.Cleanup(func() { ts.stop(t) })
 
 	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+)`)

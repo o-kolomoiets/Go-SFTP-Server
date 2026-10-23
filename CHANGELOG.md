@@ -10,6 +10,38 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Added
 
+- `gosftpd serve --ephemeral`, a throwaway server for tests (ADR 0012). It
+  serves a new temporary directory, or the one `--dir` names, as `/` to the
+  user `test`, who logs in with a random password or a generated ed25519
+  key, and once it serves prints the connection details as one JSON line on
+  stdout: `host`, `port`, `user`, `password`, `private_key_path`, `dir`,
+  `host_key_fingerprint`, `known_hosts` (a line for `UserKnownHostsFile`),
+  `pid` and `version`. Nothing else goes to stdout: logs and the audit log
+  go to stderr. It listens on `127.0.0.1:0` unless `--listen`, given once,
+  names another address; `$GOSFTPD_CONFIG` and `$GOSFTPD_LISTEN` are
+  ignored with a warning, and SIGHUP is logged and otherwise ignored. The
+  host key exists only in memory. On SIGINT or SIGTERM it deletes the
+  client key and the temporary data; under Landlock a rule on its
+  directory allows that, and the directory itself stays, empty.
+- Atmoz mode: the user specs of atmoz/sftp,
+  `user:pass[:e][:uid[:gid[:dir1[,dir2]...]]]`, work unchanged (ADR 0012,
+  docs/migrate-from-atmoz.md). They come as arguments to the root command
+  (`docker run IMAGE foo:pass:::upload`), in `$SFTP_USERS` or in a users
+  file (`--users-conf`, or in the container image `/etc/sftp/users.conf`).
+  User foo with directory upload sees `/upload`, stored in
+  `/home/foo/upload`, one mount per user and directory under a read-only
+  root, and logs in with the password, a bcrypt or argon2id hash (`:e`),
+  or the keys in `/home/foo/.ssh/keys/`. An upload overwrites an existing
+  file. In the image, directories found under `/home/<user>` are served
+  too, and `/etc/ssh`'s host keys when they exist. The users, keys and
+  directories are read once, at start; SIGHUP is logged and ignored.
+  Atmoz mode starts only with specs as arguments or when no configuration
+  file is found; `--config` and `$GOSFTPD_CONFIG` stay strict, and in the
+  image a mounted `/etc/gosftpd` without `config.toml` exits 2. No message
+  shows a password or a spec: usage errors give the position of an
+  argument with `:` instead of the argument. A new fuzz target,
+  `FuzzAtmozSpec`, checks that. The audit log names each mount by its
+  directory.
 - Man pages, one per command, and bash, zsh and fish completions:
   `make generate` writes them into `out/` (not committed) with
   `internal/cli/gendocs`, from the command definitions, dated by the

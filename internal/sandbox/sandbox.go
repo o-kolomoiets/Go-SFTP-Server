@@ -151,7 +151,11 @@ type Options struct {
 	// Mounts are the open mount directories, one for each mount of
 	// Config.
 	Mounts []MountDir
-	Log    *slog.Logger
+	// Ephemeral is the directory of serve --ephemeral,
+	// Config.EphemeralDir, as gosftpd holds it open (HeldDir; Name is
+	// not used), nil otherwise.
+	Ephemeral *MountDir
+	Log       *slog.Logger
 }
 
 // Result is what Start did.
@@ -255,7 +259,7 @@ func start(ctx context.Context, o Options, k kernel) (Result, error) {
 	if err != nil {
 		return failed(ctx, o.Log, err)
 	}
-	in.Config, in.Mounts = c, o.Mounts
+	in.Config, in.Mounts, in.Ephemeral = c, o.Mounts, o.Ephemeral
 	if in.Mounts == nil {
 		in.Mounts = []MountDir{} // never stat'ed by path: Start has them open
 	}

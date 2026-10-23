@@ -23,6 +23,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/atmoz"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
@@ -82,6 +83,9 @@ func isolate(t *testing.T) string {
 	t.Setenv(config.EnvListen, "")
 	t.Setenv(config.EnvLogLevel, "")
 	t.Setenv(config.EnvLogFormat, "")
+	// Atmoz mode's sources and conventions (ADR 0012).
+	t.Setenv(atmoz.EnvUsers, "")
+	t.Setenv(envImage, "")
 	return home
 }
 
@@ -479,6 +483,44 @@ func TestServeFlagsNeedDir(t *testing.T) {
 		if code, _, stderr := execute(t, args...); code != exitUsage {
 			t.Errorf("%q: exit %d: %s", args, code, stderr)
 		}
+	}
+}
+
+// sftpConn is an SFTP client with its connection.
+type sftpConn struct {
+	*sftp.Client
+	conn *ssh.Client
+}
+
+// Close closes the client and the connection; serve's shutdown would wait
+// for an open one.
+func (c *sftpConn) Close() {
+	_ = c.Client.Close()
+	_ = c.conn.Close()
+}
+
+// putFile uploads data to path.
+func putFile(c *sftpConn, path, data string) error {
+	f, err := c.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(f, data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// waitLog waits until the log holds s.
+func waitLog(t *testing.T, logs func() string, s string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for !strings.Contains(logs(), s) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q in:\n%s", s, logs())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
