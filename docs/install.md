@@ -315,3 +315,63 @@ Two settings are not in the unit, because they break common setups:
 
 Exec hooks run inside the unit's sandbox; what they cannot do there is in
 [hooks.md](hooks.md#sandboxes-and-containers).
+
+## Docker
+
+The image `ghcr.io/o-kolomoiets/gosftpd` (linux/amd64 and linux/arm64,
+Docker 25 or later) runs gosftpd as uid 65532 and finds its configuration
+in `/etc/gosftpd/config.toml`. Mount the directory that holds the file, not
+the file itself: a reload (`docker kill -s HUP gosftpd`) then reads a file
+that an editor or `sed -i` replaced.
+
+### Quickstart
+
+With your public key in `~/.ssh/id_ed25519.pub`:
+
+<!-- ci:quickstart -->
+```sh
+V=0.5.0
+mkdir -p gosftpd data state
+docker run --rm "ghcr.io/o-kolomoiets/gosftpd:v$V" config example > gosftpd/config.toml
+sed -i "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml
+sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml
+sudo chown 65532:65532 data state
+docker run -d --name gosftpd --stop-timeout 40 -p 2022:2022 \
+  -v ./gosftpd:/etc/gosftpd:ro -v ./data:/srv/sftp -v ./state:/var/lib/gosftpd \
+  "ghcr.io/o-kolomoiets/gosftpd:v$V"
+```
+<!-- /ci -->
+
+Then `sftp -P 2022 alice@localhost`. The host key is in `./state`, so a new
+container keeps it.
+
+### Compose
+
+In the directory of the Quickstart, with the release's `digests.txt`, which
+names the image's digest:
+
+<!-- ci:compose -->
+```sh
+V=0.5.0
+DIGEST=$(awk -v t="ghcr.io/o-kolomoiets/gosftpd:v$V" '$2 == t { print $1 }' digests.txt)
+cat > compose.yaml <<EOF
+services:
+  gosftpd:
+    image: ghcr.io/o-kolomoiets/gosftpd:v$V@sha256:$DIGEST
+    ports: ["2022:2022"]
+    volumes:
+      - ./gosftpd:/etc/gosftpd:ro
+      - data:/srv/sftp
+      - state:/var/lib/gosftpd
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 40s
+    # init: true   # with exec hooks (docs/hooks.md)
+volumes:
+  data:
+  state:
+EOF
+docker compose up -d --wait
+```
+<!-- /ci -->
