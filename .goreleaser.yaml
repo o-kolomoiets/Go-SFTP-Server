@@ -8,6 +8,9 @@ project_name: gosftpd
 before:
   hooks:
     - go mod tidy -diff
+    # Man pages, completions and THIRD_PARTY_LICENSES into out/, which git
+    # ignores (ADR 0012).
+    - make generate
 
 # One build per system, so that only the Linux archives get the systemd
 # files (ADR 0011).

@@ -155,6 +155,10 @@ func TestHealthcheckAddress(t *testing.T) {
 	if code, _, stderr := healthcheck(t, "--config", filepath.Join(dir, "missing.toml")); code != exitFailure || !strings.Contains(stderr, "--config") {
 		t.Errorf("missing --config: exit %d: %s", code, stderr)
 	}
+	// A directory, as Docker creates for a missing host file.
+	if code, _, stderr := healthcheck(t, "--config", dir); code != exitFailure || !strings.Contains(stderr, "--config: "+dir+" is a directory") {
+		t.Errorf("--config a directory: exit %d: %s", code, stderr)
+	}
 }
 
 func TestHealthcheckURL(t *testing.T) {

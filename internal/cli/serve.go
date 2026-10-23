@@ -120,6 +120,10 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 			}
 		}
 		if c, err = loadConfig(o.config, getenv); err != nil {
+			// The hint is for a start; a running server logs one line.
+			if he, ok := errors.AsType[hintError](err); reload && ok {
+				err = configError{he.err}
+			}
 			return nil, nil, err
 		}
 		if flags.Changed("read-only") && o.readOnly {
@@ -205,14 +209,14 @@ func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
 	return nil
 }
 
-// loadConfig finds and loads the configuration file.
+// loadConfig finds and loads the configuration file. When there is none,
+// or the file is a directory, the error says how to create one.
 func loadConfig(explicit string, getenv func(string) string) (*config.Config, error) {
 	path, err := config.Find(explicit, getenv)
-	if errors.Is(err, config.ErrNotFound) {
-		return nil, usageError{fmt.Errorf("no configuration file found (looked for %s); create one with 'gosftpd init' or serve a directory with --dir",
-			strings.Join(config.SearchPaths(), ", "))}
-	}
 	if err != nil {
+		if h := configHint(err, getenv); h != nil {
+			err = h
+		}
 		return nil, configError{err}
 	}
 	c, err := config.Load(path)

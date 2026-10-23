@@ -54,6 +54,10 @@ linters:
     rules:
       - path: _test\.go
         linters: [gosec, unparam, prealloc]
+      # A build tool that make generate runs on the source tree: its paths
+      # come from its own argument, and it writes public files.
+      - path: internal/cli/gendocs/
+        linters: [gosec]
 
 formatters:
   enable:

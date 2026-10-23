@@ -8,6 +8,54 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Added
+
+- Man pages, one per command, and bash, zsh and fish completions:
+  `make generate` writes them into `out/` (not committed) with
+  `internal/cli/gendocs`, from the command definitions, dated by the
+  commit (`SOURCE_DATE_EPOCH`), so that the same commit gives the same
+  files. The release archives and packages will carry them (ADR 0012).
+- `THIRD_PARTY_LICENSES`: `make generate` also writes the name, version,
+  license and license text of every Go module in the Linux binary into
+  `out/THIRD_PARTY_LICENSES`, with go-licenses v2.0.1 (a tool in
+  `tools/go.mod`) and the template `packaging/third_party_licenses.tpl`,
+  and last the Go standard library and runtime, which every binary links
+  in, with the `LICENSE` of the Go that builds it. The file lists the
+  linux/amd64 build on every host, so a release rebuilt elsewhere keeps its
+  checksums. libcap/psx appears once, under BSD-3-Clause, the license
+  gosftpd uses it under. A license go-licenses cannot classify fails
+  `make generate`.
+
+### Changed
+
+- A missing configuration file is explained: when `--config` or
+  `$GOSFTPD_CONFIG` names a file that does not exist, when the
+  configuration file is a directory, or when no file is found, the error
+  (still exit code 2) says how to start: `gosftpd init`, whose
+  `./gosftpd.toml` the search finds, or `gosftpd serve --dir PATH`, and
+  with Docker the commands that create the file with `config example` and
+  mount it as a directory; it links the Docker section of
+  docs/install.md. A directory that `--config` or `$GOSFTPD_CONFIG` names
+  gets "name the file in it"; one found by the search, or in the container
+  image, is named as what Docker creates when the host file of a bind
+  mount does not exist, and so is, in the image, a mounted `/etc/gosftpd`
+  that holds no `config.toml` (ADR 0012). A reload that cannot find its
+  file logs that in one line, without the hint.
+- A configuration file that is a directory is reported as one, also by
+  `healthcheck`, instead of failing when it is read.
+
+### Fixed
+
+- The search for a configuration file no longer stops at a permission
+  error on `./gosftpd.toml`: from a working directory the user cannot
+  search, such as `sudo -u gosftpd gosftpd config validate` run from
+  `/root`, or `healthcheck` in a container started with `--user`, it goes
+  on to `/etc/gosftpd/config.toml`; when nothing is found, the error says
+  that `./gosftpd.toml` was not checked. A `./gosftpd.toml` the user can
+  see but not reach, such as a symlink into a directory they cannot
+  search, still fails, as do `--config`, `$GOSFTPD_CONFIG` and the other
+  paths of the search on such an error.
+
 ## [0.4.0] - 2026-10-17
 
 Multi-user operation: reload on SIGHUP, users in `users.d`, SSH
