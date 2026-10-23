@@ -398,3 +398,37 @@ EOF
 docker compose up -d --wait
 ```
 <!-- /ci -->
+
+## Verify a release
+
+The release workflow signs `checksums.txt`, which lists every archive,
+package and SBOM, and the image with cosign, keyless, and attests their
+build provenance. These commands check a release before you install it:
+the signature of `checksums.txt`, the archive against it, the archive's
+provenance, and the image by the digest that `digests.txt` names. They
+need cosign v3.0 or later (or v2.6 with `--new-bundle-format`) and a gh
+whose `attestation verify` has `--signer-workflow` and `--source-ref`.
+
+<!-- ci:verify -->
+```sh
+V=0.5.0
+ID="https://github.com/o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml@refs/tags/v$V"
+gh release download "v$V" -R o-kolomoiets/Go-SFTP-Server -p checksums.txt \
+  -p checksums.txt.sigstore.json -p digests.txt -p "gosftpd_${V}_linux_amd64.tar.gz"
+cosign verify-blob --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle checksums.txt.sigstore.json checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+gh attestation verify "gosftpd_${V}_linux_amd64.tar.gz" --repo o-kolomoiets/Go-SFTP-Server \
+  --signer-workflow o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml --source-ref "refs/tags/v$V"
+IMAGE="ghcr.io/o-kolomoiets/gosftpd@sha256:$(awk -v t="ghcr.io/o-kolomoiets/gosftpd:v$V" '$2 == t { print $1 }' digests.txt)"
+cosign verify --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE"
+gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
+  --signer-workflow o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml --source-ref "refs/tags/v$V"
+# then run "$IMAGE", the reference just verified, not the tag
+```
+<!-- /ci -->
+
+Type the identity exactly as here: cosign compares it with the
+certificate's, capitals included.

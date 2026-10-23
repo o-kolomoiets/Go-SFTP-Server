@@ -56,6 +56,15 @@ Incompatible changes are prefixed with **BREAKING:**.
   and removes them under systemd on Ubuntu 24.04 (amd64 and arm64, with
   needrestart), Debian 12 and 13, EL9 and Arch, and installs them over the
   archive install (ADR 0012).
+- Signed releases with provenance: `checksums.txt`, which lists every
+  archive, package and SBOM, is signed with keyless cosign v3
+  (`checksums.txt.sigstore.json`), and so is the image, by digest; each
+  archive has an SPDX SBOM (`*.sbom.json`, syft); GitHub build provenance
+  attestations cover the files and the image, and the release carries the
+  provenance bundle (`gosftpd_X.Y.Z.intoto.jsonl`) and `digests.txt`, the
+  image's digest. docs/install.md gives the commands that verify a
+  release (cosign v3.0 or later); the release workflow runs them before
+  the release is published (ADR 0012).
 
 ### Changed
 

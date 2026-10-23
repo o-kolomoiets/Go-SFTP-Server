@@ -435,9 +435,10 @@ jobs:
         with: { go-version: stable, check-latest: true, cache: false }   # no Actions cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: out, path: "${{ runner.temp }}/generated" }      # never into the checkout
-      - run: ...                 # the artifact checked against the exact file list and copied into a new out/;
-                                 # mkdir -p out/docker/empty out/docker/home-root/home; go mod tidy -diff; go mod verify;
-                                 # git status --porcelain empty; .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > $RUNNER_TEMP/notes.md
+      - run: ...                 # .github/scripts/release-out.sh "$RUNNER_TEMP/generated" out: the artifact checked against the
+                                 # exact file list and copied into a new out/, with out/docker/empty and out/docker/home-root/home;
+                                 # go mod tidy -diff; go mod verify; git status --porcelain empty;
+                                 # .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > $RUNNER_TEMP/notes.md
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with: { cosign-release: v3.1.4 }
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -461,7 +462,8 @@ jobs:
         working-directory: dist
         env: { GH_TOKEN: "${{ github.token }}" }
       - if: ${{ !contains(github.ref_name, '-') }}
-        run: ...                 # docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest, the verified digest
+        run: ...                 # docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest, the verified digest;
+                                 # then imagetools inspect: latest must name that digest
 ```
 
 - **No QEMU.** The Dockerfile has no `RUN`, so the arm64 image builds on
@@ -493,10 +495,14 @@ jobs:
   "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v"`, ordered with
   `sed 's/-/~/' | sort -V`, so `v0.5.0-rc.1` sorts below `v0.5.0` and a
   stray `vtest` never counts); and `gh api
-  "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"` answers 404.
-  That endpoint returns only published releases, so a re-run onto the
-  run's own draft still works (`replace_existing_draft`); any answer other
-  than 404 fails closed. The release job repeats the guard because
+  "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"` answers 404
+  (read from the status line of `--include`: gh exits 1 on every HTTP
+  error). That endpoint returns only published releases, so a re-run onto
+  the run's own draft still works (`replace_existing_draft`); any answer
+  other than 404 fails closed. The tag list and its order are in
+  `.github/scripts/release-tags.sh`, which the guard and `tag.yml`'s
+  script both source, so that `tag.yml` accepts only a version the guard
+  then runs. The release job repeats the guard because
   re-running only that job (Re-run failed jobs, Re-run this job) reuses
   `generate`'s earlier success. The guard checks `GITHUB_REF_NAME`, and
   GoReleaser is given that name (`release` below): on its own it would
@@ -522,11 +528,14 @@ jobs:
   artifact into `$RUNNER_TEMP/generated`, never into the checkout, and
   fails unless it holds only regular files and directories and exactly
   `THIRD_PARTY_LICENSES`, `completions/{_gosftpd,gosftpd.bash,gosftpd.fish}`
-  and files matching `^man/gosftpd(-[a-z0-9-]+)?\.1\.gz$`. Only this job
-  can check that, since code run in `generate` controls that job's upload
-  step; a planted `out/docker/home-root/usr/bin/gosftpd`, or a host key in
-  `out/docker/empty`, would otherwise end up in the signed image
-  (reproduced with this Dockerfile). It
+  and files matching `^man/gosftpd(-[a-z0-9-]+)?\.1\.gz$`, among them
+  `man/gosftpd.1.gz` (`.github/scripts/release-out.sh`): every one of
+  these files must be there, since GoReleaser builds archives and
+  packages without a man page or a completion its pattern does not find.
+  Only this job can check that, since code run in `generate` controls
+  that job's upload step; a planted `out/docker/home-root/usr/bin/gosftpd`,
+  or a host key in `out/docker/empty`, would otherwise end up in the
+  signed image (reproduced with this Dockerfile). It
   copies the files into a new `out/`, creates `out/docker/empty` and
   `out/docker/home-root/home` itself, runs `go mod tidy -diff` and `go mod
   verify`, checks that `git status --porcelain` is empty (`out/` is
@@ -547,7 +556,8 @@ jobs:
   attestations, the verification and `latest`, and does not replace the
   variable. After the attest steps the job uploads `.intoto.jsonl` and
   `digests.txt`; after the verification step it moves `latest` for a
-  stable version.
+  stable version, and checks with `docker buildx imagetools inspect`
+  that `latest` names the verified digest.
 - **BuildKit is pinned.** setup-buildx-action's default `docker-container`
   driver runs `moby/buildkit:buildx-stable-1`, a floating tag that buildx
   does not verify by default; that container builds the image, receives
