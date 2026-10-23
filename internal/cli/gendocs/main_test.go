@@ -132,6 +132,11 @@ func TestGenerate(t *testing.T) {
 			t.Errorf("%s has an auto-generated tag or an escape:\n%s", name, page)
 		}
 	}
+	// manText ran on the long help: the indented table of hostkey rotate
+	// is a code block, not a paragraph that man reflows.
+	if table := ".EX\n  rotate            create the next key"; !bytes.Contains(gunzip(t, filepath.Join(a, "man", "gosftpd-hostkey-rotate.1.gz")), []byte(table)) {
+		t.Errorf("gosftpd-hostkey-rotate.1 lacks %q", table)
+	}
 	for name, sig := range map[string]string{
 		"completions/gosftpd.bash": "__start_gosftpd",
 		"completions/_gosftpd":     "#compdef gosftpd",

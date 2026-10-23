@@ -241,10 +241,12 @@ changelog: { disable: true }
   hook and for release.yml's `generate` job, so CI runs the commands that
   build a release: with `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` (the
   value of `{{ .CommitTimestamp }}`, which GoReleaser reads as `%ct` too),
-  `go generate ./...`; `GOOS=linux GOROOT="$(go env GOROOT)" go tool
-  -modfile=tools/go.mod go-licenses report ./cmd/gosftpd --ignore
+  `go generate ./...`; `GOOS=linux GOARCH=amd64 GOROOT="$(go env GOROOT)"
+  go tool -modfile=tools/go.mod go-licenses report ./cmd/gosftpd --ignore
   github.com/o-kolomoiets/go-sftp-server
-  --template=packaging/third_party_licenses.tpl > out/THIRD_PARTY_LICENSES`;
+  --template=packaging/third_party_licenses.tpl > out/THIRD_PARTY_LICENSES`,
+  a failure on a `License: Unknown` line, and the entry of the Go standard
+  library and runtime appended (see Man pages, completions and licenses);
   and `mkdir -p out/docker/empty out/docker/home-root/home`, the empty
   directories that the Dockerfile copies with their owner and mode.
 - **`latest` is not a `dockers_v2` tag.** GoReleaser pushes its tags before
@@ -924,22 +926,44 @@ nfpms:
   lookup goes online (20 s timeout) and writes "Unknown" when it fails.
   go-licenses lists libcap/psx twice, as BSD-3-Clause and as GPL-2.0; the
   template prints it once, under BSD-3-Clause, the choice docs/DEPENDENCIES.md
-  records. `make generate` sets `GOOS=linux`, so that the file is the same
-  on every host (on darwin, go-landlock and psx drop out), and `GOROOT`,
-  without which an installed go-licenses failed on every standard-library
-  package.
+  records. `make generate` sets `GOOS=linux GOARCH=amd64`, so that the
+  file is the same on every host (on darwin, go-landlock and psx drop out;
+  on arm64, riscv64 or 386, `golang.org/x/sys` is listed as
+  `golang.org/x/sys/unix`, which would change every archive and package
+  of a release rebuilt there), and `GOROOT`, without which an installed
+  go-licenses failed on every standard-library package.
   One file serves every archive: for darwin and FreeBSD it lists two
   modules too many, which is harmless. Output is deterministic.
+- **The Go standard library and runtime** are in every binary, linked
+  statically, under BSD-3-Clause, whose second clause asks a binary
+  redistribution to reproduce the notice; go-licenses skips them by design.
+  `make generate` appends their entry last, in the template's form: `Go
+  standard library and runtime` with `go env GOVERSION`, `License:
+  BSD-3-Clause` and `$(go env GOROOT)/LICENSE`, the Go that builds the
+  release, whose version the rebuild already fixes.
+- **Checks.** go-licenses exits 0 for a module whose license it cannot
+  classify and prints it as `Unknown`, and the template drops psx unless it
+  is classified as BSD-3-Clause; a Dependabot update of tools/go.mod can
+  change either without anyone reading `out/`. `make generate` fails on a
+  `License: Unknown` line, and `goreleaser-check` checks that every `dep`
+  of `go version -m` on the Linux amd64 binary has an entry and that the
+  Go standard library and runtime, with that Go's LICENSE, come last.
 
 ### CLI changes
 
 - **`config.Find` and an unreadable working directory.** Today any `stat`
   error other than "not found" on a search path candidate is fatal. A
   permission error (`EACCES`, `EPERM`) on the relative `./gosftpd.toml`
-  now counts as "not found", and the search goes on to
-  `/etc/gosftpd/config.toml`. `--config`, `$GOSFTPD_CONFIG` and the
-  absolute candidates stay strict. This fixes `healthcheck` under `--user`
-  and the DoD command `sudo -u gosftpd gosftpd config validate
+  now counts as "not found" when `lstat` fails with one too, that is when
+  the working directory cannot be searched, and the search goes on to
+  `/etc/gosftpd/config.toml`; the error, if nothing is found, still wraps
+  the skipped one, and the hint says that `./gosftpd.toml` was not checked.
+  An entry that `lstat` sees but `stat` cannot reach (a symlink into a
+  directory the user cannot search) stays an error: the search must not
+  quietly use another file, least of all for `user add --write`, `user
+  disable` and `hostkey`, which write it. `--config`, `$GOSFTPD_CONFIG` and
+  the absolute candidates stay strict. This fixes `healthcheck` under
+  `--user` and the DoD command `sudo -u gosftpd gosftpd config validate
   --check-fs`, which exits 2 with "stat gosftpd.toml: permission denied"
   when run from `/root` (reproduced on Debian 12).
 - **A missing configuration file gets a hint, still with exit 2.** When
@@ -954,7 +978,7 @@ nfpms:
 
   ```text
   Error: no configuration file found (./gosftpd.toml, /etc/gosftpd/config.toml, ~/.config/gosftpd/config.toml)
-  Create one with 'gosftpd config example > config.toml' and replace the key placeholder.
+  Create one with 'gosftpd init' (it writes ./gosftpd.toml, which serve finds; --out names another path), or serve a directory without one: 'gosftpd serve --dir PATH'.
   With Docker, keep it in a directory and mount the directory:
     mkdir -p gosftpd && sudo chown "$(id -u):$(id -g)" gosftpd
     docker run --rm ghcr.io/o-kolomoiets/gosftpd:v0.5.0 config example > gosftpd/config.toml
@@ -968,10 +992,18 @@ nfpms:
   does not exist"; in the image, for an empty mounted `/etc/gosftpd` (see
   Mode selection), "/etc/gosftpd is mounted but holds no config.toml;
   check the host path of -v (Docker creates a missing one as an empty
-  directory owned by root)". For a directory: "... is a directory: Docker
-  creates one when the host file of a bind mount does not exist. Remove it
-  on the host (`sudo rmdir ./config.toml`) and mount a directory instead",
-  followed by the same lines (the directory case was reproduced). The
+  directory owned by root)". For a directory found by the search, or named
+  in the image: "... is a directory: Docker creates one when the host file
+  of a bind mount does not exist. Remove it on the host (`sudo rmdir
+  ./config.toml`) and mount a directory instead", followed by the same
+  lines (the directory case was reproduced); a name that would need
+  quoting becomes `<host path of -v>`. A directory that `--config` or
+  `$GOSFTPD_CONFIG` names outside the image is most likely the
+  configuration directory: "... is a directory: name the file in it, such
+  as DIR/config.toml". Outside Docker the first command is `gosftpd init`,
+  whose `./gosftpd.toml` the search finds, or `serve --dir`; `config
+  example` writes paths of the image and the package. A reload that cannot
+  find its file logs only the first line: the commands are for a start. The
   `chown` of `gosftpd` works whether Docker created it or not, and is
   harmless under rootless Docker. The image tag and the link name the
   binary's own version (a snapshot build reports the last tag), or

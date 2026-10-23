@@ -316,6 +316,28 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
+      # go-licenses exits 0 for a module it cannot classify (make generate
+      # fails on "License: Unknown"), and the template prints psx only
+      # under BSD-3-Clause. Every module of the Linux binary needs an entry,
+      # and the Go standard library and runtime, which make generate
+      # appends with Go's own LICENSE, the last one (ADR 0012).
+      - name: THIRD_PARTY_LICENSES covers the Linux binary
+        run: |
+          mods="$(go version -m dist/gosftpd_linux_amd64_v1/gosftpd | awk '$1 == "dep" { print $2 }')"
+          if [ -z "$mods" ]; then echo "::error::no dep lines in the binary's build information"; exit 1; fi
+          status=0
+          for m in $mods; do
+            if ! grep -q "^${m//./[.]}[/ ]" out/THIRD_PARTY_LICENSES; then
+              echo "::error file=out/THIRD_PARTY_LICENSES::no entry for $m"; status=1
+            fi
+          done
+          last="$(grep -A 2 -x '=\{80\}' out/THIRD_PARTY_LICENSES | tail -n 2)"
+          want="$(printf 'Go standard library and runtime %s\nLicense: BSD-3-Clause' "$(go env GOVERSION)")"
+          license="$(go env GOROOT)/LICENSE"
+          if [ "$last" != "$want" ] || ! tail -c "$(wc -c < "$license")" out/THIRD_PARTY_LICENSES | cmp -s - "$license"; then
+            echo "::error file=out/THIRD_PARTY_LICENSES::the last entry is not the Go standard library and runtime with $license"; status=1
+          fi
+          exit $status
       - name: Only the Linux archives hold the systemd files (ADR 0011)
         run: |
           status=0

@@ -333,7 +333,8 @@ func TestThirdPartyLicensesTemplate(t *testing.T) {
 		return "\n" + strings.Repeat("=", 80) + "\n" + l.Name + " " + l.Version + "\nLicense: " + l.LicenseName + "\n\n" + text
 	}
 	header := "gosftpd is licensed under the Apache License 2.0 (see LICENSE). Its binary\n" +
-		"includes the following Go modules, each under the license named with it.\n"
+		"includes the following Go modules and, last, the Go standard library and\n" +
+		"runtime, each under the license named with it.\n"
 	for _, tt := range []struct {
 		name string
 		libs []license

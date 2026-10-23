@@ -120,6 +120,10 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 			}
 		}
 		if c, err = loadConfig(o.config, getenv); err != nil {
+			// The hint is for a start; a running server logs one line.
+			if he, ok := errors.AsType[hintError](err); reload && ok {
+				err = configError{he.err}
+			}
 			return nil, nil, err
 		}
 		if flags.Changed("read-only") && o.readOnly {

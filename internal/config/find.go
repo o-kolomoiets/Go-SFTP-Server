@@ -78,16 +78,19 @@ func SearchPaths() []string {
 // Find returns the configuration file to use: explicit (from --config) if
 // set, else $GOSFTPD_CONFIG, else the first of SearchPaths that exists. An
 // explicit or environment path must exist, and no file it returns is a
-// directory. A permission error on ./gosftpd.toml counts as not found, so
-// that a working directory the user cannot read (/root under sudo -u, the
-// image's under docker run --user) does not stop the search; on every
-// other path it is an error (ADR 0012). Its errors other than ErrNotFound
-// are *FileError.
+// directory. A permission error on ./gosftpd.toml counts as not found when
+// lstat fails with one too, so that a working directory the user cannot
+// search (/root under sudo -u, the image's under docker run --user) does
+// not stop the search; a ./gosftpd.toml that lstat sees but stat cannot
+// reach, such as a symlink into a directory the user cannot search, and a
+// permission error on every other path are errors (ADR 0012). ErrNotFound
+// then wraps the skipped error too. Its errors other than ErrNotFound are
+// *FileError.
 func Find(explicit string, getenv func(string) string) (string, error) {
-	return find(explicit, getenv, SearchPaths(), os.Stat)
+	return find(explicit, getenv, SearchPaths(), os.Stat, os.Lstat)
 }
 
-func find(explicit string, getenv func(string) string, search []string, stat func(string) (fs.FileInfo, error)) (string, error) {
+func find(explicit string, getenv func(string) string, search []string, stat, lstat func(string) (fs.FileInfo, error)) (string, error) {
 	for _, p := range []struct{ path, from string }{{explicit, "--config"}, {getenv(EnvConfig), "$" + EnvConfig}} {
 		if p.path == "" {
 			continue
@@ -101,6 +104,7 @@ func find(explicit string, getenv func(string) string, search []string, stat fun
 		}
 		return p.path, nil
 	}
+	var skipped error // the permission error of ./gosftpd.toml
 	for _, p := range search {
 		fi, err := stat(p)
 		switch {
@@ -110,9 +114,18 @@ func find(explicit string, getenv func(string) string, search []string, stat fun
 			return p, nil
 		case errors.Is(err, fs.ErrNotExist):
 		case errors.Is(err, fs.ErrPermission) && !filepath.IsAbs(p):
+			// Only a working directory that cannot be searched hides the
+			// entry from lstat as well.
+			if _, lerr := lstat(p); !errors.Is(lerr, fs.ErrPermission) {
+				return "", &FileError{Path: p, Err: err}
+			}
+			skipped = err
 		default:
 			return "", &FileError{Path: p, Err: err}
 		}
+	}
+	if skipped != nil {
+		return "", fmt.Errorf("%w: %w", ErrNotFound, skipped)
 	}
 	return "", ErrNotFound
 }

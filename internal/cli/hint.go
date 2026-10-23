@@ -25,15 +25,19 @@ const envImage = "GOSFTPD_ATMOZ_IMAGE"
 // variable for tests.
 var imageConfigDir = "/etc/gosftpd"
 
+// safeName matches a file name that a shell command can hold unquoted.
+var safeName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // releaseVersion matches the version of a release build: the release
 // workflows accept only tags of this form.
 var releaseVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$`)
 
 // hintText follows the first line of a hint: the commands lead to a
-// configuration that serve accepts, with Docker too, where the host
-// directory may have been created by Docker as root and the file must
-// belong to root or to the image's user, 65532 (ADR 0012).
-const hintText = `Create one with 'gosftpd config example > config.toml' and replace the key placeholder.
+// configuration that serve accepts. Outside Docker that is gosftpd init,
+// whose ./gosftpd.toml the search finds, or serve --dir; with Docker the
+// host directory may have been created by Docker as root and the file
+// must belong to root or to the image's user, 65532 (ADR 0012).
+const hintText = `Create one with 'gosftpd init' (it writes ./gosftpd.toml, which serve finds; --out names another path), or serve a directory without one: 'gosftpd serve --dir PATH'.
 With Docker, keep it in a directory and mount the directory:
   mkdir -p gosftpd && sudo chown "$(id -u):$(id -g)" gosftpd
   docker run --rm ghcr.io/o-kolomoiets/gosftpd:%[1]s config example > gosftpd/config.toml
@@ -58,15 +62,23 @@ func (e hintError) Unwrap() error { return e.err }
 func configHint(err error, getenv func(string) string) error {
 	var first string
 	fe, _ := errors.AsType[*config.FileError](err)
+	inImage := getenv(envImage) == "1"
 	switch {
 	case errors.Is(err, config.ErrNotFound):
-		first = fmt.Sprintf("%s (%s)", err, searchList())
-		if getenv(envImage) == "1" && isDir(imageConfigDir) {
+		first = fmt.Sprintf("%s (%s)", config.ErrNotFound, searchList())
+		if errors.Is(err, fs.ErrPermission) {
+			// config.Find skipped ./gosftpd.toml, which may exist.
+			first += "; " + localPath() + " was not checked, since the working directory cannot be searched: name the file with --config"
+		}
+		if inImage && isDir(imageConfigDir) {
 			first = imageConfigDir + " is mounted but holds no config.toml; check the host path of -v (Docker creates a missing one as an empty directory owned by root)"
 		}
+	case fe != nil && errors.Is(err, config.ErrIsDir) && fe.From != "" && !inImage:
+		// Named on the host: most likely the configuration directory.
+		first = fmt.Sprintf("%s: name the file in it, such as %s", err, filepath.Join(fe.Path, "config.toml"))
 	case fe != nil && errors.Is(err, config.ErrIsDir):
-		first = fmt.Sprintf("%s: Docker creates one when the host file of a bind mount does not exist. Remove it on the host ('sudo rmdir ./%s') and mount a directory instead",
-			err, filepath.Base(fe.Path))
+		first = fmt.Sprintf("%s: Docker creates one when the host file of a bind mount does not exist. Remove it on the host ('sudo rmdir %s') and mount a directory instead",
+			err, hostPath(fe.Path))
 	case fe != nil && fe.From != "" && errors.Is(err, fs.ErrNotExist):
 		first = err.Error()
 	default:
@@ -86,6 +98,17 @@ func imageVersion(v string) (tag, ref string) {
 	return "latest", "main"
 }
 
+// hostPath returns the path to give rmdir for the host directory that
+// Docker created in place of the file path: ./ and its name, which the
+// mount most likely shares, or a placeholder for a name that would need
+// quoting.
+func hostPath(path string) string {
+	if name := filepath.Base(path); safeName.MatchString(name) && name != "." && name != ".." {
+		return "./" + name
+	}
+	return "<host path of -v>"
+}
+
 // searchList lists the paths config.Find searches, ./gosftpd.toml first.
 func searchList() string {
 	paths := config.SearchPaths()
@@ -96,6 +119,9 @@ func searchList() string {
 	}
 	return strings.Join(paths, ", ")
 }
+
+// localPath is ./gosftpd.toml as searchList names it.
+func localPath() string { return "." + string(filepath.Separator) + config.LocalFile }
 
 func isDir(path string) bool {
 	fi, err := os.Stat(path)
