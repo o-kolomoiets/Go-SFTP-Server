@@ -62,8 +62,33 @@ type Config struct {
 	// entries it removes at exit. The host key is generated in memory,
 	// so server.host_keys is empty.
 	EphemeralDir string `toml:"-"`
+	// Atmoz is set in atmoz mode (ADR 0012): the users and their mounts
+	// come from atmoz/sftp user specs (internal/atmoz). No mount at all,
+	// and a user without mounts or without a way to log in, are allowed:
+	// the atmoz loader warns about them in its own terms.
+	Atmoz bool `toml:"-"`
+	// Unavailable names mounts that cannot be served now: in atmoz mode a
+	// directory that could not be created. CheckFS and the Landlock rules
+	// leave them out; serve passes them to vfs as unavailable, so that
+	// their users find them unavailable and the other mounts work.
+	Unavailable []string `toml:"-"`
+	// Inlined are files that were read once, at start, into the
+	// configuration: in atmoz mode the users file and the key files of
+	// /home/<user>/.ssh/keys/. They are not configuration files (Files),
+	// get no Landlock rule and are never read again; CheckFS refuses them
+	// inside a mount, as any trusted file.
+	Inlined []InlinedFile `toml:"-"`
 
 	defined map[string]bool // keys set in File
+}
+
+// InlinedFile is a file of Config.Inlined.
+type InlinedFile struct {
+	Path string
+	What string // for messages, such as "the atmoz users file"
+	// Secret marks a file with passwords or hashes, which no mount may
+	// cover, a read-only one included.
+	Secret bool
 }
 
 // Defined reports whether the main file sets key, such as "log.level".

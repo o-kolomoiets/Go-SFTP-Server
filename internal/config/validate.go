@@ -383,7 +383,7 @@ func (o MountOptions) validate(p *problems, base *MountOptions, prefix ...string
 }
 
 func (c *Config) validateMounts(p *problems) {
-	if len(c.Mounts) == 0 {
+	if len(c.Mounts) == 0 && !c.Atmoz {
 		p.errorf("mounts", "no mounts configured; add a [mounts.NAME] table with a path")
 	}
 	names := sortedKeys(c.Mounts)
@@ -396,6 +396,9 @@ func (c *Config) validateMounts(p *problems) {
 		}
 		if prev, ok := lower[strings.ToLower(name)]; ok {
 			p.errorf(k(), "clashes with mount %q (names are case-insensitive)", prev)
+		}
+		if m.Display != "" && !vfs.ValidMountName(m.Display) {
+			p.errorf(k(), "invalid visible name %q", m.Display)
 		}
 		lower[strings.ToLower(name)] = name
 		m.validate(p, &c.Defaults.MountOptions, "mounts", name)
@@ -435,7 +438,7 @@ func (c *Config) validateUsers(p *problems) {
 		if !auth.ValidUserName(name) {
 			p.errorf(where, "invalid user name: use lowercase letters, digits, '.', '_' and '-' (max 32, starting with a letter or digit)")
 		}
-		if len(u.Access) == 0 {
+		if len(u.Access) == 0 && !c.Atmoz {
 			p.warnf(k("access"), "no mounts: the user can log in but sees nothing")
 		}
 		for _, mount := range sortedKeys(u.Access) {
@@ -491,7 +494,7 @@ func (c *Config) validateUsers(p *problems) {
 		if hasKeys && !c.Auth.HasMethod(auth.MethodPublicKey) {
 			p.warnf(where, "keys not used: auth.methods does not include \"publickey\"")
 		}
-		if !c.usesKeys(u) && !c.canUsePassword(u) {
+		if !c.usesKeys(u) && !c.canUsePassword(u) && !c.Atmoz {
 			p.warnf(where, "no usable authorized_keys, password_hash or principals for trusted CAs: the user cannot log in")
 		}
 	}

@@ -629,13 +629,17 @@ func (p *planner) place(key, path string, fileRights, dirRights Rights) error {
 }
 
 // mountRules: a mount's directory, for a {user} mount its parent, through
-// the descriptor the mount holds open.
+// the descriptor the mount holds open. A mount that is unavailable from the
+// start (Config.Unavailable) is not open and gets none.
 func (p *planner) mountRules() error {
 	byName := map[string]MountDir{}
 	for _, m := range p.in.Mounts {
 		byName[m.Name] = m
 	}
 	for _, name := range sortedKeys(p.c.Mounts) {
+		if slices.Contains(p.c.Unavailable, name) {
+			continue
+		}
 		m := p.c.Mounts[name]
 		dir := filepath.Clean(m.Path)
 		key := toml.Key{"mounts", name, "path"}.String()
@@ -644,6 +648,8 @@ func (p *planner) mountRules() error {
 			key = keyEphemeral + " " + name
 		case p.c.AnyUser != nil, p.c.EphemeralDir != "":
 			key = "--dir " + name
+		case p.c.Atmoz:
+			key = config.AtmozKey(m)
 		}
 		home := filepath.Base(dir) == vfs.UserPlaceholder
 		if home {
@@ -697,8 +703,11 @@ func (p *planner) mountRules() error {
 // elsewhere says what to do about a mount under /dev or /proc. serve
 // --ephemeral has no server.landlock to turn off.
 func (p *planner) elsewhere() string {
-	if p.c.EphemeralDir != "" {
+	switch {
+	case p.c.EphemeralDir != "":
 		return "set TMPDIR to another directory, or serve another one with --dir"
+	case p.c.Atmoz:
+		return "make it a directory, or mount one there"
 	}
 	return `serve another directory or set server.landlock = "off"`
 }

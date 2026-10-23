@@ -90,6 +90,21 @@ func TestDevTrustedFiles(t *testing.T) {
 	}
 }
 
+// TestAtmozUnderDev: an atmoz directory that is a link into /dev gets no
+// rule, and the warning names it by its path.
+func TestAtmozUnderDev(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/proc/self", "/home/foo/upload", "/dev/shm").symlink("/home/foo/dev", "/dev/shm")
+	c := config.Default()
+	c.Atmoz = true
+	c.AddMount("atmoz1", "/home/foo/upload").Display = "upload"
+	c.AddMount("atmoz2", "/home/foo/dev").Display = "dev"
+	in := input(t, m, c)
+	in.Linux = true
+	checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro, "dir /home/foo/upload " + rw},
+		"atmoz directory /home/foo/dev: /home/foo/dev resolves to /dev/shm under /dev or /proc, which never get a Landlock rule: the mount cannot be used; make it a directory, or mount one there")
+}
+
 // TestEphemeralUnderDev: with $TMPDIR under /dev, serve --ephemeral's
 // directory and its data get no rule, and the warnings say what to do.
 func TestEphemeralUnderDev(t *testing.T) {

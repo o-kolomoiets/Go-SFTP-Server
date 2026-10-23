@@ -302,6 +302,56 @@ func TestMountSpecsDisplay(t *testing.T) {
 	}
 }
 
+// TestValidateAtmoz: in atmoz mode no mount at all is not an error, and a
+// user without mounts or without a login is left to the atmoz loader's
+// warnings; a visible name must be a mount name. CheckFS leaves out the
+// mounts that are unavailable from the start, and refuses the inlined
+// files inside a mount.
+func TestValidateAtmoz(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Server.HostKeys, c.Server.HostKeyAutoGenerate = []string{filepath.Join(t.TempDir(), "host_key")}, true
+	c.Users["foo"] = &User{Access: map[string]string{}}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "no mounts configured") {
+		t.Errorf("without Atmoz: %v", err)
+	}
+	c.Atmoz = true
+	if warns := mustValidate(t, c); len(warns) != 0 {
+		t.Errorf("warnings %q", warns)
+	}
+
+	home := t.TempDir()
+	blocked := filepath.Join(home, "foo", "blocked")
+	if err := os.MkdirAll(filepath.Dir(blocked), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := c.AddMount("atmoz1", blocked)
+	m.Create, m.Display = true, "blocked"
+	c.Users["foo"].Access["atmoz1"] = "full"
+	if _, err := c.CheckFS(); err == nil || !strings.Contains(err.Error(), "atmoz directory "+blocked+": "+blocked+" is not a directory") {
+		t.Errorf("CheckFS: %v", err)
+	}
+	c.Unavailable = []string{"atmoz1"}
+	if _, err := c.CheckFS(); err != nil {
+		t.Errorf("CheckFS with the mount unavailable: %v", err)
+	}
+
+	up := filepath.Join(home, "foo", "upload")
+	c.AddMount("atmoz2", up).Display = "up/load"
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), `mounts.atmoz2: invalid visible name "up/load"`) {
+		t.Errorf("Validate: %v", err)
+	}
+	c.Mounts["atmoz2"].Display = "upload"
+	c.Mounts["atmoz2"].Create = true
+	c.Inlined = []InlinedFile{{Path: filepath.Join(up, "users.conf"), What: "the atmoz users file", Secret: true}}
+	if _, err := c.CheckFS(); err == nil || !strings.Contains(err.Error(), "atmoz directory "+up+": covers the atmoz users file") {
+		t.Errorf("CheckFS: %v", err)
+	}
+}
+
 func TestValidateMissingVersionAndWarnings(t *testing.T) {
 	t.Parallel()
 

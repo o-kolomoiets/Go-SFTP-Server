@@ -769,6 +769,37 @@ func TestEphemeralRule(t *testing.T) {
 	}
 }
 
+// TestAtmozMountRules: atmoz mode's mounts get rules under their
+// directory's path, never their internal names; one that is unavailable
+// from the start is not open and gets none. The users file and the key
+// files were read and inlined, and get none either (ADR 0012).
+func TestAtmozMountRules(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/home/foo/upload", "/home/bar/upload").files("/home/foo/.ssh/keys/id.pub", "/etc/sftp/users.conf")
+	c := config.Default()
+	c.Atmoz = true
+	c.AddMount("atmoz1", native("/home/foo/upload")).Display = "upload"
+	c.AddMount("atmoz2", native("/home/bar/upload")).Display = "upload"
+	c.AddMount("atmoz3", native("/home/bar/blocked")).Display = "blocked"
+	c.Unavailable = []string{"atmoz3"}
+	c.Inlined = []config.InlinedFile{{Path: native("/etc/sftp/users.conf"), Secret: true}, {Path: native("/home/foo/.ssh/keys/id.pub")}}
+	in := Input{Config: c, FS: m, ProcSelfFD: -1}
+	for _, name := range []string{"atmoz1", "atmoz2"} {
+		info, err := m.Stat(c.Mounts[name].Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Mounts = append(in.Mounts, MountDir{Name: name, FD: -1, Dev: info.Dev, Ino: info.Ino})
+	}
+	p := compute(t, in)
+	checkPlan(t, p, []string{"dir /home/bar/upload " + rw, "dir /home/foo/upload " + rw})
+	for _, r := range p.Rules {
+		if want := "atmoz directory " + r.Path; !slices.Equal(r.For, []string{want}) {
+			t.Errorf("%s: For %v, want %q", slash(r.Path), r.For, want)
+		}
+	}
+}
+
 // TestDedupe: one rule per path, with the rights of all; rules below a
 // directory rule that gives all their rights are left out.
 func TestDedupe(t *testing.T) {

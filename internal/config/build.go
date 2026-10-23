@@ -198,7 +198,7 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 			}
 			au.AllowFrom = append(au.AllowFrom, p)
 		}
-		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled && !c.certificateLogin(u) {
+		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled && !c.certificateLogin(u) && !c.Atmoz {
 			warns = append(warns, key("users", name)+": no usable keys, the user cannot log in")
 		}
 		users = append(users, au)
