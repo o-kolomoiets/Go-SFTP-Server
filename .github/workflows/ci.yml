@@ -289,6 +289,10 @@ jobs:
 
   goreleaser-check:
     runs-on: ubuntu-24.04
+    outputs:
+      # The snapshot's version: the docker job loads v<version>-amd64 and
+      # -arm64.
+      version: ${{ steps.images.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -298,6 +302,12 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      # The images build with BuildKit pinned by digest: the builder's
+      # default, moby/buildkit:buildx-stable-1, is a floating tag. No QEMU:
+      # the Dockerfile has no RUN (ADR 0012).
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: v2.19.0
@@ -386,6 +396,80 @@ jobs:
             if [ "$size" -gt 12582912 ]; then echo "::error file=$f::$size bytes is over the 12 MiB budget"; status=1; fi
           done
           exit $status
+      # A snapshot builds one image per platform, tagged v<version>-amd64
+      # and -arm64, and never latest (ADR 0012). Each has the Dockerfile's
+      # configuration and labels; the binary and the directories that named
+      # volumes start from have their owner and mode, with nothing in the
+      # directories; and there is no /etc/gosftpd, /etc/sftp or /etc/ssh,
+      # which in the image are always mounts (the hint and atmoz mode rely
+      # on it).
+      - name: The images have the Dockerfile's configuration and directories
+        id: images
+        run: |
+          set -o pipefail
+          V="$(jq -r .version dist/metadata.json)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          repo=ghcr.io/o-kolomoiets/gosftpd
+          created="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
+          status=0
+          if ! diff -u <(printf '%s\n' "$repo:v$V-amd64" "$repo:v$V-arm64") \
+            <(jq -r '.[] | select(.type == "Docker Image") | .name' dist/artifacts.json | LC_ALL=C sort); then
+            echo "::error::the snapshot built other images than v$V-amd64 and v$V-arm64 (+ is built)"; status=1
+          fi
+          tree="$(printf '%s\n' '-rwxr-xr-x 0/0 usr/bin/gosftpd' 'drwxr-xr-x 0/0 srv/' \
+            'drwxr-x--- 65532/65532 srv/sftp/' 'drwxr-xr-x 0/0 var/lib/' 'drwx------ 65532/65532 var/lib/gosftpd/' \
+            'drwxr-xr-x 65532/65532 home/' 'drwx------ 65532/65532 home/nonroot/' | LC_ALL=C sort)"
+          for arch in amd64 arm64; do
+            ref="$repo:v$V-$arch"
+            want="$(jq -nS --arg arch "$arch" --arg v "$V" --arg rev "$(git rev-parse HEAD)" --arg created "$created" '{
+              Os: "linux", Architecture: $arch, User: "65532:65532", WorkingDir: "/",
+              Entrypoint: ["/usr/bin/gosftpd"], Cmd: ["serve"], ExposedPorts: ["2022/tcp", "9090/tcp"],
+              Env: ["GOSFTPD_ATMOZ_IMAGE=1"], Volumes: null, StopSignal: null,
+              Healthcheck: {Test: ["CMD", "/usr/bin/gosftpd", "healthcheck"], StartPeriod: 10000000000, StartInterval: 2000000000},
+              Labels: {"org.opencontainers.image.source": "https://github.com/o-kolomoiets/Go-SFTP-Server",
+                "org.opencontainers.image.revision": $rev, "org.opencontainers.image.version": $v,
+                "org.opencontainers.image.created": $created, "org.opencontainers.image.licenses": "Apache-2.0"}}')"
+            got="$(docker image inspect "$ref" | jq -S '.[0] | .Config as $c | {Os, Architecture, User: $c.User,
+              WorkingDir: $c.WorkingDir, Entrypoint: $c.Entrypoint, Cmd: $c.Cmd, ExposedPorts: ($c.ExposedPorts | keys),
+              Env: ($c.Env | map(select(startswith("GOSFTPD_")))), Volumes: $c.Volumes, StopSignal: $c.StopSignal,
+              Healthcheck: $c.Healthcheck, Labels: $c.Labels}')"
+            if ! diff -u <(echo "$want") <(echo "$got"); then
+              echo "::error::$ref: the configuration differs (+ is the image's)"; status=1
+            fi
+            c="$(docker create --platform "linux/$arch" "$ref")"
+            got="$(docker export "$c" | tar --numeric-owner -tvf - | awk '
+              $6 ~ /^(usr\/bin\/gosftpd|srv\/.*|var\/lib\/|var\/lib\/gosftpd\/.*|home\/.*|etc\/(gosftpd|sftp|ssh)(\/.*)?)$/ { print $1, $2, $6 }
+            ' | LC_ALL=C sort)"
+            docker rm -v "$c" > /dev/null
+            if ! diff -u <(echo "$tree") <(echo "$got"); then
+              echo "::error::$ref: the files differ (+ is in the image)"; status=1
+            fi
+          done
+          exit $status
+      # The gzip of docker save, which the docker job loads: about the
+      # compressed size of the layers in a registry, plus tar headers.
+      - name: The images stay within 15 MB compressed (ROADMAP §11.1)
+        env:
+          V: ${{ steps.images.outputs.version }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/images"
+          status=0
+          for arch in amd64 arm64; do
+            f="$RUNNER_TEMP/images/gosftpd-$arch.tar.gz"
+            docker save "ghcr.io/o-kolomoiets/gosftpd:v$V-$arch" | gzip -n > "$f"
+            size=$(stat -c %s "$f")
+            echo "v$V-$arch: $size bytes"
+            if [ "$size" -gt 15000000 ]; then echo "::error::v$V-$arch: $size bytes is over the 15 MB budget"; status=1; fi
+          done
+          exit $status
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: images
+          path: ${{ runner.temp }}/images
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       # git.prerelease_suffix (ADR 0012): without GORELEASER_CURRENT_TAG,
       # GoReleaser takes the first tag on HEAD in git's version sort, which
       # ranks v0.5.0-rc.1 above v0.5.0; the suffix makes a local or snapshot

@@ -620,11 +620,17 @@ jobs:
     file included), `dpkg-deb -f ... Depends` naming procps, `rpm -qp
     --configfiles`; `docker image inspect` for `User 65532:65532`, the
     health check, ports 2022 and 9090, `Cmd` `["serve"]` and
-    `GOSFTPD_ATMOZ_IMAGE=1`; the compressed image size ≤ 15 MB; `git
+    `GOSFTPD_ATMOZ_IMAGE=1` (and the labels, no `VOLUME` and no
+    `STOPSIGNAL`), and from `docker export` the owner and mode of the
+    binary and of the directories named volumes start from, with nothing
+    in them, and no `/etc/gosftpd`, `/etc/sftp` or `/etc/ssh`; the
+    compressed image size ≤ 15 MB, measured as the gzip of `docker save`
+    (the layers as a registry stores them, plus tar headers); `git
     status --porcelain` empty after the hooks (a dirty tree shows as
     `+dirty` in the SBOM). It uploads the packages for the jobs below and,
-    with `V=$(jq -r .version dist/metadata.json)`, the `docker save`
-    tarballs of `ghcr.io/o-kolomoiets/gosftpd:v$V-amd64` and `-arm64`.
+    with `V=$(jq -r .version dist/metadata.json)`, those gzipped `docker
+    save` tarballs of `ghcr.io/o-kolomoiets/gosftpd:v$V-amd64` and
+    `-arm64`, and passes `V` to the `docker` job as a job output.
   - `reproducible` (Reproducible builds above).
   - `packages`: the DoD as docs/install.md's `deb` block gives it
     (`apt install`, `systemctl enable --now`, `is-active`, `sudo -u gosftpd
