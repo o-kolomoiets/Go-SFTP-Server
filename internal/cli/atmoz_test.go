@@ -282,7 +282,7 @@ func TestAtmozImage(t *testing.T) {
 	for _, want := range []string{
 		`msg="atmoz mode" users_file=3 arguments=0 sftp_users=2`,
 		`msg="atmoz mode: the uid and gid of user specs are ignored"`,
-		atmozUsersFile + " line 1 (user foo): no directories, so the user logs in to an empty read-only root, as in atmoz; name directories in the spec (foo:pass:::upload) or mount them under " + filepath.Join(home, "foo"),
+		atmozUsersFile + " line 1 (user foo): no directories, so the user logs in to an empty read-only root, as in atmoz; name directories in the spec's last field (user:pass:::upload) or mount them under " + filepath.Join(home, "foo"),
 		"SFTP_USERS entry 2 (user quux): the password is in plain text",
 		"host key: " + filepath.Join(imageStateDir, hostkey.DefaultFile) + " (generated, 0600)",
 	} {

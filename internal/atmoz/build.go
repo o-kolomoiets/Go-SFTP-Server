@@ -137,7 +137,7 @@ func Build(o Options) (*Mode, error) {
 			}
 		}
 		if len(dirs) == 0 {
-			fix := "name directories in the spec (" + s.User + ":pass:::upload)"
+			fix := "name directories in the spec's last field (user:pass:::upload)"
 			if o.Discover {
 				fix += " or mount them under " + home
 			}

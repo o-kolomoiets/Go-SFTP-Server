@@ -156,7 +156,7 @@ func TestBuildUsersFile(t *testing.T) {
 		"argument 1: user foo is already defined by " + file + " line 3; skipped, as atmoz skips it",
 		"SFTP_USERS entry 1: user bar is already defined by " + file + " line 5; skipped",
 		"SFTP_USERS entry 3: user baz is already defined by " + file + " line 6; skipped",
-		file + " line 3 (user foo): no directories, so the user logs in to an empty read-only root, as in atmoz; name directories in the spec (foo:pass:::upload) or mount them under " + filepath.Join(home, "foo"),
+		file + " line 3 (user foo): no directories, so the user logs in to an empty read-only root, as in atmoz; name directories in the spec's last field (user:pass:::upload) or mount them under " + filepath.Join(home, "foo"),
 		// A skipped spec's password is visible all the same.
 		"argument 1 (user foo): the password is in plain text",
 		"SFTP_USERS entry 2 (user quux): the password is in plain text",
