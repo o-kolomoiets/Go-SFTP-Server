@@ -1,6 +1,6 @@
 # ADR 0012: Distribution: releases, signatures, image, packages, ephemeral mode and atmoz compatibility
 
-- **Status:** proposed, 2026-10-23; amends ROADMAP §4.5 (tool versions),
+- **Status:** accepted, 2026-10-23; amends ROADMAP §4.5 (tool versions),
   §5 M5 (items, Definition of Done, the estimate: 9–12 pd), §6.7 (the
   root-level spec form), §9.1, §9.3, §9.4, §9.5, §9.6 (the local
   snapshot), §10 (the Docker Quickstart mounts a directory), the post-1.0
@@ -38,8 +38,9 @@
   reviewer: in the first round three reviews (supply chain, operations and
   packaging, CLI and UX) confirmed 31 findings; in the second, reviews of
   the first round's fixes, of coherence and scope, and of new risks
-  confirmed 25, two of them only in part. This version takes in both
-  rounds.
+  confirmed 25, two of them only in part; a final pass over the whole
+  decision confirmed one more, the tag GoReleaser builds when an rc and
+  its final share a commit. This version takes in all three.
 
 ## Decision
 
@@ -71,7 +72,9 @@
   hand if `tag.yml` cannot create it) is released by running `release.yml`
   on that tag (**Run workflow** with the tag selected, or `gh workflow run
   release.yml --ref vX.Y.Z`); `tag.yml`'s checks are then the owner's
-  responsibility. `release.yml` has no `push: tags` trigger (see
+  responsibility. GoReleaser builds the tag the run was dispatched on,
+  also when it shares its commit with an rc (`GORELEASER_CURRENT_TAG`,
+  Workflows). `release.yml` has no `push: tags` trigger (see
   Alternatives).
 - **Why a workflow dispatch.** Events caused by `GITHUB_TOKEN` start no
   workflows, except `workflow_dispatch` and `repository_dispatch` (GitHub's
@@ -217,6 +220,10 @@ docker_signs:
 
 docker_digest: { name_template: digests.txt }
 
+# Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit.
+# release.yml names its tag with GORELEASER_CURRENT_TAG (Workflows).
+git: { prerelease_suffix: "-" }
+
 release:
   draft: true
   replace_existing_draft: true   # a re-run replaces its own draft
@@ -263,6 +270,12 @@ changelog: { disable: true }
   images as `v<.Version>-amd64` and `-arm64`.
 - `docker_signs` sets its own `args`: the default is `sign
   --key=cosign.key ...`.
+- **`git.prerelease_suffix: "-"`.** Without a tag named in
+  `GORELEASER_CURRENT_TAG`, GoReleaser takes the first tag of `git tag
+  --points-at HEAD --sort -version:refname`, and git's version sort ranks
+  `v0.5.0-rc.1` above `v0.5.0`. The suffix makes a local or snapshot run
+  on a commit that carries both pick `v0.5.0`; the release job does not
+  rely on it (Workflows).
 - `preflight.fail_on_error` (since v2.18) stops the run before building
   only when the tag's release is already immutable; it does not check that
   the token can publish (`CanRelease` only reads the repository and the
@@ -288,9 +301,11 @@ changelog: { disable: true }
   built-in nfpm (zstd for Arch), so the Go version alone does not fix their
   bytes.
 - **Rebuilding a release** (docs/install.md): a fresh clone of the tag,
-  with that Go and that GoReleaser installed; `goreleaser release --clean
-  --skip=publish,sign,sbom,docker`; then `cd dist && sha256sum --check
-  --ignore-missing CHECKSUMS`, where CHECKSUMS is the release's own
+  with that Go and that GoReleaser installed;
+  `GORELEASER_CURRENT_TAG=vX.Y.Z goreleaser release --clean
+  --skip=publish,sign,sbom,docker` (the variable names the tag, since an
+  rc and its final may share the commit); then `cd dist && sha256sum
+  --check --ignore-missing CHECKSUMS`, where CHECKSUMS is the release's own
   `checksums.txt` after `cosign verify-blob`. Not `--snapshot`: it renames
   every file to `X.Y.Z-SNAPSHOT-<commit>`, so nothing would match.
   `--skip=publish` needs no token (GoReleaser skips the token check then).
@@ -425,7 +440,8 @@ jobs:
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with: { version: v2.19.0, args: "release --clean --skip=before --release-notes ${{ runner.temp }}/notes.md" }
-        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}", GORELEASER_CURRENT_TAG: "${{ github.ref_name }}" }   # the tag the guard checked
+      - run: test "$(jq -r .tag dist/metadata.json)" = "$GITHUB_REF_NAME"   # after the push: a check, not the fix
       - id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with: { subject-checksums: dist/checksums.txt, create-storage-record: false }
@@ -474,7 +490,9 @@ jobs:
   run's own draft still works (`replace_existing_draft`); any answer other
   than 404 fails closed. The release job repeats the guard because
   re-running only that job (Re-run failed jobs, Re-run this job) reuses
-  `generate`'s earlier success.
+  `generate`'s earlier success. The guard checks `GITHUB_REF_NAME`, and
+  GoReleaser is given that name (`release` below): on its own it would
+  not build it.
 - **`generate`** (`contents: read` only, no `id-token`; setup-go `cache:
   false`) runs the guard, then `go mod tidy -diff && make generate`, and
   uploads only `out/man/`, `out/completions/` and
@@ -505,9 +523,23 @@ jobs:
   `out/docker/home-root/home` itself, runs `go mod tidy -diff` and `go mod
   verify`, checks that `git status --porcelain` is empty (`out/` is
   ignored), writes the notes and runs `goreleaser release --clean
-  --skip=before` (`before` is a release skip key in v2.19.0). After the
-  attest steps it uploads `.intoto.jsonl` and `digests.txt`; after the
-  verification step it moves `latest` for a stable version.
+  --skip=before` (`before` is a release skip key in v2.19.0) with
+  `GORELEASER_CURRENT_TAG=$GITHUB_REF_NAME`. On its own GoReleaser v2.19.0
+  ignores `GITHUB_REF` and takes the first tag of `git tag --points-at
+  HEAD --sort -version:refname`, the highest tag on HEAD by git's version
+  sort, which ranks `v0.5.0-rc.1` above `v0.5.0` (reproduced). When the
+  final is tagged on its rc's commit, the usual way to promote an rc and
+  what `tag.yml` does when `main` has not moved, the run for `v0.5.0` would
+  build, push and sign `v0.5.0-rc.1` after the guard had passed. With the
+  variable it builds exactly the tag the guard checked, and its own
+  validation still requires that tag on HEAD (`git describe --exact-match
+  --tags --match`). The next step fails unless `jq -r .tag
+  dist/metadata.json` equals `$GITHUB_REF_NAME`; it runs after the image
+  has been pushed and signed, so it catches a regression before the
+  attestations, the verification and `latest`, and does not replace the
+  variable. After the attest steps the job uploads `.intoto.jsonl` and
+  `digests.txt`; after the verification step it moves `latest` for a
+  stable version.
 - **BuildKit is pinned.** setup-buildx-action's default `docker-container`
   driver runs `moby/buildkit:buildx-stable-1`, a floating tag that buildx
   does not verify by default; that container builds the image, receives
@@ -1488,7 +1520,8 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   §9.1 drops the `NFPM_MAINTAINER` variable, starts `release.yml` only by
   dispatch and lists `tag.yml`, `verify-release.yml` and the Dependabot
   directories; §9.3 takes the flow, the guard and the `generate` job,
-  `latest` after verification, `cache: false`, the permissions without
+  the tag GoReleaser builds (`GORELEASER_CURRENT_TAG`), `latest` after
+  verification, `cache: false`, the permissions without
   `artifact-metadata`, the verification before Publish, the pinned tools
   without QEMU and a corrected fragment; §9.4 the image's size, Dockerfile and `CMD`, the configuration
   directory, the package formats, scripts, needrestart file and
@@ -1509,7 +1542,8 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - **Signed tags only** (`git tag -s`): needs a local git with a key
   registered on GitHub for every release; the owner chose the workflow. A
   signed tag pushed by hand is still released by a dispatch of
-  `release.yml`, so this can change without a change here.
+  `release.yml`, which builds that tag even on its rc's commit
+  (`GORELEASER_CURRENT_TAG`), so this can change without a change here.
 - **release-please:** its tags are made with `GITHUB_TOKEN` too, it would
   need GoReleaser in the same workflow, and it adds a bot's pull requests.
 - **GoReleaser v2.18.2:** wrong image digest (#7180). v2.18.3 is the
