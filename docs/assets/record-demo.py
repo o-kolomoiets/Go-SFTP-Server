@@ -32,7 +32,7 @@ import termios
 import threading
 import time
 
-W, H = 110, 34
+W, H = 110, 42
 SOCK = "demo"
 CONF = os.path.expanduser("~/.tmux.demo.conf")
 PROMPT = r"\[\e[1;32m\]❯\[\e[0m\] "
@@ -59,7 +59,7 @@ def setup():
     subprocess.run(["tmux", "-L", SOCK, "kill-server"], stderr=subprocess.DEVNULL)
     shell = f"env PS1='{PROMPT}' HISTFILE=/dev/null bash --norc --noprofile"
     tmux("new-session", "-d", "-s", "demo", "-x", str(W), "-y", str(H), "-c", os.path.expanduser("~"), shell)
-    tmux("split-window", "-v", "-t", "demo:0", "-l", str(H - 12), "-c", os.path.expanduser("~"), shell)
+    tmux("split-window", "-v", "-t", "demo:0", "-l", str(H - 20), "-c", os.path.expanduser("~"), shell)
     tmux("select-pane", "-t", "demo:0.0", "-T", "server")
     tmux("select-pane", "-t", "demo:0.1", "-T", "client")
     tmux("select-pane", "-t", "demo:0.1")
