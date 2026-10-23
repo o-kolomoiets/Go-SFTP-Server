@@ -81,6 +81,17 @@ Incompatible changes are prefixed with **BREAKING:**.
   the version's section of CHANGELOG.md (for a pre-release without one,
   the Unreleased section); `.github/scripts/release-notes.sh` extracts it
   and fails when there are no notes (ADR 0012).
+- A release starts with the **Tag release** workflow on `main`: it checks
+  that the version is higher than every release tag, that CHANGELOG.md has
+  its notes and that `ci-ok` passed on the commit, tags that commit
+  (annotated, not signed) and starts the release workflow on the tag. That
+  workflow runs only by dispatch, and only for the highest release tag
+  whose release is not published yet; it builds the man pages,
+  completions and license file in a job without credentials, checks them,
+  and builds, signs and attests the release as a draft. The image's
+  `latest` tag moves only for a stable version, once the verification has
+  passed. The owner publishes the draft; the release is no longer built
+  after it is published (ADR 0012).
 - A missing configuration file is explained: when `--config` or
   `$GOSFTPD_CONFIG` names a file that does not exist, when the
   configuration file is a directory, or when no file is found, the error

@@ -591,9 +591,12 @@ jobs:
   names is missing. Stream B writes the marked blocks, stream D the prose
   around them. In release.yml the step's environment holds only
   `GH_TOKEN`.
-- **`tag.yml`** (`workflow_dispatch`, input `version`; the job runs only
-  on `refs/heads/main`; top-level `permissions: contents: read`, the job
-  `contents: write`, `actions: write`, `checks: read`). Every check runs
+- **`tag.yml`** (`workflow_dispatch`, input `version`; it tags only from
+  `refs/heads/main`: on any other ref the run fails, rather than showing a
+  skipped job that looks like success; top-level `permissions: contents:
+  read`, the job `contents: write`, `actions: write`, `checks: read`). Its
+  checks and API calls are `.github/scripts/tag-release.sh VERSION`,
+  tested against a fake gh in `test/release/`. Every check runs
   before anything is created, because the tag ruleset makes a wrong tag
   permanent: the version matches
   `^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$` and is higher
@@ -601,16 +604,19 @@ jobs:
   after v0.5.0 is refused); CHANGELOG.md has the version's section (a
   pre-release: or a non-empty Unreleased section), which
   `release-notes.sh` checks as the release job does; the `ci-ok` check run
-  succeeded on `github.sha`, the commit the run started on; and the tag
-  does not exist yet, unless it is `github-actions[bot]`'s annotated tag
-  on `github.sha`, left by a run that failed to dispatch, in which case a
-  re-run only dispatches. It creates the annotated tag on that same
+  succeeded on `github.sha`, the commit the run started on (every latest
+  check run of that name is GitHub Actions', completed with success); and
+  the tag does not exist yet, unless it is `github-actions[bot]`'s
+  annotated tag on `github.sha`, left by a run that failed to dispatch, in
+  which case a re-run only dispatches. It creates the annotated tag on that same
   commit, never on `main`'s head read again, which a merge in between
   could have moved to a commit whose `ci-ok` was not checked. It does so
   through the API (`git/tags`, then `git/refs`, tagger
-  `github-actions[bot]`), so no credentials are persisted in a checkout,
-  and runs `gh workflow run release.yml --ref vX.Y.Z`. Inputs reach the
-  script through `env:`, never through `${{ }}` inside `run:`.
+  `github-actions[bot]` with its noreply address, message `gosftpd
+  vX.Y.Z` and the run's URL), so no credentials are persisted in a
+  checkout (the job checks out `github.sha` only for CHANGELOG.md and the
+  scripts), and runs `gh workflow run release.yml --ref vX.Y.Z`. Inputs
+  reach the script through `env:`, never through `${{ }}` inside `run:`.
 - **`verify-release.yml`** (`release: published`, and `workflow_dispatch`
   with a tag; top-level `permissions: contents: read`, the job adds
   `attestations: read`) installs cosign as above, runs the verification
@@ -1529,8 +1535,11 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   `packaging/needrestart.conf`; the unit's `Documentation=` and its check
   in `internal/config/packaging_test.go`;
   `.github/workflows/{release,ci,tag,verify-release}.yml`,
-  `.github/scripts/release-guard.sh` and `release-notes.sh` (tested in
-  `test/release/`); `.github/dependabot.yml`;
+  `.github/scripts/release-guard.sh`, `release-tags.sh` (which the guard
+  and `tag-release.sh` share), `tag-release.sh` (tag.yml),
+  `release-out.sh` (the generate artifact) and `release-notes.sh` (tested
+  in `test/release/`, the gh ones against a fake gh backed by a git
+  repository); `.github/dependabot.yml`;
   `test/packages/`, `test/docker/` (every `FROM` pinned by digest);
   `test/docs/run-block.sh` and the marked blocks of docs/install.md.
 - **C, ephemeral and atmoz:** `internal/atmoz` (parser, mount builder and
