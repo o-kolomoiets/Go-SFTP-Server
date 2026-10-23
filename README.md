@@ -30,7 +30,7 @@
 ## Try it in one minute
 
 ```sh
-go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest   # v0.3.0, needs Go 1.26.5+
+go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest   # v0.4.0, needs Go 1.26.5+
 mkdir -p inbox && gosftpd serve --dir ./inbox                          # as yourself, not root
 sftp -P 2022 "$USER@localhost"                                         # in a second terminal
 ```
@@ -40,14 +40,14 @@ to `./inbox`, under any user name, on port 2022 of every interface (add
 `--listen 127.0.0.1:2022` to keep it on this machine). On first start
 gosftpd creates an ed25519 host key and prints its fingerprint and a
 `known_hosts` line, so you can check what your client is told. No Go
-toolchain? Take a [release archive](#install): one binary of about 7 MB for
+toolchain? Take a [release archive](#install): one binary of 10 to 11 MB for
 Linux or macOS.
 
 <p align="center">
-  <img src="docs/assets/demo.gif" width="760" alt="Terminal recording in two panes. Server pane: gosftpd serve --dir ./inbox --audit-output audit.jsonl prints its version, a newly generated ed25519 host key saved with mode 0600, its SHA256 fingerprint, a known_hosts line, the mount / -> /home/alex/inbox with on_conflict=rename, listen 0.0.0.0:2022 and a connect hint. Client pane: sftp uploads report.pdf twice; ls -l lists report (1).pdf next to report.pdf, both owned by alex; cd .. and pwd still show /; ls /etc says not found. Finally jq prints the audit event from audit.jsonl: fs.upload by alex, path /report.pdf, final_path /report (1).pdf, conflict renamed, 48000 bytes.">
+  <img src="docs/assets/demo.gif" width="760" alt="Terminal recording in two panes. Server pane: gosftpd serve --dir ./inbox --audit-output audit.jsonl prints two Landlock warnings that it covers authorized_keys and audit.jsonl only as single files, landlock: ABI v5 applied, its version, a newly generated ed25519 host key saved with mode 0600, its SHA256 fingerprint, a known_hosts line, the mount / -> /home/alex/inbox with on_conflict=rename, listen 0.0.0.0:2022 and a connect hint. Client pane: sftp uploads report.pdf twice; ls -l lists report (1).pdf next to report.pdf, both owned by alex; cd .. and pwd still show /; ls /etc says not found. Finally jq prints the audit event from audit.jsonl: fs.upload by alex, path /report.pdf, final_path /report (1).pdf, conflict renamed, 48000 bytes.">
 </p>
 <p align="center"><sub>
-  A real session with the v0.3.0 release binary, typed by <a href="docs/assets/record-demo.py">a script</a> you can run to record it again.
+  A real session with the v0.4.0 release binary, typed by <a href="docs/assets/record-demo.py">a script</a> you can run to record it again.
   The second upload becomes <code>report (1).pdf</code>, <code>cd ..</code> goes nowhere, and the audit log says exactly what happened.
 </sub></p>
 
@@ -75,14 +75,17 @@ For anything narrower, such as a partner who may only upload, write a
 <details>
 <summary>What the server prints, and what to do if it stops right away</summary>
 
-The real output of the first start, from the session in the GIF, on a host
-named `vm`:
+The real output of the first start of the v0.4.0 release binary, with the
+command from the GIF, on a host named `vm`:
 
 ```text
-gosftpd v0.3.0 (commit 2bd0b1fb2102, 2026-10-09T21:19:06Z, go1.27.2 linux/amd64)
+time=2026-10-23T14:48:46.093Z level=WARN msg=landlock detail="--authorized-keys: Landlock covers only the file authorized_keys in /home/alex/.ssh, which is a .ssh directory; replaced by rename, it cannot be read until a restart"
+time=2026-10-23T14:48:46.093Z level=WARN msg=landlock detail="audit.output: Landlock covers only the file audit.jsonl in /home/alex, which is the home directory of the user running gosftpd: rotation by rename (logrotate's create, as in docs/audit-log.md) makes the audit log unwritable until a restart; with on_error = fail-closed every new connection is refused; use copytruncate or a directory of its own"
+time=2026-10-23T14:48:46.097Z level=INFO msg="landlock: ABI v5 applied" kernel_abi=7
+gosftpd v0.4.0 (commit ea434242a047, 2026-10-17T15:34:45Z, go1.27.2 linux/amd64)
 host key: /home/alex/.config/gosftpd/ssh_host_ed25519_key (generated, 0600)
-  ED25519 SHA256:abbhjU4ZiDmJE0dNQVwJ4LuCj4L36ufuu5MarxbQs6s
-  known_hosts: [vm]:2022 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHPCKbAEGDs8uNKcEO8EAZCUkEJMOP8XHoDCccnDQCGG
+  ED25519 SHA256:NgSVxclzoIyk8Lr8HXXG7W3xwe6D7ueMMP8winWPNk4
+  known_hosts: [vm]:2022 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDvMdvYRXLcr6+fqfW6cEWLsAgWTSKIvDsTDjUx8Wh9j
 auth:    publickey, 1 keys from /home/alex/.ssh/authorized_keys
 mounts:  / -> /home/alex/inbox (rw, on_conflict=rename)
 listen:  0.0.0.0:2022
@@ -91,6 +94,14 @@ connect: sftp -P 2022 <user>@vm
 
 Compare the fingerprint with the one `sftp` shows on first connect. The
 audit log follows on stdout; the banner and other messages go to stderr.
+
+The first three lines come from [Landlock](docs/security.md#landlock): on
+Linux, once started, gosftpd can open only its folders, its configuration,
+its keys and its audit log. `~/.ssh` and your home directory hold other
+files too, so Landlock covers `authorized_keys` and `audit.jsonl` there as
+single files: if an editor or logrotate replaces one of them by rename,
+gosftpd can't read or write it until a restart. A service keeps these files
+in directories of their own, as the [install guide](docs/install.md) does.
 
 If you have no `~/.ssh/authorized_keys`, gosftpd says so and exits:
 
@@ -110,8 +121,8 @@ must be in your `PATH`.
 > **Alpha.** Every change is fuzzed and run in CI against OpenSSH `sftp` and
 > `scp`, paramiko, rclone and lftp ([the evidence](#proof-not-promises)), but
 > configuration and behavior may still change until the v1.0 compatibility
-> freeze. Read the [hardening guide](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security/hardening.md)
-> before you expose v0.3.0 to the internet.
+> freeze. Read the [hardening guide](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.4.0/docs/security/hardening.md)
+> before you expose v0.4.0 to the internet.
 
 ## Why gosftpd
 
@@ -158,7 +169,7 @@ What it is for:
 
 A drop-box takes files from clients you don't control. Everything in gosftpd
 starts from what such a client must **not** be able to do. All of this is in
-the v0.3.0 release. A client can't:
+the v0.4.0 release. A client can't:
 
 - **Leave the folder.** Each mount is opened as a Go
   [`os.Root`](https://pkg.go.dev/os#Root). `..` stops at the folder's `/`,
@@ -231,7 +242,7 @@ And for you, the person running it:
 Know the limits, too. `os.Root` keeps clients in the folder, but it does not
 cover bind mounts inside a served folder, hard links made on the host, or
 races with symlinks that local users create.
-[Here is exactly what is and isn't covered.](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security.md#limits-of-the-protection)
+[Here is exactly what is and isn't covered.](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.4.0/docs/security.md#limits-of-the-protection)
 Bans are kept in memory and reset on restart, and the limits count
 connections, not their rate: rate-limit new connections in your firewall.
 
@@ -255,6 +266,7 @@ access = { inbox = "upload" }      # list and upload; no reading, deleting or ov
 ```console
 $ chmod 600 gosftpd.toml     # gosftpd refuses a config that group or others can write
 $ gosftpd config validate --check-fs
+warning: landlock: configuration: Landlock covers only the file gosftpd.toml in /home/alex, which is the home directory of the user running gosftpd; replaced by rename, it cannot be read until a restart
 /home/alex/gosftpd.toml: OK (1 mounts, 1 users)
 $ gosftpd serve
 ```
@@ -263,19 +275,25 @@ Run it as a dedicated user that owns `/srv/sftp/inbox` and `/var/lib/gosftpd`
 (or add `create = true` to the mount to have the folder created). If you
 already have a host key, drop `host_key_auto_generate` and it's eight lines.
 
+The warning comes from [Landlock](docs/security.md#which-files-are-covered):
+if an editor saves `gosftpd.toml` by rename, the next reload fails and the
+running configuration stays until a restart. In a directory of its own,
+such as `/etc/gosftpd/config.toml` (which gosftpd also finds on its own),
+the file is covered with its directory, and the warning goes away.
+
 Your partner sees one folder as `/`. Their client says both uploads went to
 `/report.pdf`, yet nothing was replaced, and reading and deleting are refused:
 
 ```console
 sftp> put report.pdf
 Uploading report.pdf to /report.pdf
-report.pdf                                    100%   47KB  42.0MB/s   00:00
+report.pdf                                    100%   47KB  32.4MB/s   00:00
 sftp> put report.pdf
 Uploading report.pdf to /report.pdf
-report.pdf                                    100%   47KB  48.8MB/s   00:00
+report.pdf                                    100%   47KB  19.4MB/s   00:00
 sftp> ls -l
--rw-r-----    1 partner  partner     48000 Oct 11 19:03 report (1).pdf
--rw-r-----    1 partner  partner     48000 Oct 11 19:03 report.pdf
+-rw-r-----    1 partner  partner     48000 Oct 23 14:48 report (1).pdf
+-rw-r-----    1 partner  partner     48000 Oct 23 14:48 report.pdf
 sftp> get report.pdf
 Fetching /report.pdf to report.pdf
 remote open "/report.pdf": Permission denied
@@ -284,27 +302,28 @@ Removing /report.pdf
 remote delete /report.pdf: Permission denied
 ```
 
-And you see what they did. This is the second upload, as gosftpd v0.3.0 wrote
+And you see what they did. This is the second upload, as gosftpd v0.4.0 wrote
 it to the audit log (pretty-printed here):
 
 ```json
 {
-  "time": "2026-10-11T19:03:51.877756975Z",
+  "time": "2026-10-23T14:48:55.416347438Z",
   "level": "INFO",
   "msg": "audit",
-  "conn_id": "7bc79af4f34b75f4",
-  "remote_addr": "127.0.0.1:38934",
+  "conn_id": "9c480db0f93a4706",
+  "remote_addr": "127.0.0.1:34428",
   "local_addr": "127.0.0.1:2022",
   "user": "partner",
-  "session_id": "83aa8a68188c1ebe",
+  "session_id": "2a456101d6542eaa",
   "schema": 1,
   "event": "fs.upload",
+  "mount": "inbox",
   "path": "/report.pdf",
   "final_path": "/report (1).pdf",
   "conflict": "renamed",
   "open_flags": "WRITE+CREAT+TRUNC",
   "bytes": 48000,
-  "duration_ms": 1,
+  "duration_ms": 2,
   "result": "ok"
 }
 ```
@@ -312,7 +331,7 @@ it to the audit log (pretty-printed here):
 The refused download and delete are there too, as `fs.denied` events, and the
 `auth.success` event for the same `conn_id` names the key that logged in
 (`key_fp`). Every key is in the
-[configuration reference](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/configuration.md).
+[configuration reference](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.4.0/docs/configuration.md).
 
 Several partners on one shared upload folder can see each other's file
 names. When that matters, as with payroll, give each partner a folder of
@@ -358,23 +377,23 @@ for a new partner.
 
 A security tool should show its work. This is what runs in CI today:
 
-- **Fuzzed on every change.** 6 fuzz targets in v0.3.0 (9 on `main`): path
-  resolution, confinement on a tree full of symlinks, conflict names, the
-  config parser, `authorized_keys`, and arbitrary SFTP packets against the
-  real handlers; `main` adds certificates, PROXY protocol headers and host
-  key proofs. Each runs 60 s with `-race` on every pull request and 10
-  minutes every night. Fuzzing has already found real bugs, among them a
-  data race in pkg/sftp v1.13 that could crash a server (gosftpd works around
-  it), a config parser panic and an off-by-one in the path length limit.
+- **Fuzzed on every change.** 9 fuzz targets in v0.4.0: path resolution,
+  confinement on a tree full of symlinks, conflict names, the config parser,
+  `authorized_keys`, certificates, PROXY protocol headers, host key proofs,
+  and arbitrary SFTP packets against the real handlers. Each runs 60 s with
+  `-race` on every pull request and 10 minutes every night. Fuzzing has
+  already found real bugs, among them a data race in pkg/sftp v1.13 that
+  could crash a server (gosftpd works around it), a config parser panic and
+  an off-by-one in the path length limit.
 - **Tested against real clients.** Every change runs OpenSSH `sftp` and `scp`
   (9.6p1 and 10.6p1), paramiko 5.0.0, rclone v1.75.0 and lftp 4.9.2 against a
   fresh build: escapes, overwrites, resume, permissions, `kill -9` in the
-  middle of an upload. The latest run on `main` passed more than 170 checks.
+  middle of an upload. The run for v0.4.0 passed more than 170 checks.
   [Details per client.](docs/interop.md)
 - **Crypto checked by ssh-audit.** ssh-audit 3.9.0 reports 0 failures on the
   default policy. Its 2 warnings are for the classic curve25519 key exchange
   (no post-quantum protection), which stays on for clients without ML-KEM.
-- **Coverage with floors.** 90.9% of the code on `main` is covered (unit and
+- **Coverage with floors.** 91.0% of the code of v0.4.0 is covered (unit and
   interop tests merged). CI fails if the auth, config, hooks, sandbox, sftpd
   or vfs packages drop below their floors; auth is at 97.5%.
 - **All the usual gates.** Unit tests with `-race -shuffle=on` on Linux
@@ -385,8 +404,8 @@ A security tool should show its work. This is what runs in CI today:
   (x/crypto, pkg/sftp, BurntSushi/toml, cobra, go-proxyproto, go-landlock
   and their helpers; 9 on macOS), no cgo, no database.
   CI fails any release binary over 12 MiB.
-- **More tests than code.** Over 27k lines of tests for about 22k lines of
-  Go on `main`. Tests also fail if a config key, an audit event or a metric
+- **More tests than code.** Over 28k lines of tests for about 22k lines of
+  Go in v0.4.0. Tests also fail if a config key, an audit event or a metric
   is missing from the docs.
 - **Decisions written down.** A [threat model](docs/security/threat-model.md),
   a [hardening guide](docs/security/hardening.md) and 11
@@ -428,14 +447,14 @@ Quirks and settings per client are in [docs/interop.md](docs/interop.md).
 
 ## Install
 
-**Release archive.** Linux and macOS, amd64 and arm64; one binary of about
-7 MB, nothing else to install (static on Linux).
+**Release archive.** Linux and macOS, amd64 and arm64; one binary of 10 to
+11 MB, nothing else to install (static on Linux).
 
 ```sh
-curl -fsSLO https://github.com/o-kolomoiets/go-sftp-server/releases/download/v0.3.0/gosftpd_0.3.0_linux_amd64.tar.gz
-curl -fsSLO https://github.com/o-kolomoiets/go-sftp-server/releases/download/v0.3.0/checksums.txt
+curl -fsSLO https://github.com/o-kolomoiets/go-sftp-server/releases/download/v0.4.0/gosftpd_0.4.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/o-kolomoiets/go-sftp-server/releases/download/v0.4.0/checksums.txt
 sha256sum --check --ignore-missing checksums.txt
-tar xzf gosftpd_0.3.0_linux_amd64.tar.gz gosftpd
+tar xzf gosftpd_0.4.0_linux_amd64.tar.gz gosftpd
 sudo install gosftpd /usr/local/bin/ && gosftpd version
 ```
 
@@ -450,21 +469,20 @@ go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest
 
 Not there yet: Windows and FreeBSD binaries, a Docker image, deb/rpm
 packages, and signed releases (the checksums are SHA-256 and unsigned).
-From v0.4 the Linux archives carry a systemd unit with its user and
-directories; [docs/install.md](docs/install.md) installs it, with the
-binary in `/usr/bin`. With v0.3.0 any process supervisor works: on SIGTERM
-gosftpd gives running transfers 30 seconds to finish, a second signal stops
-it at once, and v0.3.0 ignores SIGHUP, so restart it to apply a changed
-configuration. To run v0.3.0 as a service under its own user, see its
-[quickstart](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/quickstart.md#running-it-as-a-service) and
-[hardening guide](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.3.0/docs/security/hardening.md).
+The Linux archives carry a systemd unit with its user and directories;
+[docs/install.md](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.4.0/docs/install.md)
+installs it as a service, with the binary in `/usr/bin`. Any other process
+supervisor works too: on SIGTERM gosftpd gives running transfers 30 seconds
+to finish, a second signal stops it at once, and SIGHUP applies a changed
+configuration without dropping connections.
 
 ## Released and on its way
 
-`go install …@latest` and the release archives give you **v0.3.0** (released
-2026-10-09). The `main` branch already has most of **v0.4**:
+`go install …@latest` and the release archives give you **v0.4.0** (released
+2026-10-17); `main` has nothing user-visible beyond it yet. What v0.4.0
+adds to v0.3.0:
 
-| | v0.3.0 (latest release) | `main` (v0.4, unreleased) |
+| | v0.3.0 | v0.4.0 (latest release) |
 |---|:---:|:---:|
 | `serve --dir` with no config file, generated host key | ✓ | ✓ |
 | Users, mounts, `{user}` home folders, 4 presets and 9 permission flags in one TOML file | ✓ | ✓ |
@@ -482,21 +500,23 @@ configuration. To run v0.3.0 as a service under its own user, see its
 | A sandboxed systemd unit (`systemd-analyze security` 1.2) with sysusers and tmpfiles files, [install guide](docs/install.md) | | ✓ |
 | Landlock on Linux, on by default without exec hooks: once started, gosftpd can open only its mounts, configuration, keys and audit log ([security model](docs/security.md#landlock)) | | ✓ |
 
-To try `main` today: `init` sets you up, and `user add --write` adds a
-partner and prints the host, port, host key fingerprint and `sftp` command to
-send them.
+With v0.4.0, `init` sets you up, and `user add --write` adds a partner and
+prints the host, port, host key fingerprint and `sftp` command to send them.
 
 ```sh
-go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@main
 gosftpd init --user alice     # ./gosftpd.toml and a host key, serving ./share
 gosftpd user add partner --key partner.pub --access share=upload --write
 gosftpd serve                 # later, kill -HUP applies user changes
 ```
 
-The metrics listener has no authentication, so keep it on loopback. `main`
+The metrics listener has no authentication, so keep it on loopback. v0.4.0
 has a few breaking changes since v0.3.0; for example, `serve --dir ~` is now
-refused because it would serve your own `authorized_keys`. See the
-[changelog](CHANGELOG.md#unreleased).
+refused because it would serve your own `authorized_keys`. Before you
+upgrade, read [Upgrades](docs/operations.md#upgrades) and the
+[changelog](CHANGELOG.md#040---2026-10-17).
+
+On its way is v0.5: a Docker image, deb/rpm/apk packages, signed releases
+with an SBOM, man pages and FreeBSD binaries (see the [roadmap](#roadmap)).
 
 ## What gosftpd is not
 
@@ -509,19 +529,18 @@ next to OpenSSH (on port 2022 by default), not instead of it.
 
 ## Documentation
 
-These pages describe `main`. For the v0.3.0 release, read them
-[at the v0.3.0 tag](https://github.com/o-kolomoiets/go-sftp-server/tree/v0.3.0/docs):
-v0.3.0 has no `user add --write` and ignores `SIGHUP`.
+These pages describe `main`. For the v0.4.0 release, read them
+[at the v0.4.0 tag](https://github.com/o-kolomoiets/go-sftp-server/tree/v0.4.0/docs).
 
 - [Quickstart](docs/quickstart.md): from nothing to a first upload, and running it as a service
-- [Install as a Linux service](docs/install.md): the systemd unit, its user and directories (on `main`)
+- [Install as a Linux service](docs/install.md): the systemd unit, its user and directories
 - [Configuration](docs/configuration.md): every key, with its default
 - [Security model](docs/security.md), [threat model](docs/security/threat-model.md) and [hardening guide](docs/security/hardening.md)
 - [Audit log](docs/audit-log.md): events, fields and the schema promise
 - [Client compatibility](docs/interop.md): what is tested, per client, and known quirks
-- [Metrics and health checks](docs/metrics.md) and [hooks](docs/hooks.md) (on `main`)
-- [Operations](docs/operations.md): reload, stop, log rotation, backups, upgrades, remounted disks (on `main`)
-- [Recipes](docs/recipes/): [retention](docs/recipes/retention.md) and [volume encryption](docs/recipes/volume-encryption.md) (on `main`)
+- [Metrics and health checks](docs/metrics.md) and [hooks](docs/hooks.md)
+- [Operations](docs/operations.md): reload, stop, log rotation, backups, upgrades, remounted disks
+- [Recipes](docs/recipes/): [retention](docs/recipes/retention.md) and [volume encryption](docs/recipes/volume-encryption.md)
 - [Design decisions](docs/adr/), the [changelog](CHANGELOG.md) and the [release checklist](docs/release-checklist.md)
 
 ## Roadmap
@@ -529,8 +548,8 @@ v0.3.0 has no `user add --write` and ignores `SIGHUP`.
 | Version | Status | What's in it |
 |---|---|---|
 | v0.3.0 | **released** 2026-10-09 | Connection limits and bans, password login, versions, atomic uploads, size limits, fuzzing, ssh-audit in CI |
-| v0.4 | **in progress** on `main` | Done: reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol, a systemd unit, Landlock |
-| v0.5 | planned | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
+| v0.4.0 | **released** 2026-10-17 | Reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol, a systemd unit, Landlock |
+| v0.5 | next | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
 | v1.0 | planned | Compatibility freeze, benchmarks against OpenSSH, OpenSSF Best Practices badge |
 
 The full plan is in [ROADMAP.md](ROADMAP.md), and progress in [TASKS.md](TASKS.md).
@@ -555,7 +574,7 @@ afternoon with `sshd_config`, or one more system account:
 - 💬 **Share your use case.** Partner inbox, device uploads, backup target:
   it shapes the roadmap.
 
-To hear when v0.4 ships, use **Watch → Custom → Releases** at the top of this
+To hear when v0.5 ships, use **Watch → Custom → Releases** at the top of this
 page.
 
 ## License
