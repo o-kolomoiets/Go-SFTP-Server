@@ -53,7 +53,7 @@ const (
 
 // ephemeralConflicts are the flags that --ephemeral cannot be used with:
 // it makes the user, the keys and the configuration itself.
-var ephemeralConflicts = []string{"config", "authorized-keys", "user", "host-key", "state-dir"}
+var ephemeralConflicts = []string{"config", "users-conf", "authorized-keys", "user", "host-key", "state-dir"}
 
 // ephemeral is a running serve --ephemeral.
 type ephemeral struct {

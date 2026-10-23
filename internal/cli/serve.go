@@ -53,12 +53,15 @@ type serveOptions struct {
 	auditOutput    string
 	allowRoot      bool
 	ephemeral      bool
+	usersConf      string
+	// specs are the atmoz user specs given to the root command.
+	specs []string
 }
 
 func newServeCmd() *cobra.Command {
 	var o serveOptions
 	cmd := &cobra.Command{
-		Use:   "serve [--config FILE | --dir [NAME=]PATH... | --ephemeral]",
+		Use:   "serve [--config FILE | --dir [NAME=]PATH... | --ephemeral | --users-conf FILE]",
 		Short: "Serve directories over SFTP",
 		Long: `Serve directories over SFTP.
 
@@ -67,6 +70,13 @@ is accepted with the keys from --authorized-keys and gets full access to the
 directories. Otherwise the configuration file is --config, $GOSFTPD_CONFIG,
 ./gosftpd.toml, /etc/gosftpd/config.toml or <user config dir>/gosftpd/config.toml,
 whichever comes first.
+
+When none of these exists, gosftpd serves the users of atmoz/sftp user specs
+in --users-conf or $SFTP_USERS, and in its container image in
+/etc/sftp/users.conf, as the atmoz/sftp image does (atmoz mode, see
+'gosftpd --help' and docs/migrate-from-atmoz.md). A path that --config or
+$GOSFTPD_CONFIG names must exist; in the image, so must config.toml in a
+mounted /etc/gosftpd.
 
 With --ephemeral, gosftpd serves a new temporary directory, or the one
 --dir names, to the user test, who logs in with a random password or a
@@ -81,29 +91,54 @@ $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
 		Example: `  gosftpd serve --dir ./share
   gosftpd serve --dir inbox=/srv/inbox --dir docs=/srv/docs --read-only
   gosftpd serve --config /etc/gosftpd/config.toml
-  gosftpd serve --ephemeral`,
+  gosftpd serve --ephemeral
+  gosftpd serve --users-conf ./users.conf`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runServe(cmd.Context(), cmd.Flags(), o, os.Getenv, cmd.ErrOrStderr(), cmd.OutOrStdout())
 		},
 	}
-	f := cmd.Flags()
+	serveFlags(cmd.Flags(), &o, false)
+	return cmd
+}
+
+// serveFlags defines the flags of serve on f. With atmoz, only those that
+// apply in atmoz mode (atmozFlags), for the root command's form, whose
+// uploads overwrite by default.
+func serveFlags(f *pflag.FlagSet, o *serveOptions, atmoz bool) {
+	root := f
+	if atmoz {
+		f = pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	}
 	f.StringVar(&o.config, "config", "", "configuration file")
 	f.StringArrayVar(&o.dirs, "dir", nil, "directory to serve without a configuration file, as PATH or NAME=PATH (repeatable; once with --ephemeral)")
 	f.StringVar(&o.authorizedKeys, "authorized-keys", "", "with --dir: authorized_keys file (default ~/.ssh/authorized_keys)")
 	f.StringVar(&o.user, "user", "", "with --dir: accept only this SSH user name (default: any)")
-	f.StringVar(&o.stateDir, "state-dir", "", "with --dir: directory for the generated host key (default <user config dir>/gosftpd)")
+	f.StringVar(&o.stateDir, "state-dir", "", "with --dir or in atmoz mode: directory for the generated host key (default <user config dir>/gosftpd)")
 	f.StringArrayVar(&o.hostKeys, "host-key", nil, "host private key file (repeatable)")
 	o.listen = ":2022"
 	f.Var(&countedString{&o.listen, &o.listenCount}, "listen", "address to listen on (once with --ephemeral, whose default is 127.0.0.1:0)")
 	f.BoolVar(&o.readOnly, "read-only", false, "refuse all modifications on every mount")
-	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject, overwrite or version")
+	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject, overwrite or version (atmoz mode: overwrite)")
 	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
 	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
 	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path (with --ephemeral: stderr or a file path)")
 	f.BoolVar(&o.allowRoot, "allow-root", false, "run even as root (not recommended: run as a dedicated user)")
 	f.BoolVar(&o.ephemeral, "ephemeral", false, "serve a temporary directory to user test, for tests; the connection details go to stdout as one JSON line")
-	return cmd
+	f.StringVar(&o.usersConf, "users-conf", "", "atmoz mode: a users file of atmoz/sftp user specs, one per line (in the image /etc/sftp/users.conf by default)")
+	if !atmoz {
+		return
+	}
+	o.onConflict = string(vfs.ConflictOverwrite)
+	f.Lookup("on-conflict").DefValue = o.onConflict
+	f.Lookup("on-conflict").Usage = "when an upload targets an existing file: overwrite, rename, reject or version"
+	f.Lookup("state-dir").Usage = "directory for the generated host key (default <user config dir>/gosftpd; in the image /etc/ssh's keys, else /var/lib/gosftpd)"
+	f.Lookup("users-conf").Usage = "a users file of atmoz/sftp user specs, one per line (in the image /etc/sftp/users.conf by default)"
+	f.Lookup("listen").Usage = "address to listen on"
+	f.Lookup("audit-output").Usage = "audit log destination: stdout or a file path"
+	for _, name := range atmozFlags {
+		root.AddFlag(f.Lookup(name))
+	}
 }
 
 // countedString is a string flag that counts how often it is given: the
@@ -257,16 +292,22 @@ func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
 func loadConfig(explicit string, getenv func(string) string) (*config.Config, error) {
 	path, err := config.Find(explicit, getenv)
 	if err != nil {
-		if h := configHint(err, getenv); h != nil {
-			err = h
-		}
-		return nil, configError{err}
+		return nil, findError(err, getenv)
 	}
 	c, err := config.Load(path)
 	if err != nil {
 		return nil, configError{err}
 	}
 	return c, nil
+}
+
+// findError is the error of config.Find, with a hint when there is no
+// file or it is a directory.
+func findError(err error, getenv func(string) string) error {
+	if h := configHint(err, getenv); h != nil {
+		err = h
+	}
+	return configError{err}
 }
 
 // zeroConfig builds the configuration of serve --dir. On reload, a missing
@@ -399,11 +440,17 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
 		return err
 	}
+	mode, modeWarns, err := selectMode(flags, o, getenv)
+	if err != nil {
+		return err
+	}
 	var (
 		c   *config.Config
 		eph *ephemeral // serve --ephemeral
+		atm *atmozMode // atmoz mode
 	)
-	if o.ephemeral {
+	switch mode {
+	case modeEphemeral:
 		if c, eph, err = newEphemeral(flags, o, getenv); err != nil {
 			return err
 		}
@@ -413,8 +460,16 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 				err = errors.Join(err, rerr)
 			}
 		}()
-	} else if c, _, err = buildConfig(flags, o, getenv, false); err != nil {
-		return err
+		modeWarns = append(modeWarns, eph.warnings...)
+	case modeAtmoz:
+		if c, atm, err = newAtmoz(flags, o, getenv); err != nil {
+			return err
+		}
+		modeWarns = append(modeWarns, atm.warnings...)
+	case modeFile, modeDir:
+		if c, _, err = buildConfig(flags, o, getenv, false); err != nil {
+			return err
+		}
 	}
 	warns, err := checkConfig(c, true)
 	if err != nil {
@@ -426,9 +481,11 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	if eph != nil {
 		eph.log = log
-		warns = slices.Concat(eph.warnings, warns)
 	}
-	for _, w := range warns {
+	if atm != nil {
+		atm.logMode(ctx, log)
+	}
+	for _, w := range slices.Concat(modeWarns, warns) {
 		log.WarnContext(ctx, "configuration", "detail", w)
 	}
 
@@ -453,7 +510,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if err != nil {
 		return configError{err}
 	}
-	mounts, err := vfs.Open(specs, vfs.Options{Flatten: c.Defaults.Flatten})
+	mounts, err := vfs.Open(specs, vfs.Options{Flatten: c.Defaults.Flatten, Unavailable: c.Unavailable, AllowEmpty: c.Atmoz})
 	if err != nil {
 		return configError{err}
 	}
@@ -561,6 +618,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	if eph != nil {
 		eph.landlocked = sb.Ruleset != nil
 		r.noReload = ephemeralNoReload
+	}
+	if atm != nil {
+		r.noReload = atmozNoReload
 	}
 	dispatcher.Update(hookSpecs)
 	warnOrphans(ctx, log, hookSpecs)
@@ -832,21 +892,27 @@ func printBanner(w io.Writer, b bannerInfo) {
 	if b.c.EphemeralDir != "" {
 		user = ephemeralUser
 	}
+	if b.c.Atmoz && len(b.c.Users) == 1 {
+		user = slices.Collect(maps.Keys(b.c.Users))[0]
+	}
 	for _, m := range b.mounts.Mounts() {
 		mode := "rw"
 		if m.ReadOnly() {
 			mode = "ro"
 		}
-		vpath := "/" + m.Name()
+		vpath := "/" + m.Display()
 		if b.mounts.Flattened() {
 			vpath = "/"
 		}
 		o := m.Options()
-		atomic := ""
+		extra := ""
 		if o.AtomicUploads {
-			atomic = ", atomic_uploads"
+			extra = ", atomic_uploads"
 		}
-		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s%s)\n", vpath, m.HostPath(), mode, o.OnConflict, atomic)
+		if user := atmozUser(b.c, m.Name()); user != "" {
+			extra += ", user " + user
+		}
+		fmt.Fprintf(w, "mounts:  %s -> %s (%s, on_conflict=%s%s)\n", vpath, m.HostPath(), mode, o.OnConflict, extra)
 	}
 	addrs := make([]string, len(b.listeners))
 	for i, ln := range b.listeners {

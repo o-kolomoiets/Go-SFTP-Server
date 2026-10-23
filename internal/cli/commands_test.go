@@ -23,6 +23,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/atmoz"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
@@ -82,6 +83,9 @@ func isolate(t *testing.T) string {
 	t.Setenv(config.EnvListen, "")
 	t.Setenv(config.EnvLogLevel, "")
 	t.Setenv(config.EnvLogFormat, "")
+	// Atmoz mode's sources and conventions (ADR 0012).
+	t.Setenv(atmoz.EnvUsers, "")
+	t.Setenv(envImage, "")
 	return home
 }
 

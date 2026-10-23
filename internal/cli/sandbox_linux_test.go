@@ -46,6 +46,7 @@ const (
 	argsEnv    = "GOSFTPD_SANDBOX_ARGS" // serve's arguments, as JSON
 	rootEnv    = "GOSFTPD_SANDBOX_ROOT" // a directory the child opens as an os.Root before serving
 	swapEnv    = "GOSFTPD_SANDBOX_SWAP" // DIR=TARGET: the child swaps DIR for a link to TARGET before the rules are added
+	homeEnv    = "GOSFTPD_SANDBOX_HOME" // the directory of atmoz mode's homes, for /home
 	// replyMark starts the child's answers on its stdout, which also
 	// carries the audit log.
 	replyMark = "@@ "
@@ -95,6 +96,9 @@ func serveChild(t *testing.T) bool {
 		t.Fatal(err)
 	}
 	startSandbox = sandbox.Start // in this process only
+	if home := os.Getenv(homeEnv); home != "" {
+		atmozHome = home
+	}
 	if swap := os.Getenv(swapEnv); swap != "" {
 		dir, target, _ := strings.Cut(swap, "=")
 		startSandbox = func(ctx context.Context, o sandbox.Options) (sandbox.Result, error) {
