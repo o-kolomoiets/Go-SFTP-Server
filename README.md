@@ -377,10 +377,11 @@ for a new partner.
 
 A security tool should show its work. This is what runs in CI today:
 
-- **Fuzzed on every change.** 9 fuzz targets in v0.4.0: path resolution,
+- **Fuzzed on every change.** 10 fuzz targets: path resolution,
   confinement on a tree full of symlinks, conflict names, the config parser,
-  `authorized_keys`, certificates, PROXY protocol headers, host key proofs,
-  and arbitrary SFTP packets against the real handlers. Each runs 60 s with
+  atmoz user specs (no message may show a password), `authorized_keys`,
+  certificates, PROXY protocol headers, host key proofs, and arbitrary SFTP
+  packets against the real handlers. Each runs 60 s with
   `-race` on every pull request and 10 minutes every night. Fuzzing has
   already found real bugs, among them a data race in pkg/sftp v1.13 that
   could crash a server (gosftpd works around it), a config parser panic and
