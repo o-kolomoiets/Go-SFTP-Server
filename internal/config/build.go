@@ -29,7 +29,7 @@ func (c *Config) MountSpecs() ([]vfs.MountSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", key("mounts", name), err)
 		}
-		specs = append(specs, vfs.MountSpec{Name: name, Path: m.Path, ReadOnly: m.ReadOnly, Create: m.Create, Options: opts})
+		specs = append(specs, vfs.MountSpec{Name: name, Display: m.Display, Path: m.Path, ReadOnly: m.ReadOnly, Create: m.Create, Options: opts})
 	}
 	return specs, nil
 }

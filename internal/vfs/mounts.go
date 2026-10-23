@@ -294,7 +294,14 @@ func ValidMountName(name string) bool {
 
 // MountSpec describes one directory to expose.
 type MountSpec struct {
-	Name string // the top-level directory clients see
+	Name string // the top-level directory clients see, unless Display is set
+	// Display, if set, is the name clients see instead of Name, which then
+	// stays internal: in atmoz mode (ADR 0012) the mounts of
+	// /home/alice/upload and /home/bob/upload are both shown as "upload",
+	// and their names (atmoz1, atmoz2, ...) tell them apart. A session
+	// looks mounts up and lists them by it, and its file infos, audit
+	// events and hook events report it.
+	Display string
 	// Path is the absolute host path. If its last component is {user}, every
 	// user gets their own subdirectory of the parent (a "home" mount).
 	Path     string
@@ -307,15 +314,21 @@ type MountSpec struct {
 type Options struct {
 	// Flatten exposes a user's only mount as "/" instead of "/<name>".
 	Flatten bool
-	// Unavailable names configured mounts that cannot be served now; their
-	// specs are left out. A session granted one finds it unavailable, as a
-	// missing home, and the other mounts keep their paths.
+	// Unavailable names configured mounts that cannot be served now. A
+	// spec of such a name is not opened and only gives the mount's visible
+	// name (Display); otherwise its spec is left out. A session granted one
+	// finds it unavailable, as a missing home, and the other mounts keep
+	// their paths.
 	Unavailable []string
+	// AllowEmpty allows a table without mounts: in atmoz mode a user
+	// without directories logs in to an empty read-only root (ADR 0012).
+	AllowEmpty bool
 }
 
 // Mount is an opened MountSpec.
 type Mount struct {
 	name     string
+	display  string // MountSpec.Display
 	hostPath string
 	readOnly bool
 	create   bool
@@ -356,6 +369,17 @@ func (d *dir) current() bool {
 // Name returns the mount name.
 func (m *Mount) Name() string { return m.name }
 
+// Display returns the name clients see: MountSpec.Display, else the name.
+func (m *Mount) Display() string { return visibleName(m.name, m.display) }
+
+// visibleName returns display, or name when display is empty.
+func visibleName(name, display string) string {
+	if display != "" {
+		return display
+	}
+	return name
+}
+
 // HostPath returns the host directory (for server-side messages only).
 func (m *Mount) HostPath() string { return m.hostPath }
 
@@ -377,11 +401,17 @@ type Table struct {
 	byName  map[string]*Mount
 	flatten bool
 	started time.Time
-	refs    atomic.Int64     // see Acquire
-	missing map[string]error // configured mounts that are unavailable
+	refs    atomic.Int64            // see Acquire
+	missing map[string]missingMount // configured mounts that are unavailable, by name
 	// reopened names the mounts whose directory changed at Reload.
 	reopened []string
 	*registry
+}
+
+// missingMount is a configured mount that is unavailable.
+type missingMount struct {
+	err     error
+	display string // MountSpec.Display, if its spec was given
 }
 
 // registry is the state every generation of a table shares. Its entries
@@ -441,7 +471,7 @@ func sameDir(a, b *os.Root) bool {
 }
 
 func open(specs []MountSpec, opts Options, reg *registry, reload bool) (*Table, []error, error) {
-	if len(specs)+len(opts.Unavailable) == 0 {
+	if len(specs)+len(opts.Unavailable) == 0 && !opts.AllowEmpty {
 		return nil, nil, errors.New("no directories to serve")
 	}
 	if err := ValidateSpecs(specs); err != nil {
@@ -452,22 +482,26 @@ func open(specs []MountSpec, opts Options, reg *registry, reload bool) (*Table, 
 		byName:   make(map[string]*Mount, len(specs)),
 		flatten:  opts.Flatten,
 		started:  time.Now(),
-		missing:  map[string]error{},
+		missing:  map[string]missingMount{},
 		registry: reg,
 	}
 	for _, name := range opts.Unavailable {
-		t.missing[name] = ErrUnavailable
+		t.missing[name] = missingMount{err: ErrUnavailable}
 	}
 	t.refs.Store(1)
 	var warns []error
 	for _, s := range specs {
+		if slices.Contains(opts.Unavailable, s.Name) {
+			t.missing[s.Name] = missingMount{err: ErrUnavailable, display: s.Display}
+			continue
+		}
 		m, err := t.openMount(s)
 		switch {
 		case err != nil && !reload:
 			_ = t.Close()
 			return nil, nil, fmt.Errorf("mount %q: %w", s.Name, err)
 		case err != nil:
-			t.missing[s.Name] = fmt.Errorf("%w: %w", ErrUnavailable, err)
+			t.missing[s.Name] = missingMount{err: fmt.Errorf("%w: %w", ErrUnavailable, err), display: s.Display}
 			warns = append(warns, fmt.Errorf("mount %q is unavailable: %w", s.Name, err))
 			continue
 		}
@@ -481,6 +515,7 @@ func open(specs []MountSpec, opts Options, reg *registry, reload bool) (*Table, 
 func (t *Table) openMount(s MountSpec) (*Mount, error) {
 	m := &Mount{
 		name:     s.Name,
+		display:  s.Display,
 		hostPath: s.Path,
 		readOnly: s.ReadOnly,
 		create:   s.Create,
@@ -588,6 +623,9 @@ func ValidateSpecs(specs []MountSpec) error {
 	for i, s := range specs {
 		if !ValidMountName(s.Name) {
 			errs = append(errs, fmt.Errorf("mount name %q: use letters, digits, '.', '_', '-' and spaces (max 64), not a device name", s.Name))
+		}
+		if s.Display != "" && !ValidMountName(s.Display) {
+			errs = append(errs, fmt.Errorf("mount %q: visible name %q: use letters, digits, '.', '_', '-' and spaces (max 64), not a device name", s.Name, s.Display))
 		}
 		key := strings.ToLower(s.Name)
 		if seen[key] {

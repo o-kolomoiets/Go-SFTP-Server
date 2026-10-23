@@ -191,6 +191,12 @@ type Mount struct {
 	Create   bool   `toml:"create"`
 	ReadOnly bool   `toml:"read_only"`
 	MountOptions
+
+	// Display, if set, is the name clients, the audit log and hooks see
+	// instead of the mount's name (vfs.MountSpec.Display): atmoz mode
+	// names its mounts atmoz1, atmoz2, ... and shows each under its
+	// directory's name (ADR 0012). Not a configuration key.
+	Display string `toml:"-"`
 }
 
 // User is a [users.NAME] table.

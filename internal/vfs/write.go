@@ -244,7 +244,7 @@ func (h *WriteHandle) Fresh() bool {
 
 // Located returns the file of a closed upload with its identity, for hooks.
 func (h *WriteHandle) Located() Where {
-	return Where{Mount: h.v.m.name, HostPath: h.v.hostPath(h.rel), Info: h.info}
+	return Where{Mount: h.v.name(), HostPath: h.v.hostPath(h.rel), Info: h.info}
 }
 
 // Close finishes the upload. When aborted (the connection broke) and no byte

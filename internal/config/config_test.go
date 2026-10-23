@@ -278,6 +278,30 @@ func TestValidateEphemeral(t *testing.T) {
 	}
 }
 
+// TestMountSpecsDisplay: a mount's visible name reaches vfs, and is not a
+// configuration key.
+func TestMountSpecsDisplay(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	dir := t.TempDir()
+	c.AddMount("atmoz1", filepath.Join(dir, "a")).Display = "upload"
+	c.AddMount("docs", filepath.Join(dir, "b"))
+	specs, err := c.MountSpecs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 2 || specs[0].Name != "atmoz1" || specs[0].Display != "upload" || specs[1].Display != "" {
+		t.Errorf("specs = %+v", specs)
+	}
+	out, err := c.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"upload"`) || strings.Contains(strings.ToLower(string(out)), "\ndisplay") {
+		t.Errorf("Encode shows the visible name:\n%s", out)
+	}
+}
+
 func TestValidateMissingVersionAndWarnings(t *testing.T) {
 	t.Parallel()
 
