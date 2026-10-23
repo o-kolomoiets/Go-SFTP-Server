@@ -1,6 +1,7 @@
 # GoReleaser v2.19.0 configuration (ADR 0012): archives for Linux, macOS and
-# FreeBSD, checksums.txt, the image ghcr.io/o-kolomoiets/gosftpd and a draft
-# GitHub release. Windows follows once the isolation tests pass there (M3b).
+# FreeBSD, deb, rpm and Arch packages, checksums.txt, the image
+# ghcr.io/o-kolomoiets/gosftpd and a draft GitHub release. Windows follows
+# once the isolation tests pass there (M3b).
 # Check with: goreleaser check && goreleaser release --snapshot --clean
 # (the image needs Docker with buildx; without it add --skip=docker).
 version: 2
@@ -75,8 +76,75 @@ archives:
 
 checksum: { name_template: checksums.txt, algorithm: sha256 }
 
-# The SBOMs and signatures (sboms, signs) and the packages (nfpms) go here,
-# in this order (ADR 0012).
+# The SBOMs and signatures (sboms, signs) go here (ADR 0012).
+
+# deb, rpm and Arch packages of the Linux build: the files of the Linux
+# archive in the layout docs/install.md gives, and the documentation. No
+# apk: Alpine has no systemd (ADR 0012). Every entry has a fixed mode and
+# time, and owner and group root; postinstall gives config.toml and
+# users.d to the group gosftpd, which does not exist when the package is
+# unpacked. The scripts never enable, start or restart the service.
+nfpms:
+  - id: packages
+    ids: [gosftpd]
+    package_name: gosftpd
+    formats: [deb, rpm, archlinux]
+    maintainer: gosftpd maintainers # no email address (ADR 0012)
+    vendor: gosftpd
+    homepage: https://github.com/o-kolomoiets/go-sftp-server
+    license: Apache-2.0
+    description: SFTP drop-box server with an audit log
+    section: net
+    bindir: /usr/bin
+    mtime: "{{ .CommitDate }}"
+    contents:
+      - { src: packaging/systemd/gosftpd.service, dst: /usr/lib/systemd/system/gosftpd.service, file_info: &pinfo { mode: 0644, mtime: "{{ .CommitDate }}" } }
+      - { src: packaging/gosftpd.sysusers, dst: /usr/lib/sysusers.d/gosftpd.conf, file_info: *pinfo }
+      - { src: packaging/gosftpd.tmpfiles, dst: /usr/lib/tmpfiles.d/gosftpd.conf, file_info: *pinfo }
+      # The template postinstall copies where systemd lacks Type=notify-reload.
+      - { src: packaging/systemd/legacy-notify.conf, dst: /usr/share/gosftpd/legacy-notify.conf, file_info: *pinfo }
+      # A conffile in deb, %config(noreplace) in rpm, backup in Arch.
+      - { src: packaging/config.toml, dst: /etc/gosftpd/config.toml, type: "config|noreplace", file_info: { mode: 0640, mtime: "{{ .CommitDate }}" } }
+      # The include directory exists at the first start, so that under
+      # Landlock the first user add --write needs only a reload.
+      - { dst: /etc/gosftpd/users.d, type: dir, file_info: { mode: 0750, mtime: "{{ .CommitDate }}" } }
+      # The package's own directories: rpm owns, and removes once empty,
+      # only those listed (deb and Arch list every parent directory).
+      - { dst: /etc/gosftpd, type: dir, file_info: &dinfo { mode: 0755, mtime: "{{ .CommitDate }}" } }
+      - { dst: /usr/share/gosftpd, type: dir, file_info: *dinfo }
+      - { dst: /usr/share/doc/gosftpd, type: dir, file_info: *dinfo }
+      # needrestart would restart gosftpd after an apt run (Ubuntu).
+      - { src: packaging/needrestart.conf, dst: /etc/needrestart/conf.d/gosftpd.conf, type: "config|noreplace", packager: deb, file_info: *pinfo }
+      - { src: internal/config/example-full.toml, dst: /usr/share/doc/gosftpd/config.example.toml, file_info: *pinfo }
+      - { src: LICENSE, dst: /usr/share/doc/gosftpd/LICENSE, file_info: *pinfo }
+      - { src: out/THIRD_PARTY_LICENSES, dst: /usr/share/doc/gosftpd/THIRD_PARTY_LICENSES, file_info: *pinfo }
+      - { src: "out/man/*.1.gz", dst: /usr/share/man/man1/, file_info: *pinfo }
+      - { src: out/completions/gosftpd.bash, dst: /usr/share/bash-completion/completions/gosftpd, file_info: *pinfo }
+      - { src: out/completions/gosftpd.fish, dst: /usr/share/fish/vendor_completions.d/gosftpd.fish, file_info: *pinfo }
+      - { src: out/completions/_gosftpd, dst: /usr/share/zsh/vendor-completions/_gosftpd, packager: deb, file_info: *pinfo }
+      - { src: out/completions/_gosftpd, dst: /usr/share/zsh/site-functions/_gosftpd, packager: rpm, file_info: *pinfo }
+      - { src: out/completions/_gosftpd, dst: /usr/share/zsh/site-functions/_gosftpd, packager: archlinux, file_info: *pinfo }
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+      postremove: packaging/scripts/postremove.sh
+    archlinux:
+      packager: gosftpd maintainers
+      scripts:
+        postupgrade: packaging/scripts/postinstall.sh # pacman runs post_upgrade, not post_install, on an upgrade
+    rpm:
+      buildhost: gosftpd # nfpm takes the host name otherwise
+    overrides:
+      deb:
+        # legacy-notify.conf reloads with /bin/kill, which a minimal Debian
+        # 12 lacks.
+        dependencies: [procps]
+      archlinux:
+        # nfpm v2.48.0 puts the pre-release into an Arch pkgver only with an
+        # epoch: without one v0.5.0-rc.1 would be 0.5.0-1, the final's. Epoch
+        # 0 is what pacman assumes without one: 0:0.5.0rc.1-1 sorts below
+        # 0:0.5.0-1.
+        epoch: "0"
 
 # linux/amd64 and linux/arm64 from packaging/docker/Dockerfile, which copies
 # the Linux binary and the empty directories make generate creates. Only

@@ -4,7 +4,7 @@
 # systemd before 253: https://github.com/o-kolomoiets/go-sftp-server/blob/main/docs/install.md
 [Unit]
 Description=gosftpd SFTP server
-Documentation=https://github.com/o-kolomoiets/go-sftp-server/blob/main/docs/install.md
+Documentation=man:gosftpd(1) https://github.com/o-kolomoiets/go-sftp-server/blob/main/docs/install.md
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor=/srv/sftp

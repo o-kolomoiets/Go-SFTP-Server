@@ -15,7 +15,7 @@ Incompatible changes are prefixed with **BREAKING:**.
   `internal/cli/gendocs`, from the command definitions, dated by the
   commit (`SOURCE_DATE_EPOCH`), so that the same commit gives the same
   files. Every release archive carries them in `man/` and `completions/`;
-  the packages will install them (ADR 0012).
+  the packages install them (ADR 0012).
 - `THIRD_PARTY_LICENSES`: `make generate` also writes the name, version,
   license and license text of every Go module in the Linux binary into
   `out/THIRD_PARTY_LICENSES`, with go-licenses v2.0.1 (a tool in
@@ -40,8 +40,27 @@ Incompatible changes are prefixed with **BREAKING:**.
   Docker Quickstart and a compose file with a read-only root file system,
   which a CI job runs against the image on amd64 and arm64, together with
   a reload and the hint for a missing configuration (ADR 0012).
+- deb, rpm and Arch packages for amd64 and arm64 (no apk: Alpine has no
+  systemd). They install the files of the Linux archive in the layout
+  docs/install.md gives (`/etc/gosftpd/config.toml` as a conffile,
+  `%config(noreplace)` or Arch `backup` entry), an empty
+  `/etc/gosftpd/users.d`, the man pages, the completions, the reference
+  configuration and the license files. Their scripts create the user and
+  the directories, give `config.toml` and `users.d` to the group gosftpd,
+  and install the drop-in for systemd before 253 where systemd lacks
+  `Type=notify-reload` (and remove it where it has it, and with the
+  package). They never enable, start or restart the service, also not on
+  an upgrade, and the deb's `/etc/needrestart/conf.d/gosftpd.conf` keeps
+  needrestart (Ubuntu) from restarting it. The deb depends on procps, whose
+  `kill` the drop-in reloads with. A CI job installs, reloads, upgrades
+  and removes them under systemd on Ubuntu 24.04 (amd64 and arm64, with
+  needrestart), Debian 12 and 13, EL9 and Arch, and installs them over the
+  archive install (ADR 0012).
 
 ### Changed
+
+- The systemd unit's `Documentation=` names the man page `gosftpd(1)`
+  first, then docs/install.md.
 
 - Release archives are reproducible: every entry belongs to root (uid 0)
   with mode 0644, or 0755 for the binary, and the time of the commit, so

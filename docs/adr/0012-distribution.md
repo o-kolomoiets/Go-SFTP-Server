@@ -792,6 +792,13 @@ CMD ["serve"]
   address and no repository variable (the `NFPM_MAINTAINER` variable of
   ROADMAP §9.3 is dropped). `dpkg -i` accepts it (Debian 12 and 13);
   lintian was not run.
+- **Versions:** a pre-release sorts below its final in every format. deb
+  and rpm get `0.5.0~rc.1`. nfpm v2.48.0 puts the pre-release into an
+  Arch `pkgver` only with an epoch: without one `v0.5.0-rc.1` became
+  `0.5.0-1`, the final's (found in the implementation). The Arch override
+  sets epoch 0, which pacman assumes without one, so the rc is
+  `0:0.5.0rc.1-1`, below `0:0.5.0-1` (`vercmp`). `goreleaser-check`
+  checks the three versions.
 
 ```yaml
 nfpms:
@@ -821,6 +828,8 @@ nfpms:
     overrides:
       deb:
         dependencies: [procps]
+      archlinux:
+        epoch: "0"   # nfpm v2.48.0 puts the pre-release into an Arch pkgver only with an epoch
 ```
 
 | Path | Source and notes |
@@ -832,6 +841,7 @@ nfpms:
 | `/usr/share/gosftpd/legacy-notify.conf` | `packaging/systemd/legacy-notify.conf`, an inactive template that postinstall copies |
 | `/etc/gosftpd/config.toml` | `packaging/config.toml`, `type: config\|noreplace`, 0640 (a conffile in deb, `%config(noreplace)` in rpm, `backup` in Arch). Packages carry owner names, and the group does not exist at unpack time, so the file lands root:root and postinstall changes the group |
 | `/etc/gosftpd/users.d/` | `type: dir`, 0750, group changed by postinstall. Without it the first `user add --write` needs a restart under Landlock, because the include directory did not exist at start (reproduced) |
+| `/etc/gosftpd/`, `/usr/share/gosftpd/`, `/usr/share/doc/gosftpd/` | `type: dir`, 0755: rpm owns, and removes once empty, only the directories a package lists; deb and Arch list every parent directory anyway |
 | `/etc/needrestart/conf.d/gosftpd.conf` (deb only, `packager: deb`) | `packaging/needrestart.conf`, `type: config\|noreplace`, 0644: `$nrconf{override_rc}{qr(^gosftpd\.service$)} = 0;` (see below) |
 | `/usr/share/doc/gosftpd/config.example.toml` | `internal/config/example-full.toml` (§6.6) |
 | `/usr/share/doc/gosftpd/LICENSE`, `THIRD_PARTY_LICENSES` | `LICENSE`, `out/THIRD_PARTY_LICENSES` |
@@ -926,7 +936,7 @@ nfpms:
     `sudo pacman -U --overwrite /usr/bin/gosftpd --overwrite
     /usr/lib/systemd/system/gosftpd.service --overwrite
     /usr/lib/sysusers.d/gosftpd.conf --overwrite
-    /usr/lib/tmpfiles.d/gosftpd.conf gosftpd-*.pkg.tar.zst`, or delete
+    /usr/lib/tmpfiles.d/gosftpd.conf ./gosftpd_*.pkg.tar.zst`, or delete
     those four files first; it keeps the edited `config.toml` and writes
     `config.toml.pacnew`.
   - All formats: `sudo rm /usr/local/bin/gosftpd` if it exists (it comes

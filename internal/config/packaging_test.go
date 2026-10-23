@@ -4,9 +4,11 @@ package config
 
 import (
 	"bufio"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -173,12 +175,14 @@ func TestPackagingAgrees(t *testing.T) {
 	if got, want := unit.one(t, "Service.ExecStart"), "/usr/bin/gosftpd serve --config /etc/gosftpd/config.toml"; got != want {
 		t.Errorf("ExecStart=%s, want %s", got, want)
 	}
-	// docs/install.md is the documentation until the man page exists (M5).
-	doc := unit.one(t, "Unit.Documentation")
-	if !strings.HasPrefix(doc, "https://github.com/o-kolomoiets/go-sftp-server/blob/main/") {
-		t.Errorf("Documentation=%s", doc)
-	} else if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(strings.TrimPrefix(doc, "https://github.com/o-kolomoiets/go-sftp-server/blob/main/")))); err != nil {
-		t.Errorf("Documentation=%s: %v", doc, err)
+	// The man page that the packages install (make generate writes
+	// gosftpd.1), then docs/install.md (ADR 0012).
+	const blob = "https://github.com/o-kolomoiets/go-sftp-server/blob/main/"
+	doc := unit.words("Unit.Documentation")
+	if len(doc) != 2 || doc[0] != "man:gosftpd(1)" || !strings.HasPrefix(doc[1], blob) {
+		t.Errorf("Documentation=%q, want man:gosftpd(1) and a page of this repository", doc)
+	} else if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(strings.TrimPrefix(doc[1], blob)))); err != nil {
+		t.Errorf("Documentation=%s: %v", doc[1], err)
 	}
 
 	// The audit log is in LogsDirectory=, the host keys in StateDirectory=.
@@ -283,6 +287,103 @@ func TestLegacyNotifyDropIn(t *testing.T) {
 	for k, v := range want {
 		if !slices.Equal(u[k], v) {
 			t.Errorf("%s=%q, want %q", k, u[k], v)
+		}
+	}
+}
+
+// The scripts of the deb, rpm and Arch packages (ADR 0012) run in CI only on
+// the systems of the packages job; this checks what can drift without a
+// package: postinstall's probe is the documented one, no script enables,
+// starts or restarts the service, preremove skips an upgrade by "$1",
+// postremove deletes the drop-in by the unit file and not by "$1", every
+// file of the package they use is in .goreleaser.yaml, and the deb's
+// needrestart file names exactly gosftpd.service.
+func TestPackageScripts(t *testing.T) {
+	t.Parallel()
+
+	read := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	// scripts holds each script without its comment lines.
+	scripts := map[string]string{}
+	for _, name := range []string{"postinstall", "preremove", "postremove"} {
+		s := read("packaging/scripts/" + name + ".sh")
+		if !strings.HasPrefix(s, "#!/bin/sh\n") || !strings.Contains(s, "\nset -e\n") {
+			t.Errorf("%s.sh: want #!/bin/sh and set -e", name)
+		}
+		var code strings.Builder
+		for line := range strings.Lines(s) {
+			if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+				code.WriteString(line)
+			}
+		}
+		scripts[name] = code.String()
+	}
+
+	// The probe: the same unit and the same message as docs/install.md and
+	// the comment of legacy-notify.conf.
+	probe := regexp.MustCompile(`printf '\[Unit\][^']*' >"\$d/gosftpd-probe\.service"|grep -q '[^']*'`)
+	want := probe.FindAllString(read("docs/install.md"), -1)
+	if len(want) != 2 {
+		t.Fatalf("docs/install.md: the probe has %q", want)
+	}
+	for name, text := range map[string]string{"postinstall.sh": scripts["postinstall"], "legacy-notify.conf": read("packaging/systemd/legacy-notify.conf")} {
+		if got := probe.FindAllString(text, -1); !slices.Equal(got, want[:len(got)]) || len(got) == 0 {
+			t.Errorf("%s: the probe is %q, docs/install.md's %q", name, got, want)
+		}
+	}
+
+	// systemctl: only daemon-reload, and on a removal disable --now.
+	systemctl := regexp.MustCompile(`\bsystemctl((?:\s+-{0,2}[a-z][a-z.-]*)*)`)
+	allowed := map[string][]string{
+		"postinstall": {"daemon-reload"},
+		"preremove":   {"disable --now gosftpd.service"},
+		"postremove":  {"daemon-reload"},
+	}
+	for name, s := range scripts {
+		var calls []string
+		for _, m := range systemctl.FindAllStringSubmatch(s, -1) {
+			calls = append(calls, strings.TrimSpace(m[1]))
+		}
+		if !slices.Equal(calls, allowed[name]) {
+			t.Errorf("%s.sh runs systemctl %q, want only %q", name, calls, allowed[name])
+		}
+		for _, verb := range []string{"service gosftpd", "invoke-rc.d", "deb-systemd-invoke", "try-restart"} {
+			if strings.Contains(s, verb) {
+				t.Errorf("%s.sh uses %s", name, verb)
+			}
+		}
+	}
+	if !strings.Contains(scripts["preremove"], "case \"$1\" in\nupgrade | failed-upgrade | 1) exit 0 ;;\nesac\n") {
+		t.Error(`preremove.sh does not skip an upgrade: deb passes "upgrade" and rpm 1`)
+	}
+	if strings.Contains(scripts["postremove"], "$1") ||
+		!regexp.MustCompile(`(?s)\nif \[ ! -e /usr/lib/systemd/system/gosftpd\.service \]; then\n\trm -f /etc/systemd/system/gosftpd\.service\.d/legacy-notify\.conf\n.*?\nfi\n`).MatchString(scripts["postremove"]) {
+		t.Error("postremove.sh must delete the drop-in only once the unit file is gone, not by $1")
+	}
+
+	// The files of the package that the scripts use.
+	goreleaser := read(".goreleaser.yaml")
+	for _, p := range regexp.MustCompile(`/(?:etc/gosftpd|usr)/[A-Za-z0-9/._-]+`).FindAllString(strings.Join(slices.Collect(maps.Values(scripts)), "\n"), -1) {
+		if !strings.Contains(goreleaser, "dst: "+p+",") && !strings.Contains(goreleaser, "dst: "+p+" ") {
+			t.Errorf("the scripts use %s, which .goreleaser.yaml does not install", p)
+		}
+	}
+
+	// needrestart reads Perl; the regular expression is also Go's.
+	m := regexp.MustCompile(`(?m)^\$nrconf\{override_rc\}\{qr\((.+)\)\} = 0;$`).FindStringSubmatch(read("packaging/needrestart.conf"))
+	if m == nil {
+		t.Fatal("packaging/needrestart.conf does not set $nrconf{override_rc}{qr(...)} = 0")
+	}
+	re := regexp.MustCompile(m[1])
+	for unit, match := range map[string]bool{"gosftpd.service": true, "xgosftpd.service": false, "gosftpdXservice": false, "gosftpd.service.d": false} {
+		if re.MatchString(unit) != match {
+			t.Errorf("needrestart.conf: qr(%s) matches %s: %t", m[1], unit, !match)
 		}
 	}
 }
