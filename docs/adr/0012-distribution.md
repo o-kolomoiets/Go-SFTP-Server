@@ -1,13 +1,12 @@
 # ADR 0012: Distribution: releases, signatures, image, packages, ephemeral mode and atmoz compatibility
 
 - **Status:** proposed, 2026-10-23; amends ROADMAP §4.5 (tool versions),
-  §5 M5 (items, Definition of Done, estimate), §6.1 item 4 (`{user}`
-  before the last path component), §6.7 (the root-level spec form), §9.1,
-  §9.3, §9.4, §9.5, §9.6 (the local snapshot), §10 (the Docker
-  Quickstart mounts a directory) and decision D13, ADR 0011 (the unit's
-  `Documentation=`; the packages remove the legacy drop-in only once the
-  unit is gone; the Landlock rules of a mount with `{user}` before the last
-  component) and docs/release-checklist.md
+  §5 M5 (items, Definition of Done, the estimate: 9–12 pd), §6.7 (the
+  root-level spec form), §9.1, §9.3, §9.4, §9.5, §9.6 (the local
+  snapshot), §10 (the Docker Quickstart mounts a directory), the post-1.0
+  backlog and decision D13, ADR 0011 (the unit's `Documentation=`; the
+  packages remove the legacy drop-in only once the unit is gone) and
+  docs/release-checklist.md
 - **Context:** ROADMAP M5 asks for a full `.goreleaser.yaml`, a distroless
   image in GHCR, deb, rpm, apk and Arch packages, keyless cosign
   signatures, SBOMs, attestations, signed git tags, `THIRD_PARTY_LICENSES`,
@@ -35,9 +34,12 @@
   volumes and with `--user 1000:1000` and accepted an sftp upload. The owner
   decided two questions: tags are created by a workflow, not signed (Q1),
   and the repository keeps its name `o-kolomoiets/Go-SFTP-Server` (Q2).
-  Three design reviews (supply chain, operations and packaging, CLI and UX)
-  confirmed 31 findings, each checked by a second reviewer; this version
-  takes them in.
+  The design was reviewed twice, each finding checked by a second
+  reviewer: in the first round three reviews (supply chain, operations and
+  packaging, CLI and UX) confirmed 31 findings; in the second, reviews of
+  the first round's fixes, of coherence and scope, and of new risks
+  confirmed 25, two of them only in part. This version takes in both
+  rounds.
 
 ## Decision
 
@@ -48,15 +50,16 @@
   `0.5.0-rc.1`). `tag.yml` checks the version and the commit the run
   started on (`github.sha`, `main`'s head at that moment), creates the
   annotated tag `vX.Y.Z` on that commit and starts `release.yml` on the
-  tag's ref. `release.yml` checks the tag again, generates the man pages,
-  completions and license file in a job without credentials, and runs
-  GoReleaser, which creates a **draft** release and uploads the assets;
-  the attestations follow, their provenance file and the image digests are
-  added to the draft, and the job runs the verification commands of
-  docs/install.md against what it built and pushed. The owner checks the
-  draft and presses **Publish**; publishing starts `verify-release.yml`,
-  which runs the same commands against the published assets and pulls the
-  image anonymously.
+  tag's ref. `release.yml` checks that the tag is the highest release tag
+  and has no published release, generates the man pages, completions and
+  license file in a job without credentials, and runs GoReleaser, which
+  creates a **draft** release and uploads the assets; the attestations
+  follow, their provenance file and the image digests are added to the
+  draft, the job runs the verification commands of docs/install.md against
+  what it built and pushed and, for a stable version, then moves
+  `latest`. The owner checks the draft and presses **Publish**; publishing
+  starts `verify-release.yml`, which runs the same commands against the
+  published assets and pulls the image anonymously.
 - **Tags are not signed.** A tag created through the API with
   `GITHUB_TOKEN` cannot carry the owner's signature. What a signed tag was
   meant to give comes from elsewhere: a `v*` tag ruleset that blocks
@@ -64,26 +67,21 @@
   and cosign signatures and attestations whose identity names the workflow
   file and `refs/tags/vX.Y.Z`. This replaces ROADMAP M5's "signed git
   tags".
-- **A signed tag still works.** `release.yml` also runs on a pushed `v*`
-  tag, so `git tag -s vX.Y.Z && git push origin vX.Y.Z` from a machine with
-  a signing key registered on GitHub runs the same pipeline with the same
-  identity. `release.yml` repeats the checks for a pushed tag (`verify-tag`
-  under Workflows): such a tag never passes through `tag.yml`, and the
-  certificate binds only the tag name, so a build of a commit that is not
-  on `main`, whose `ci-ok` failed or that has no CHANGELOG section would
-  verify like a real one. These checks guard against mistakes, not against
-  a holder of write access: `release.yml` is read from the tagged commit,
-  which such a person can change, so who may create `v*` tags is what
-  protects the release identity.
+- **A tag made another way** (signed and pushed by the owner, or created by
+  hand if `tag.yml` cannot create it) is released by running `release.yml`
+  on that tag (**Run workflow** with the tag selected, or `gh workflow run
+  release.yml --ref vX.Y.Z`); `tag.yml`'s checks are then the owner's
+  responsibility. `release.yml` has no `push: tags` trigger (see
+  Alternatives).
 - **Why a workflow dispatch.** Events caused by `GITHUB_TOKEN` start no
   workflows, except `workflow_dispatch` and `repository_dispatch` (GitHub's
   documented exception; docs.github.com was not reachable from the
   research environment). So `tag.yml` starts `release.yml` explicitly with
   `gh workflow run release.yml --ref vX.Y.Z`. On that ref the OIDC
   `job_workflow_ref`, and with it the certificate identity, should be
-  `o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml@refs/tags/vX.Y.Z`,
-  as for a pushed tag; this is inferred, and the verification step of the
-  rc release checks it before anything is published.
+  `o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml@refs/tags/vX.Y.Z`;
+  this is inferred, and the verification step of the rc release checks it
+  before anything is published.
 - **Why a draft.** GoReleaser always creates a release as a draft, uploads,
   then publishes it unless `release.draft` is true; a release that already
   exists keeps its draft state, and once a release is immutable GoReleaser
@@ -97,16 +95,20 @@
   into a file and passes it with `goreleaser release --release-notes FILE`
   (the flag exists in v2.19.0). `changelog.disable: true` stays.
 - **Images are public before the release is.** `release.yml` pushes the
-  image tags while the release is still a draft. `latest` moves only to
-  the highest stable version (see the next section), and a run for a tag
-  whose release is already published stops before building (`verify-tag`).
-  Otherwise a re-run or a dispatch for a published release would push and
-  sign a rebuilt image (images are not reproducible) under its tags, and a
-  run on an older tag would move `latest` backwards. A re-run while the
-  release is still a draft replaces the draft and its images, which is
-  what a re-run is for. The first run is `v0.5.0-rc.1`: a pre-release gets no
-  `latest` tag. A draft that is deleted instead of published leaves its
-  image versions in GHCR; the owner deletes them by hand.
+  `vX.Y.Z` image while the release is still a draft and, for a stable
+  version, points `latest` at it once the verification step has passed
+  (see GoReleaser configuration). A guard in both jobs (Workflows) stops
+  the run unless the tag is the highest release tag and has no published
+  release; otherwise a re-run or a dispatch for a published release would
+  push and sign a rebuilt image (images are not reproducible) under its
+  tag, and a run on an older tag would move `latest` backwards. A re-run
+  while the release is still a draft replaces the draft and its image,
+  which is what a re-run is for. The first run is `v0.5.0-rc.1`: a
+  pre-release never moves `latest`. A draft that is deleted instead of
+  published leaves its image versions in GHCR; the owner deletes them by
+  hand, and for a stable draft first points `latest` back to the previous
+  release's digest with `docker buildx imagetools create`, because
+  deleting a version deletes every tag on it.
 
 ### GoReleaser configuration
 
@@ -117,24 +119,24 @@ manifest digest for `dockers_v2` (upstream #7180, fixed in v2.18.3), so
 `docker_signs` `${artifact}@${digest}` and `digests.txt` would name an
 object that cannot be pulled. The fallback is v2.18.3 (2026-10-09,
 `1942d44355492f44cd3774c57bd3c27fe544dfe9`). Dependabot does not update
-the `version:` input, `cosign-release:` or `syft-version:`; the release
-checklist names them. nfpm v2.48.0 is built into v2.19.0. The file, shortened
+the `version:` input, `cosign-release:`, `syft-version:` or the BuildKit
+image in `driver-opts`; the release checklist names them. nfpm v2.48.0 is
+built into v2.19.0. The file, shortened
 where a comment says so (the full `nfpms` block is under Packages):
 
 ```yaml
 version: 2
 project_name: gosftpd
 
-# CI and local snapshots run the hooks; release.yml runs them in its
-# generate job, without credentials, and passes --skip=before (Workflows).
+# CI and local snapshots run the hooks; release.yml runs the same two
+# commands in its generate job, without credentials, and passes
+# --skip=before (Workflows).
 before:
   hooks:
     - go mod tidy -diff
-    # Man pages and completions into out/ (ignored by git), dated by the commit.
-    - sh -c 'SOURCE_DATE_EPOCH={{ .CommitTimestamp }} go generate ./...'
-    - sh -c 'mkdir -p out && GOOS=linux GOROOT="$(go env GOROOT)" go tool -modfile=tools/go.mod go-licenses report ./cmd/gosftpd --ignore github.com/o-kolomoiets/go-sftp-server --template=packaging/third_party_licenses.tpl > out/THIRD_PARTY_LICENSES'
-    # Empty directories that the Dockerfile copies with their owner and mode.
-    - mkdir -p out/docker/empty out/docker/home-root/home
+    # Man pages, completions and THIRD_PARTY_LICENSES into out/ (ignored by
+    # git), and the empty directories the Dockerfile copies.
+    - make generate
 
 # Linux apart, so that only the Linux archives carry the packaging files.
 builds:
@@ -200,10 +202,7 @@ dockers_v2:
     dockerfile: packaging/docker/Dockerfile
     extra_files: [out/docker]
     images: [ghcr.io/o-kolomoiets/gosftpd]
-    tags:
-      - "v{{ .Version }}"
-      # Only for the highest stable tag; IS_LATEST is set by release.yml.
-      - '{{ if and (not .Prerelease) (eq (index .Env "IS_LATEST") "true") }}latest{{ end }}'
+    tags: ["v{{ .Version }}"]   # latest: set by release.yml after verification
     platforms: [linux/amd64, linux/arm64]
     labels:
       org.opencontainers.image.source: https://github.com/o-kolomoiets/Go-SFTP-Server
@@ -238,26 +237,37 @@ changelog: { disable: true }
 - **FreeBSD** amd64 and arm64 join darwin in the non-Linux group: Tier 2,
   cross-built and not tested (ROADMAP §9.4); both build cleanly. The CI
   archive check covers `*_freebsd_*` as it covers `*_darwin_*`.
-- **`latest` only for the highest stable tag.** The tag renders only for a
-  version that is not a pre-release and when `IS_LATEST` is `true`: a step
-  of the release job sets it when the tag equals `git tag -l 'v*' | grep -v
-  -- - | sort -V | tail -1`, so a patch for an older minor (after 1.0,
-  ROADMAP §9.6) or a run on an older tag never moves `latest` backwards.
-  `dockers_v2` drops tags that render empty (`tpl.Slice` with
-  `tmpl.NonEmpty()`). Templates run with `missingkey=error`, and `index`
-  keeps this one valid when the variable is unset: a local snapshot builds
-  only the version tags, and the CI `goreleaser-check` job sets
-  `IS_LATEST=true` so that `latest-amd64` and `latest-arm64`, which the
-  `docker` job runs, are built locally (never pushed). In a snapshot
-  `.Prerelease` is empty.
+- **`make generate`** holds the generator commands once, for the before
+  hook and for release.yml's `generate` job, so CI runs the commands that
+  build a release: with `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` (the
+  value of `{{ .CommitTimestamp }}`, which GoReleaser reads as `%ct` too),
+  `go generate ./...`; `GOOS=linux GOROOT="$(go env GOROOT)" go tool
+  -modfile=tools/go.mod go-licenses report ./cmd/gosftpd --ignore
+  github.com/o-kolomoiets/go-sftp-server
+  --template=packaging/third_party_licenses.tpl > out/THIRD_PARTY_LICENSES`;
+  and `mkdir -p out/docker/empty out/docker/home-root/home`, the empty
+  directories that the Dockerfile copies with their owner and mode.
+- **`latest` is not a `dockers_v2` tag.** GoReleaser pushes its tags before
+  the attest and verification steps, so a red run would leave `latest` on
+  the failed build. The release job's last step, only for a version
+  without a pre-release suffix and only after the verification step
+  passed, runs `docker buildx imagetools create --tag
+  ghcr.io/o-kolomoiets/gosftpd:latest` on the digest from
+  `dist/digests.txt`; with one index source and no annotations buildx
+  v0.38.1 copies the index unchanged, so `latest` names the digest that was
+  signed and attested. `tag.yml` accepts only a version higher than every
+  release tag, and the guard runs only the highest one (Workflows), so
+  `latest` never moves backwards. In a snapshot `.Tag` and `.Prerelease`
+  come from the last reachable tag (after v0.5.0-rc.1: `v0.5.0-rc.1` and
+  `rc.1`) and `dockers_v2` appends the architecture, so CI refers to its
+  images as `v<.Version>-amd64` and `-arm64`.
 - `docker_signs` sets its own `args`: the default is `sign
-  --key=cosign.key ...`. With the tags `vX.Y.Z` and `latest` the same
-  digest is signed twice, which is harmless.
+  --key=cosign.key ...`.
 - `preflight.fail_on_error` (since v2.18) stops the run before building
   only when the tag's release is already immutable; it does not check that
   the token can publish (`CanRelease` only reads the repository and the
-  release by tag). A published but still mutable release is caught by
-  `verify-tag`.
+  release by tag). A published but still mutable release is caught by the
+  guard.
 
 ### Reproducible builds
 
@@ -365,40 +375,28 @@ permissions only at the job level, as ROADMAP §9.1 requires.
 ```yaml
 # .github/workflows/release.yml
 on:
-  push:
-    tags: ["v*"]                 # a signed tag pushed by the owner
-  workflow_dispatch:             # tag.yml, on the tag's ref
+  workflow_dispatch:             # tag.yml, or the owner, on the tag's ref
 permissions:
   contents: read
 concurrency:
   group: release-${{ github.ref }}
 jobs:
-  verify-tag:                    # tag.yml's checks again, for any tag
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      checks: read               # ci-ok on the tagged commit
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { fetch-depth: 0, persist-credentials: false }
-      - run: ...                 # version format, on main, ci-ok green, CHANGELOG section, no published release
-        env: { GH_TOKEN: "${{ github.token }}" }
-  generate:                      # third-party tool code, without credentials
-    needs: verify-tag
+  generate:                      # the guard, then third-party tool code, without credentials
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      - run: .github/scripts/release-guard.sh
+        env: { GH_TOKEN: "${{ github.token }}" }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: stable, check-latest: true, cache: false }
-      - run: ...                 # go mod tidy -diff; SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) go generate ./...; go-licenses
+      - run: go mod tidy -diff && make generate
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with: { name: out, path: out/ }
+        with: { name: out, path: "out/man/\nout/completions/\nout/THIRD_PARTY_LICENSES" }
   release:
-    needs: [verify-tag, generate]
+    needs: generate
     runs-on: ubuntu-24.04
     permissions:
       contents: write            # the draft release and its assets
@@ -408,17 +406,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false }
+      - run: .github/scripts/release-guard.sh   # again: a re-run of this job alone skips generate's
+        env: { GH_TOKEN: "${{ github.token }}" }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: stable, check-latest: true, cache: false }   # no Actions cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with: { name: out, path: out/ }
-      - run: ...                 # mkdir -p out/docker/empty out/docker/home-root/home; go mod tidy -diff; go mod verify;
-                                 # git status --porcelain empty; IS_LATEST into $GITHUB_ENV; CHANGELOG section > $RUNNER_TEMP/notes.md
+        with: { name: out, path: "${{ runner.temp }}/generated" }      # never into the checkout
+      - run: ...                 # the artifact checked against the exact file list and copied into a new out/;
+                                 # mkdir -p out/docker/empty out/docker/home-root/home; go mod tidy -diff; go mod verify;
+                                 # git status --porcelain empty; CHANGELOG section > $RUNNER_TEMP/notes.md
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with: { cosign-release: v3.1.4 }
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with: { syft-version: v1.55.0 }
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with: { driver-opts: "image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea" }
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
@@ -431,8 +433,11 @@ jobs:
         with: { subject-checksums: dist/digests.txt, create-storage-record: false }
       - run: ...                 # copy the bundle to gosftpd_X.Y.Z.intoto.jsonl; gh release upload "$GITHUB_REF_NAME" it and dist/digests.txt
         env: { BUNDLE: "${{ steps.attest.outputs.bundle-path }}", GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" }
-      - run: ...                 # the commands of docs/install.md against dist/ and the pushed image (below)
+      - run: V="${GITHUB_REF_NAME#v}" ../test/docs/run-block.sh verify   # docs/install.md's commands, against dist/ and the pushed image
+        working-directory: dist
         env: { GH_TOKEN: "${{ github.token }}" }
+      - if: ${{ !contains(github.ref_name, '-') }}
+        run: ...                 # docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest, the verified digest
 ```
 
 - **No QEMU.** The Dockerfile has no `RUN`, so the arm64 image builds on
@@ -455,85 +460,118 @@ jobs:
   `verify-release.yml` install no Go; a setup-go step added to either
   takes `cache: false` too. The switch is the setup-go input: actionlint
   v1.7.12 rejects the workflow key `cache-mode`.
-- **`verify-tag`** (`contents: read`, `checks: read`; checkout with
-  `fetch-depth: 0`) runs for every tag, however it arrived, and stops the
-  run before anything is built when: `GITHUB_REF_NAME` does not match
-  `^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$`; `git
-  merge-base --is-ancestor "$GITHUB_SHA" origin/main` fails; the `ci-ok`
-  check run on `$GITHUB_SHA` did not conclude `success` (`gh api
-  "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=ci-ok"`);
-  CHANGELOG.md has no section for the version (a pre-release may use a
-  non-empty Unreleased section instead); or `gh api
-  "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"` returns 200.
+- **The guard**, `.github/scripts/release-guard.sh`, runs first in both
+  jobs with `GH_TOKEN` and `contents: read`. It stops the run unless
+  `GITHUB_REF` matches
+  `^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$`
+  (a dispatch on a branch fails); `GITHUB_REF_NAME` is the highest tag in
+  that format (`gh api --paginate
+  "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v"`, ordered with
+  `sed 's/-/~/' | sort -V`, so `v0.5.0-rc.1` sorts below `v0.5.0` and a
+  stray `vtest` never counts); and `gh api
+  "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"` answers 404.
   That endpoint returns only published releases, so a re-run onto the
-  run's own draft still works (`replace_existing_draft`), while a re-run or
-  a dispatch on a published release, which would push and sign a rebuilt
-  image under `vX.Y.Z` (and `latest`) and then fail at upload, before the
-  attest steps, stops here.
+  run's own draft still works (`replace_existing_draft`); any answer other
+  than 404 fails closed. The release job repeats the guard because
+  re-running only that job (Re-run failed jobs, Re-run this job) reuses
+  `generate`'s earlier success.
 - **`generate`** (`contents: read` only, no `id-token`; setup-go `cache:
-  false`) runs the before hooks: `go mod tidy -diff`,
-  `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) go generate ./...` and the
-  go-licenses command, and uploads `out/` as an artifact. GoReleaser runs
-  hooks with the job's whole environment (`ctx.Env` from `os.Environ()`:
-  `GITHUB_TOKEN`, the job-wide OIDC request variables, the GHCR login in
-  `~/.docker/config.json`) and after its dirty-tree check, so a hook in
-  the signing job could sign or alter the release, and stripping its
-  environment would not help. go-licenses brings licenseclassifier/v2,
+  false`) runs the guard, then `go mod tidy -diff && make generate`, and
+  uploads only `out/man/`, `out/completions/` and
+  `out/THIRD_PARTY_LICENSES` (their common root is still `out/`).
+  GoReleaser runs hooks with the job's whole environment (`ctx.Env` from
+  `os.Environ()`: `GITHUB_TOKEN`, the job-wide OIDC request variables, the
+  GHCR login in `~/.docker/config.json`) and after its dirty-tree check,
+  so a hook in the signing job could sign or alter the release, and
+  stripping its environment would not help. go-licenses brings licenseclassifier/v2,
   klog, opencensus, groupcache, logr, otiai10/copy, sergi/go-diff and cobra
   v1.7.0, updated weekly by Dependabot; gendocs brings cobra/doc,
   go-md2man and blackfriday. None of it is needed to sign. The limit: man
   pages, the license file and the completions still go into the signed
   archives and packages, and completions are shell code that users run.
   They stay trusted output of those modules; the split protects the
-  binary, the image and the release credentials.
-- **`release`** (`needs: [verify-tag, generate]`) downloads `out/`,
-  recreates `out/docker/empty` and `out/docker/home-root/home` (artifacts
-  drop empty directories), runs `go mod tidy -diff` and `go mod verify`,
-  checks that `git status --porcelain` is empty (`out/` is ignored), sets
-  `IS_LATEST`, writes the notes and runs `goreleaser release --clean
+  binary, the image (whose `out/docker` the release job creates itself)
+  and the release credentials.
+- **`release`** (`needs: generate`) runs the guard, downloads the
+  artifact into `$RUNNER_TEMP/generated`, never into the checkout, and
+  fails unless it holds only regular files and directories and exactly
+  `THIRD_PARTY_LICENSES`, `completions/{_gosftpd,gosftpd.bash,gosftpd.fish}`
+  and files matching `^man/gosftpd(-[a-z0-9-]+)?\.1\.gz$`. Only this job
+  can check that, since code run in `generate` controls that job's upload
+  step; a planted `out/docker/home-root/usr/bin/gosftpd`, or a host key in
+  `out/docker/empty`, would otherwise end up in the signed image
+  (reproduced with this Dockerfile). It
+  copies the files into a new `out/`, creates `out/docker/empty` and
+  `out/docker/home-root/home` itself, runs `go mod tidy -diff` and `go mod
+  verify`, checks that `git status --porcelain` is empty (`out/` is
+  ignored), writes the notes and runs `goreleaser release --clean
   --skip=before` (`before` is a release skip key in v2.19.0). After the
-  attest steps it uploads `.intoto.jsonl` and `digests.txt`.
-- **Verification before Publish.** The last step runs the commands of
-  "Verification by users" against local files: `cosign verify-blob` of
-  `dist/checksums.txt` with `--certificate-identity
-  "https://github.com/o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml@$GITHUB_REF"`
-  (the literal repository name, not `$GITHUB_REPOSITORY`, so that the case
-  is tested), `cosign verify` of `ghcr.io/o-kolomoiets/gosftpd@sha256:`
-  and the digest from `dist/digests.txt` with the same identity, and `gh
-  attestation verify` of the Linux amd64 archive and of `oci://` that
-  digest with `--repo`, `--signer-workflow` and `--source-ref`. The job's
-  GHCR login lets cosign read the package while it is still private. A
-  wrong identity (the case, `job_workflow_ref` under a dispatch), a broken
-  attest step or a regression in a GoReleaser or cosign upgrade (such as
-  #7180's wrong digest) turns the run red before the owner publishes; once
-  Immutable Releases are on (M6-05), a published release can no longer be
-  repaired.
+  attest steps it uploads `.intoto.jsonl` and `digests.txt`; after the
+  verification step it moves `latest` for a stable version.
+- **BuildKit is pinned.** setup-buildx-action's default `docker-container`
+  driver runs `moby/buildkit:buildx-stable-1`, a floating tag that buildx
+  does not verify by default; that container builds the image, receives
+  the GHCR push token and reports the digest that is signed. `driver-opts`
+  pins the image by index digest (v0.33.1, what `buildx-stable-1` named on
+  2026-10-23), in `goreleaser-check` too.
+- **Verification before Publish.** The last step but one runs the
+  verification block of docs/install.md (Verification by users) in
+  `dist/`, against local files: `cosign verify-blob` of `checksums.txt`
+  with the literal identity
+  `https://github.com/o-kolomoiets/Go-SFTP-Server/.github/workflows/release.yml@refs/tags/v$V`
+  (not built from `$GITHUB_REPOSITORY`, so that the case is tested),
+  `cosign verify` of `ghcr.io/o-kolomoiets/gosftpd@sha256:` and the digest
+  from `digests.txt` with the same identity, and `gh attestation verify`
+  of the Linux amd64 archive and of `oci://` that digest with `--repo`,
+  `--signer-workflow` and `--source-ref`. The job's GHCR login lets cosign
+  read the package while it is still private. A wrong identity (the case,
+  `job_workflow_ref` under a dispatch), a broken attest step or a
+  regression in a GoReleaser or cosign upgrade (such as #7180's wrong
+  digest) turns the run red before `latest` moves and before the owner
+  publishes; once Immutable Releases are on (M6-05), a published release
+  can no longer be repaired.
+- **Documented commands are run, not copied.** docs/install.md wraps each
+  tested block in `<!-- ci:NAME -->` … `<!-- /ci -->` (`quickstart`,
+  `compose`, `deb`, `verify`); `test/docs/run-block.sh NAME` extracts only
+  the fenced block between the markers and runs it with `bash -euo
+  pipefail`, with `V` from the caller (the block's own `V=` line dropped)
+  and `gh release download` skipped when its files are present. The
+  `docker` and `packages` jobs, release.yml's verification step and
+  `verify-release.yml` call it, and a test fails when a marker a workflow
+  names is missing. Stream B writes the marked blocks, stream D the prose
+  around them. In release.yml the step's environment holds only
+  `GH_TOKEN`.
 - **`tag.yml`** (`workflow_dispatch`, input `version`; the job runs only
   on `refs/heads/main`; top-level `permissions: contents: read`, the job
   `contents: write`, `actions: write`, `checks: read`). Every check runs
   before anything is created, because the tag ruleset makes a wrong tag
   permanent: the version matches
-  `^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$`; the tag does not
-  exist yet; CHANGELOG.md has the version's section (a pre-release: or a
-  non-empty Unreleased section); the `ci-ok` check run succeeded on
-  `github.sha`, the commit the run started on. It then creates the
-  annotated tag on that same commit, never on `main`'s head read again,
-  which a merge in between could have moved to a commit whose `ci-ok` was
-  not checked. It does so through the API (`git/tags`, then `git/refs`,
-  tagger `github-actions[bot]`), so no credentials are persisted in a
-  checkout, and runs `gh workflow run release.yml --ref vX.Y.Z`. Inputs
-  reach the script through `env:`, never through `${{ }}` inside `run:`.
+  `^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$` and is higher
+  than every other tag in that format, in the guard's order (`0.4.1-rc.1`
+  after v0.5.0 is refused); CHANGELOG.md has the version's section (a
+  pre-release: or a non-empty Unreleased section); the `ci-ok` check run
+  succeeded on `github.sha`, the commit the run started on; and the tag
+  does not exist yet, unless it is `github-actions[bot]`'s annotated tag
+  on `github.sha`, left by a run that failed to dispatch, in which case a
+  re-run only dispatches. It creates the annotated tag on that same
+  commit, never on `main`'s head read again, which a merge in between
+  could have moved to a commit whose `ci-ok` was not checked. It does so
+  through the API (`git/tags`, then `git/refs`, tagger
+  `github-actions[bot]`), so no credentials are persisted in a checkout,
+  and runs `gh workflow run release.yml --ref vX.Y.Z`. Inputs reach the
+  script through `env:`, never through `${{ }}` inside `run:`.
 - **`verify-release.yml`** (`release: published`, and `workflow_dispatch`
   with a tag; top-level `permissions: contents: read`, the job adds
-  `attestations: read`) installs cosign as above, downloads the release
-  with `gh release download`, runs the commands of "Verification by users"
-  with the literal identities and the digest from `digests.txt`, pulls the
-  image anonymously by that digest (this fails while the GHCR package is
-  still private) and checks that `docker run --rm IMAGE version` prints the
-  tag. It sees what users see: the published assets and an anonymous pull.
+  `attestations: read`) installs cosign as above, runs the verification
+  block of docs/install.md (`run-block.sh verify`, which downloads the
+  assets) with the literal identities and the digest from `digests.txt`,
+  pulls the image anonymously by that digest (this fails while the GHCR
+  package is still private) and checks that `docker run --rm IMAGE
+  version` prints the tag. It sees what users see: the published assets
+  and an anonymous pull.
 - **`ci.yml`:**
-  - `goreleaser-check` moves to v2.19.0, installs syft as above and runs
-    `release --snapshot --clean --skip=sign` with `IS_LATEST=true`:
+  - `goreleaser-check` moves to v2.19.0, installs syft as above, pins
+    BuildKit as above and runs `release --snapshot --clean --skip=sign`:
     snapshot mode skips publishing but not signing (`signs` and
     `docker_signs` run unless skipped), and `sboms` needs syft. It keeps
     the version check and the 12 MiB budget and adds: the archive check
@@ -543,12 +581,14 @@ jobs:
     health check, ports 2022 and 9090, `Cmd` `["serve"]` and
     `GOSFTPD_ATMOZ_IMAGE=1`; the compressed image size ≤ 15 MB; `git
     status --porcelain` empty after the hooks (a dirty tree shows as
-    `+dirty` in the SBOM); the packages and `docker save` tarballs uploaded
-    for the jobs below.
+    `+dirty` in the SBOM). It uploads the packages for the jobs below and,
+    with `V=$(jq -r .version dist/metadata.json)`, the `docker save`
+    tarballs of `ghcr.io/o-kolomoiets/gosftpd:v$V-amd64` and `-arm64`.
   - `reproducible` (Reproducible builds above).
-  - `packages`: the DoD verbatim (`apt install`, `systemctl enable --now`,
-    `is-active`, `sudo -u gosftpd gosftpd config validate --check-fs` run
-    from `/` and from `/root`, `systemctl reload`) on the ubuntu-24.04 and
+  - `packages`: the DoD as docs/install.md's `deb` block gives it
+    (`apt install`, `systemctl enable --now`, `is-active`, `sudo -u gosftpd
+    gosftpd config validate --check-fs` run from `/` and from `/root`),
+    and `systemctl reload`, on the ubuntu-24.04 and
     ubuntu-24.04-arm runners themselves (systemd 255 is PID 1); in Debian
     12 and 13 containers built from `test/packages/` Dockerfiles with only
     systemd, systemd-sysv and sudo, so that `apt install ./gosftpd_*.deb`
@@ -557,24 +597,43 @@ jobs:
     shows it installed, that the legacy drop-in is present and that
     `systemctl reload gosftpd` succeeds with the status "configuration
     reloaded"; in EL9 (`rockylinux/rockylinux:9-ubi-init`) and, optionally,
-    Arch, also built from `test/packages/` Dockerfiles. An upgrade keeps
-    the drop-in and a removal deletes it. On Ubuntu with needrestart
-    installed (a standard server has it), an `apt install` upgrade leaves
-    the service's `MainPID` unchanged. Per format, the archive layout of
+    Arch, also built from `test/packages/` Dockerfiles. Each upgrade case
+    is a reinstall, as in the prototypes, or a build with a higher version
+    (`apt install` of the installed version is a no-op that runs no
+    script): it keeps the drop-in and the edited conffiles, and a removal
+    deletes the drop-in. On the ubuntu-24.04 runner, with needrestart
+    installed (`dpkg -s needrestart`) and the service enabled and started,
+    `sudo apt-get install -y --reinstall ./gosftpd_*.deb` must leave
+    `readlink /proc/$PID/exe` ending in "(deleted)", so that needrestart had
+    a reason to act, and `MainPID` unchanged. Per format, the archive layout of
     docs/install.md with an edited `config.toml`, followed by the package
     install as "From the archive install to a package" says, ends with the
     package configured (deb: `ii`), `config.toml` root:gosftpd still
     holding the edit and the service active. The job prints `stat -fc %T
     /sys/fs/cgroup`, since cgroup v2 on the runners is assumed.
-  - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real Landlock,
-    no QEMU): the Quickstart verbatim under umask 002 as a non-root user,
-    `healthy`, an sftp upload, the host key fingerprint after recreating
-    the container; a reload: the configuration edited with `sed -i` (a new
-    inode), `docker kill -s HUP`, and a user removed from it refused; exit
-    2 and the hint without a configuration, then the hint's own commands
-    followed to a working start; the compose example with `read_only`; the
-    atmoz example, with a second upload of the same name that overwrites
-    the file.
+  - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real
+    Landlock, no QEMU), as a non-root user under umask 002, from the image
+    `goreleaser-check` saved, tagged after `docker load` with every
+    reference the run uses so that `docker run` never pulls from GHCR: the
+    tag the blocks of docs/install.md name, and the one the hint names,
+    `ghcr.io/o-kolomoiets/gosftpd:` with the image's `version` output (a
+    snapshot reports the last tag: `v0.4.0`, never pushed, or after rc.1 a
+    real image other than the one under test). It runs the `quickstart`
+    block (`healthy`, an sftp upload, the host key fingerprint after
+    recreating the container); a reload: the configuration edited with
+    `sed -i` (a new inode), `docker kill -s HUP`, and a user removed from
+    it refused; the hint, reached by starting with `-v
+    ./gosftpd:/etc/gosftpd:ro` while `./gosftpd` does not exist, then its
+    commands followed to `healthy`, the placeholder replaced between
+    `config example` and the `chown` with `sed -i "s|<paste your public
+    key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`; and the `compose`
+    block with `read_only` (its `image:`, a digest that cannot be retagged,
+    overridden with the local tag). M5-10 adds the atmoz step once the job
+    exists: `docker run -p 2222:2022 IMAGE foo:pass:::upload`, an upload
+    and a second one of the same name that overwrites it; a key file
+    mounted under `/home/foo/.ssh/keys`, removed on the host and refused
+    after `docker restart`; and the missing configuration directory with
+    `SFTP_USERS` set, which must exit 2 with no listener.
   - The three new jobs join `ci-ok`'s needs; stream C adds one fuzz-smoke
     entry (`FuzzAtmozSpec`).
 - **Dependabot** gets `package-ecosystem: docker` with `directories:
@@ -604,7 +663,8 @@ COPY --chown=65532:65532 --chmod=0750 out/docker/empty/ /srv/sftp/
 # /home as an entry of the copied tree: COPY keeps the owner of a target
 # directory that exists. For atmoz compatibility (/home/<user>/<dir>).
 COPY --chown=65532:65532 --chmod=0755 out/docker/home-root/ /
-# atmoz mode's container conventions: /home discovery, /etc/ssh host keys.
+# atmoz mode's container conventions: /etc/sftp/users.conf, /home discovery,
+# /etc/ssh host keys.
 ENV GOSFTPD_ATMOZ_IMAGE=1
 WORKDIR /
 USER 65532:65532
@@ -648,8 +708,10 @@ CMD ["serve"]
   reload end to end with gosftpd). With a directory mount the container
   sees the new file. The owner check reads only the file, not its
   directory, and under Landlock a directory that holds only `config.toml`
-  stays dedicated. A missing host directory gives an empty `/etc/gosftpd`
-  and so the "no configuration file found" hint, not the directory case.
+  stays dedicated. A missing host directory is created by Docker, empty
+  and owned by root; the container then exits 2 with the hint, never atmoz
+  mode (see Mode selection), and the hint's first command takes the
+  directory over with `mkdir -p` and `chown`.
 - **No `VOLUME`:** an anonymous volume would hide a forgotten `-v`, and the
   host key would change with every new container; the documentation mounts
   both directories explicitly.
@@ -747,18 +809,22 @@ nfpms:
   does not retry.
 - **needrestart (Ubuntu).** On Ubuntu 24.04, one of the DoD platforms, a
   standard server has needrestart (ubuntu-server recommends it). Its apt
-  hook (`DPkg::Post-Invoke`, `apt-pinvoke -m u`) runs in mode `u`, which
-  restarts every service whose binary was replaced unless the
-  administrator chose another mode (needrestart 3.6-7ubuntu4.5, read from
-  the noble package). So `apt install ./gosftpd_*.deb` of a new version
-  would restart gosftpd at once, which the decision above rules out; a
-  plain `dpkg -i` does not run the hook. The deb ships
+  hook (`DPkg::Post-Invoke`, `apt-pinvoke -m u`) runs needrestart after
+  every apt run that unpacked a package (dpkg's status logger flags each
+  unpack, `dpkg -i` included), and in that Ubuntu mode it restarts, unless
+  the administrator configured another restart mode, every service whose
+  process runs a deleted binary (needrestart 3.6-7ubuntu4.5, read from the
+  noble package). So `apt install ./gosftpd_*.deb` of a new version would
+  restart gosftpd at once, and after a `dpkg -i` or a postponed restart
+  the next apt run, unattended-upgrades included, would restart it at a
+  time nobody chose; the decision above rules out both. The deb ships
   `/etc/needrestart/conf.d/gosftpd.conf`, which needrestart reads after
   its main configuration: `override_rc` = 0 puts `gosftpd.service` on its
-  skip list. The file does nothing where needrestart is not installed, and
-  an operator who wants the restart edits or deletes it (a conffile, so an
-  upgrade keeps that choice). docs/operations.md names it in the Ubuntu
-  notes.
+  skip list, so a replaced binary waits for the operator's restart, as it
+  does with rpm and Arch. The file does nothing where needrestart is not
+  installed, and an operator who wants the restart edits or deletes it (a
+  conffile, so an upgrade keeps that choice). docs/operations.md names it
+  in the Ubuntu notes, with the unattended-upgrades case.
 - **preremove** stops and disables the service on a removal, not on an
   upgrade: deb passes `upgrade` and rpm passes `1` then, and pacman runs
   `pre_remove` only for a removal.
@@ -838,10 +904,8 @@ nfpms:
   module that imports the root command, exported as `cli.NewRootCommand()`
   (today `newRootCmd`). A generator under `tools/` cannot import
   `internal/`. `internal/cli/doc.go` holds `//go:generate go run ./gendocs
-  ../../out`; the before-hook runs `go generate ./...` with
-  `SOURCE_DATE_EPOCH`, which cobra's `GenManTree` uses for the page date
-  (the hook string is templated and split with shellwords, hence `sh -c`).
-  In a release the `generate` job runs the same commands.
+  ../../out`; `make generate` runs `go generate ./...` with
+  `SOURCE_DATE_EPOCH`, which cobra's `GenManTree` uses for the page date.
 - **Output:** `out/man/*.1.gz` (one page per command, 20 in the prototype),
   compressed with `compress/gzip` with no name and a zero time, so no
   external `gzip -n`; `out/completions/gosftpd.bash`, `_gosftpd` and
@@ -860,9 +924,10 @@ nfpms:
   lookup goes online (20 s timeout) and writes "Unknown" when it fails.
   go-licenses lists libcap/psx twice, as BSD-3-Clause and as GPL-2.0; the
   template prints it once, under BSD-3-Clause, the choice docs/DEPENDENCIES.md
-  records. The hook sets `GOOS=linux`, so that the file is the same on
-  every host (on darwin, go-landlock and psx drop out), and `GOROOT`, without
-  which an installed go-licenses failed on every standard-library package.
+  records. `make generate` sets `GOOS=linux`, so that the file is the same
+  on every host (on darwin, go-landlock and psx drop out), and `GOROOT`,
+  without which an installed go-licenses failed on every standard-library
+  package.
   One file serves every archive: for darwin and FreeBSD it lists two
   modules too many, which is harmless. Output is deterministic.
 
@@ -882,27 +947,36 @@ nfpms:
   directory, or a search finds no file (and atmoz mode has no users), the
   error says what to do instead of only "stat ...: no such file or
   directory". The hint leads to a working start, not to the next exit 2:
-  it names the key placeholder and the owner and mode the §6.5 check
-  wants, mounts a directory (see Container image) and links the Docker
+  it takes over a directory that Docker created as root, has the key
+  placeholder replaced before the owner and mode the §6.5 check wants are
+  set, mounts a directory (see Container image) and links the Docker
   section of docs/install.md, which has the whole Quickstart:
 
   ```text
   Error: no configuration file found (./gosftpd.toml, /etc/gosftpd/config.toml, ~/.config/gosftpd/config.toml)
   Create one with 'gosftpd config example > config.toml' and replace the key placeholder.
   With Docker, keep it in a directory and mount the directory:
-    mkdir gosftpd && docker run --rm ghcr.io/o-kolomoiets/gosftpd:v0.5.0 config example > gosftpd/config.toml
+    mkdir -p gosftpd && sudo chown "$(id -u):$(id -g)" gosftpd
+    docker run --rm ghcr.io/o-kolomoiets/gosftpd:v0.5.0 config example > gosftpd/config.toml
+    # replace the key placeholder in gosftpd/config.toml with your public key, then:
     sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml
     docker run ... -v ./gosftpd:/etc/gosftpd:ro ...
   See https://github.com/o-kolomoiets/Go-SFTP-Server/blob/v0.5.0/docs/install.md#docker
   ```
 
   For `--config` the first line reads "--config: /etc/gosftpd/config.toml
-  does not exist". For a directory: "... is a directory: Docker creates one
-  when the host file of a bind mount does not exist. Remove it on the host
-  (`sudo rmdir ./config.toml`) and mount a directory instead", followed by
-  the same lines (the directory case was reproduced). The image tag and
-  the link name the binary's own version, or `latest` and `main` for a
-  development build. The `docker` CI job follows the hint's commands.
+  does not exist"; in the image, for an empty mounted `/etc/gosftpd` (see
+  Mode selection), "/etc/gosftpd is mounted but holds no config.toml;
+  check the host path of -v (Docker creates a missing one as an empty
+  directory owned by root)". For a directory: "... is a directory: Docker
+  creates one when the host file of a bind mount does not exist. Remove it
+  on the host (`sudo rmdir ./config.toml`) and mount a directory instead",
+  followed by the same lines (the directory case was reproduced). The
+  `chown` of `gosftpd` works whether Docker created it or not, and is
+  harmless under rootless Docker. The image tag and the link name the
+  binary's own version (a snapshot build reports the last tag), or
+  `latest` and `main` for a build without one. The `docker` CI job reaches
+  the hint through a missing host directory and follows its commands.
 - **`cli.NewRootCommand()`** is exported for the generator.
 
 ### `serve --ephemeral`
@@ -971,15 +1045,16 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
 
 - **Sources.** Specs given as arguments to the root command (what `docker
   run IMAGE foo:pass:::upload` passes: the arguments replace `CMD`), the
-  space-separated `$SFTP_USERS`, and a users file (`--users-conf FILE`,
-  default `/etc/sftp/users.conf` when it exists; blank lines and `#`
+  space-separated `$SFTP_USERS`, and a users file (`--users-conf FILE`, or
+  in the image `/etc/sftp/users.conf` when it exists; blank lines and `#`
   comments skipped), combined in atmoz's order: the users file, the
   arguments, then `SFTP_USERS`. The root command treats its arguments as
   specs when the first matches atmoz's own test `^[^:[:space:]]+:.*$`; then
   every argument must be a valid spec. Anything else stays an unknown
-  command with exit 2 (today the root command accepts no arguments). The
-  root form is `serve` with these users and takes the flags that apply in
-  atmoz mode (below).
+  command with exit 2 (today the root command accepts no arguments), whose
+  message never repeats the argument (see Errors below). The root form is
+  `serve` with these users and takes the flags that apply in atmoz mode
+  (below).
 - **Mode selection.** `--config` and `$GOSFTPD_CONFIG` stay strict
   everywhere: a path that does not exist always exits 2 with the hint
   above, never atmoz mode, so a mistyped path cannot start the old
@@ -988,12 +1063,18 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     finds or `$GOSFTPD_CONFIG` names is then ignored, with a warning that
     names it;
   - `serve` finds no configuration file, neither `--dir` nor `--ephemeral`
-    is given, and `--users-conf`, `SFTP_USERS` or `/etc/sftp/users.conf`
-    provides users; with none, it exits 2 with the hint.
+    is given, and `--users-conf`, `SFTP_USERS` or, in the image,
+    `/etc/sftp/users.conf` provides users; with none, it exits 2 with the
+    hint.
 
   The image's `CMD ["serve"]` uses the search, so a mounted
   `/etc/gosftpd/config.toml` wins and its absence is the only way into
-  atmoz mode. The implicit sources (`SFTP_USERS`, the default
+  atmoz mode. In the image an `/etc/gosftpd` without `config.toml` never
+  leads there: the base image has no such directory, so it is a mount
+  whose host path is wrong or was missing, and `serve` exits 2 with the
+  hint; otherwise a mistyped configuration mount added during a
+  migration, with `SFTP_USERS` still set, would start the old
+  plaintext-password users. The implicit sources (`SFTP_USERS`, the default
   `/etc/sftp/users.conf`) are read only in atmoz mode; when a
   configuration file is used, or `--dir` or `--ephemeral` is given, they
   are ignored with a warning that names the source and never prints its
@@ -1003,18 +1084,21 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   `--state-dir`, `--read-only`, `--on-conflict`, `--allow-root` and the log
   and audit flags apply. gosftpd logs that it runs in atmoz mode, with the
   number of users per source.
-- **Image conventions.** Two of atmoz's container conventions apply only
-  in the image, which sets `ENV GOSFTPD_ATMOZ_IMAGE=1`: directories that
-  exist under `/home/<user>` at start become that user's mounts, and
-  `/etc/ssh/ssh_host_ed25519_key` and `/etc/ssh/ssh_host_rsa_key` are used
-  as host keys. On a host with real home directories, the first would
-  expose a home's subdirectories over password logins on all interfaces,
-  and the second would serve sshd's own identity as root or fail as
-  anyone else (those keys are root's, 0600). Outside the image atmoz specs
-  mount only the directories they name, and host keys come from
-  `--host-key` or the state directory as usual. The packaged unit never
-  reaches atmoz mode: it passes `--config` (and `ProtectHome=yes` hides
-  `/home`). docs/migrate-from-atmoz.md says so.
+- **Image conventions.** Three of atmoz's container conventions apply only
+  in the image, which sets `ENV GOSFTPD_ATMOZ_IMAGE=1`: the default users
+  file `/etc/sftp/users.conf`; directories that exist under `/home/<user>`
+  at start become that user's mounts; and `/etc/ssh/ssh_host_ed25519_key`
+  and `/etc/ssh/ssh_host_rsa_key` are used as host keys. On a host, the
+  first would start the users of a users file left over from atmoz, with
+  their plain passwords, on all interfaces; with real home directories the
+  second would expose a home's subdirectories over password logins; and
+  the third would serve sshd's own identity as root or fail as anyone else
+  (those keys are root's, 0600). Outside the image atmoz users come only
+  from arguments, `SFTP_USERS` and `--users-conf`, specs mount only the
+  directories they name, and host keys come from `--host-key` or the state
+  directory as usual. The packaged unit never reaches atmoz mode: it
+  passes `--config` (and `ProtectHome=yes` hides `/home`).
+  docs/migrate-from-atmoz.md says so.
 - **Syntax:** `user:pass[:e][:uid[:gid[:dir1[,dir2]...]]]`, split as
   atmoz's `create-sftp-user` splits it.
   - **user** must be a gosftpd name, `^[a-z0-9][a-z0-9._-]{0,31}$`; atmoz
@@ -1039,20 +1123,29 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     never the pass field or the raw spec, which atmoz itself logs
     ("Parsing user data"). stderr reaches `docker logs`, log shippers and
     journald, a wider audience than `docker inspect`. The same holds for
-    the warnings about ignored sources and plain passwords.
+    the warnings about ignored sources and plain passwords, and for usage
+    errors: `serve foo:pass:::upload` (a spec after `serve`) and a root
+    argument that fails the spec test (` foo:pass`) are unknown commands,
+    whose cobra message repeats the argument. `noArgs` and the root
+    command's argument check therefore never echo an argument that
+    contains `:` and give its position instead: "unknown command (argument
+    1, not shown: it looks like an atmoz user spec; give specs directly
+    after the image name, without 'serve')".
 - **Layout as in atmoz:** user `foo` with directory `upload` sees
   `/upload`, stored in `/home/foo/upload`, so atmoz-style volumes
   (`-v ./upload:/home/foo/upload`) work unchanged. A user's directories are
   those its spec names plus, in the image, every directory that exists
   directly under `/home/<user>` at start, other than `.ssh`: atmoz's own
   volume examples (`foo:pass:1001` with `-v <host-dir>/upload:/home/foo/upload`)
-  name no directory. Each directory name becomes one mount, `[mounts.upload]
-  path = "/home/{user}/upload"` with `create = true`; each user that has the
-  directory gets `full` on it, and `flatten = false`, so the top level is
-  the synthetic read-only root, as atmoz's root-owned home is, and
-  `/home/<user>/.ssh` is never reachable. The image's `/home` belongs to
-  65532 so that `foo:pass:::upload` works without a volume. The edge
-  cases, each with a table or e2e test:
+  name no directory. Atmoz mode builds one plain mount per user and
+  directory: path `/home/<user>/<dir>`, `create = true`, an internal name
+  (`atmoz1`, `atmoz2`, …), `full` for that user only, and `flatten = false`,
+  so the top level is the synthetic read-only root, as atmoz's root-owned
+  home is, and `/home/<user>/.ssh` is never reachable. Each mount has its
+  own directory, registry state and Landlock rule, as any mount has, so
+  two users' `upload` share nothing and the key files stay outside every
+  rule. The image's `/home` belongs to 65532 so that `foo:pass:::upload`
+  works without a volume. The edge cases, each with a table or e2e test:
   - **A user without directories** (atmoz's users-file example,
     `foo:123:1001:100` with `-v mySftpVolume:/home`, on a fresh volume) is
     allowed with a warning and logs in to an empty read-only root, as in
@@ -1061,82 +1154,36 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   - **Names.** An auto-discovered directory whose name is not a valid
     mount name (`_data`, `lost+found`, a dot name, a non-ASCII or device
     name) is skipped with a warning; an invalid name in a spec is an error
-    that names the user and the directory. Mount names are unique ignoring
-    case, so `Upload` for one user and `upload` for another, from specs or
-    from the disk, are an error that names both.
-  - **A directory that cannot be created** is logged at start with the
-    user, the directory and the fix, and that mount is unavailable for the
-    user; the others work. Docker creates the parent of a volume mount
+    that names the user and the directory. Two directories of one user
+    whose names are equal ignoring case (`Upload` on the disk, `upload` in
+    the spec) are an error that names both; across users they are fine.
+  - **A directory that cannot be created:** opening a mount at start is
+    otherwise fatal, so the builder creates each directory first and
+    passes one that fails as unavailable for its user
+    (`Options.Unavailable`), logged with the user, the directory and the
+    fix; the others work. Docker creates the parent of a volume mount
     point (`/home/foo`) as root 0755, so a second spec directory without a
     volume of its own cannot be created by 65532: the fix is a volume for
     it, or `chown 65532` of `/home/foo`.
-- **`{user}` before the last path component.** Today `{user}` may only be
-  the whole last component of a mount path, and mount names are global, so
-  `/home/{user}/upload` cannot be written. `{user}` may now also be a whole
-  earlier component. It is an ordinary configuration feature, documented in
-  docs/configuration.md, since atmoz mode builds an ordinary configuration.
-  The path splits into a prefix (the components before `{user}`, `/home`)
-  and a suffix (those after it, `upload`); an empty suffix is today's home
-  mount, whose rules do not change.
-  - **One helper.** `vfs.SplitUserPath(p) (prefix, suffix string, ok
-    bool)` replaces every `filepath.Base(p) == vfs.UserPlaceholder`
-    comparison (seven today: sandbox/reload.go, sandbox/rules.go,
-    sandbox/preview.go, config/checkfs.go twice, cli/serve.go and
-    vfs/mounts.go). A site that is missed would treat
-    `/home/{user}/upload` as a literal path: `PathsOverlap` misses it, and
-    `insideMount`, whose `EvalSymlinks` fails on the literal path, would
-    silently accept a key file inside a writable mount. A test fails when
-    a raw comparison with `UserPlaceholder` appears outside the helper.
-    `--dir` refuses `{user}` anywhere in its path.
-  - **Opening.** For a session, `<prefix>/<user>/<suffix>` is opened one
-    component at a time, as a home mount's directory is today: each a real
-    directory, not a symlink, else the mount is unavailable with
-    `home_not_dir`; created 0750 with `create = true`.
-  - **State per mount.** Mounts with the same prefix share no state: the
-    open directory (`t.dirs`, today shared by path) and the per-user
-    registry entries (`userKey{dir, rel}`, with `rel` relative to the
-    user's directory: owned uploads, `stat_redirect` targets) are keyed by
-    mount, so that `foo`'s `upload/report.pdf` and `data/report.pdf` never
-    collide. Today this cannot happen, because two mounts on one path are
-    refused as overlapping.
-  - **Overlap.** Two `{user}` mounts with the same prefix overlap when
-    their suffixes overlap: equal, or one inside the other; an empty
-    suffix overlaps every suffix. So `/home/{user}/a` and `/home/{user}/b`
-    do not overlap, while `/home/{user}` with `/home/{user}/x` and
-    `/home/{user}/a` with `/home/{user}/a/b` do. Mounts with different
-    prefixes, and a plain mount against a `{user}` mount, keep today's rule
-    against the directory a `{user}` mount occupies, its prefix. Nested
-    mounts stay an error because each has its own `read_only`,
-    `on_conflict`, `atomic_uploads` and permissions, which the outer one
-    would bypass. `PathsOverlap` gets table and fuzz cases for these.
-  - **Trusted files.** The rule that trusted files may not lie inside a
-    mount compares against the per-user paths `<prefix>/<user>/<suffix>`,
-    so `/home/<user>/.ssh/keys/*` stays allowed.
-  - **Landlock.** Such a mount gets rules per user known at start, not a
-    rule on its prefix: a rule with the mount's rights on `/home` would
-    make every key file under it writable to gosftpd, against ADR 0011's
-    "no configuration or key file is ever writable". The rules are the
-    mount's rights on `<prefix>/<user>/<suffix>` and read-dir on the
-    directories from `<prefix>/<user>` down to it (`os.Root` opens each
-    component as a directory, which Landlock checks as read-dir; read-dir
-    alone lists names but reads and writes no file). A rule needs an
-    existing path, so with `create = true` these directories are created
-    at start for the users known then, before the sandbox, as atmoz
-    creates them at container start. A user added by a reload gets the
-    mount only after a restart (`restart_required` names it); atmoz itself
-    creates users only at start. This amends ADR 0011's rule table, and
-    docs/security.md describes it.
+- **Visible names.** `vfs.MountSpec.Display` and `config.Mount.Display`
+  (`toml:"-"`, not a configuration key), passed through config/build.go,
+  carry the directory's name. Where it is set, a session uses it instead
+  of the mount name for lookup and the order of `/`, `Mounts()`, the
+  synthetic root, a mount's file info and `MountOf`, and the audit log's
+  and hooks' `mount` field reports it, so logs never show `atmoz3`. A
+  session refuses two of its mounts whose visible names are equal ignoring
+  case.
 - **Keys:** every file in `/home/<user>/.ssh/keys/` is read as an
   `authorized_keys` file, after the usual permission check (§6.5:
   owned by root or by the user gosftpd runs as, not writable by group or
   others), as for the users file; a key bind-mounted from a host user's
-  home must be `chown root` first. The guide says so. A user has one
-  `authorized_keys_file` in the configuration, so the atmoz loader inlines
-  the keys and lists the files in an internal list of trusted files that
-  `checkTrusted` and the Landlock planner read: the "not inside a mount"
-  rule and a read rule apply to them as to any key file, and none is
-  writable. The users file joins the configuration's own files (`c.Files`)
-  in the same way, so it has a rule too.
+  home must be `chown root` first. The guide says so. The users file and
+  the key files are read once, at start, before the sandbox, and the keys
+  are inlined (a user has one `authorized_keys_file` in the
+  configuration). The loader passes its list of files to `checkTrusted`,
+  so the "not inside a mount" rule applies to them as to any key file;
+  they are not configuration files (`c.Files`), get no Landlock rule and
+  are never read again.
 - **Host keys:** in the image, `/etc/ssh/ssh_host_ed25519_key` and
   `/etc/ssh/ssh_host_rsa_key` are used when they exist, so clients keep
   their known_hosts entry after the migration; like every host key they
@@ -1164,22 +1211,30 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   uid; the guide shows `chown 65532` of the host directory, or
   `--user UID:GID` with a state volume that UID can write, which gives
   atmoz's ownership back.
-- **Audit and reload.** Audit goes to stdout, as with `config example`. A
-  reload (SIGHUP) reads the users file and the key directories again.
-  `.ssh/keys` holds only key files, so under ADR 0011's rules it is a
-  dedicated directory with a read rule, and a new key file there needs no
-  restart. A new user, a new directory, or a users file replaced by rename
-  in a shared directory needs one (`restart_required`).
-- **Tests:** `FuzzAtmozSpec` on the parser (CI smoke and nightly), which
-  also asserts that no error or warning contains the pass field; the
-  `PathsOverlap`, `checkTrusted` (keys inside and outside
-  `/home/<user>/<dir>`) and helper tests above; a vfs test that uploads
-  the same name to two `{user}` sibling mounts under `rename` and
-  `stat_redirect`; e2e tests with the README examples (arguments,
+- **Audit and reload.** Audit goes to stdout, as with `config example`. In
+  atmoz mode SIGHUP is logged and otherwise ignored, as in ephemeral mode;
+  a change takes a container restart, as in atmoz, which has no reload.
+  A restart also mounts single files again, so atmoz's own examples, which
+  mount `users.conf` and each key as a file, keep working; a reload would
+  have read the old inode of a file replaced on the host and kept a
+  revoked key valid. The guide says `docker restart`, not `docker kill -s
+  HUP`.
+- **Tests:** `FuzzAtmozSpec` (CI smoke and nightly) takes a user and the
+  rest of a spec as separate inputs, puts in a sentinel pass that no fixed
+  text contains (`"PW"` and 24 hex digits of the inputs' SHA-256; an input
+  containing it is skipped) and asserts that no error or warning contains
+  the sentinel; a third input, a raw spec, is only checked not to panic.
+  Unit tests: the default `/etc/sftp/users.conf` ignored without
+  `GOSFTPD_ATMOZ_IMAGE`; no `SECRET` on stderr for `serve u:SECRET` or
+  for `u:SECRET` after a space; `checkTrusted` with keys inside and outside
+  `/home/<user>/<dir>`; a session test in which two users each see
+  `/upload` on different host paths, with `rename` and `stat_redirect`
+  kept apart. e2e tests with the README examples (arguments,
   `SFTP_USERS`, users file, a user without directories, `:e` with bcrypt,
   keys, an existing volume directory), a user given twice and a second
-  upload of the same name; and the `docker` CI job.
-  docs/migrate-from-atmoz.md maps every atmoz example. It also shows `$$`
+  upload of the same name; and the atmoz step of the `docker` CI job.
+  docs/migrate-from-atmoz.md maps every atmoz example and says that
+  outside the image `--users-conf` is required. It also shows `$$`
   for each `$` of an `$argon2id$` or `$2b$` hash in compose `command:` and
   `environment:`, and `htpasswd -bnBC 10 "" PASS` (htpasswd's default
   bcrypt cost, 5, is below gosftpd's minimum of 10) or `gosftpd user
@@ -1188,8 +1243,8 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
 ### Verification by users
 
 docs/install.md, linked from SECURITY.md ("Verifying releases"), gives
-these commands; `release.yml` runs them before the owner publishes and
-`verify-release.yml` on every published release.
+these commands as its `verify` block; `release.yml` runs them before the
+owner publishes and `verify-release.yml` on every published release.
 
 ```sh
 V=0.5.0
@@ -1247,7 +1302,8 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   with `docker kill -s HUP`) and compose (`docs/examples/compose.yaml`:
   the image by digest, the configuration directory, `read_only: true`,
   `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,
-  `stop_grace_period: 40s`, `init: true` when exec hooks are used).
+  `stop_grace_period: 40s`, `init: true` when exec hooks are used). The
+  blocks that CI runs carry `ci:` markers (Workflows).
   docs/quickstart.md and the README stop calling packages and Docker
   future work.
 - **The release checklist** describes the flow above, runs the local
@@ -1256,19 +1312,29 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   checks the draft's assets and the green verification step before
   publishing, adds the M5 smoke steps of ROADMAP §9.6, waits for
   `verify-release`, and lists the version strings Dependabot does not
-  update (GoReleaser, cosign, syft).
+  update (GoReleaser, cosign, syft, the BuildKit image). It covers a tag
+  whose release did not start (Owner actions), an abandoned draft (Images
+  are public before the release is) and a release-format tag created by
+  mistake, which outranks every later version and only the owner can
+  remove, by bypassing the tag ruleset.
 
 ### Owner actions
 
 1. Add a tag ruleset for `v*` that blocks updates and deletions. Creation
-   stays allowed, for `tag.yml` and for a signed tag the owner may push;
-   who may create `v*` tags is what protects the release identity.
+   stays allowed, for `tag.yml`. The guard and `tag.yml`'s checks catch
+   mistakes, not a holder of write access: `release.yml` is read from the
+   tagged commit, which such a person can change, so who may create `v*`
+   tags and run workflows is what protects the release identity.
 2. After `v0.5.0-rc.1` has pushed the image, set the GHCR package
    `gosftpd` to **Public**: a package of a personal account starts private,
    and anonymous `docker run` fails until then. The
    `org.opencontainers.image.source` label links it to the repository.
 3. For each release: run **Tag release**, check the draft and the green
-   run, press **Publish**, and see `verify-release` pass.
+   run, press **Publish**, and see `verify-release` pass. If **Tag
+   release** created the tag but did not start `release.yml`, re-run it
+   (it then only dispatches) or start the release by hand: `gh workflow
+   run release.yml --ref vX.Y.Z`, or **Actions → release.yml → Run
+   workflow** with the tag selected.
 4. Immutable Releases stays in M6-05.
 
 No repository variable, secret or signing key is needed.
@@ -1279,9 +1345,9 @@ No repository variable, secret or signing key is needed.
 |---|---|
 | The tag produces archives, packages, `checksums.txt` with `.sigstore.json`, SBOMs, a multi-arch image in GHCR, attestations and a `.intoto.jsonl`; the documented verification succeeds | `v0.5.0-rc.1`, then `v0.5.0`, each verified by `release.yml` before publishing and by `verify-release` after; Scorecard after the rc |
 | Two builds of the same tag (same Go and GoReleaser versions) give identical binaries, archives and packages | the `reproducible` job (two cold builds), and the rebuild procedure of docs/install.md once against the rc |
-| Quickstart (a) verbatim on a clean Ubuntu 24.04 (umask 002), without root, amd64 and arm64; fingerprint kept; `healthy`; ≤ 15 MB | the `docker` job on both architectures, and once by hand on a clean Ubuntu 24.04 VM with the rc |
-| `apt install` and `enable --now` on Debian 12, 13 and Ubuntu 24.04; `is-active`; `config validate --check-fs` as gosftpd returns 0 | the `packages` job, from `/` and from `/root` |
-| The atmoz user spec `foo:pass:::upload` works unchanged (with `-p 22:2022`) | stream C's e2e test and the `docker` job |
+| Quickstart (a) verbatim on a clean Ubuntu 24.04 (umask 002), without root, amd64 and arm64; fingerprint kept; `healthy`; ≤ 15 MB | the `docker` job on both architectures (the marked Quickstart block), `goreleaser-check` for the size, and once by hand on a clean Ubuntu 24.04 VM with the rc |
+| `apt install` and `enable --now` on Debian 12, 13 and Ubuntu 24.04; `is-active`; `config validate --check-fs` as gosftpd returns 0 | the `packages` job (the marked `deb` block), from `/` and from `/root` |
+| The atmoz user spec `foo:pass:::upload` works unchanged (with `-p 22:2022`) | M5-10's e2e test and its atmoz step in the `docker` job |
 
 ### Not verified yet
 
@@ -1304,12 +1370,11 @@ settle these:
 - that the health check survives in the pushed multi-arch index;
 - that Scorecard counts the attest bundle named `.intoto.jsonl`, and that
   `gh attestation verify --bundle` reads a file with that suffix;
-- that the runners' default Docker driver builds the `dockers_v2`
-  snapshot, and that their cgroups are v2;
+- that buildx with the pinned BuildKit image builds the `dockers_v2`
+  snapshot and pushes both platforms on the runners (once it does, the
+  engine's own `docker` driver, which needs no image, is the
+  alternative), and that the runners' cgroups are v2;
 - that Dependabot updates a `gcr.io` digest;
-- that the per-user Landlock rules (read-dir on `/home/<user>`, the
-  mount's rights below it) let `os.Root` open `/home/<user>/<dir>`, which
-  the sandboxed tests check;
 - `--start-interval` on engines before Docker 25, and Landlock under the
   seccomp profiles of engines before Docker 29;
 - the zsh completion paths in each distribution's `fpath`, and lintian on
@@ -1331,47 +1396,51 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - **A, CLI groundwork** (first): `internal/config/find.go`;
   `internal/cli/serve.go` (`loadConfig` and the hint only), `cli.go` (the
   export), `doc.go`, `gendocs/`; go.mod; tools/go.mod;
-  `packaging/third_party_licenses.tpl`; a `generate` Makefile target.
+  `packaging/third_party_licenses.tpl`; `make generate`.
 - **B, pipeline and packaging:** `.goreleaser.yaml`;
   `packaging/docker/Dockerfile`; `packaging/scripts/*.sh`;
   `packaging/needrestart.conf`; the unit's `Documentation=` and its check
   in `internal/config/packaging_test.go`;
-  `.github/workflows/{release,ci,tag,verify-release}.yml`;
-  `.github/dependabot.yml`; `test/packages/`, `test/docker/` (every `FROM`
-  pinned by digest).
-- **C, ephemeral and atmoz:** `internal/atmoz` (parser and fuzz target),
-  `internal/cli/ephemeral.go` and `atmoz.go`, flags and mode selection in
-  `serve.go` and the root command's arguments in `cli.go`; `{user}`
-  before the last path component in `internal/vfs` (`SplitUserPath`, state
-  per mount, the overlap rule), `internal/config` (`checkTrusted`, the
-  internal list of trusted files) and the Landlock rules of
-  `internal/sandbox` (per-user rules, the ephemeral directory);
-  docs/migrate-from-atmoz.md.
-- **D, documentation:** docs/install.md, quickstart.md, README, SECURITY.md
-  (verification and the minimum versions), operations.md (leftover files,
-  needrestart, a Docker reload), configuration.md (the search order with
-  the permission-error skip and the atmoz fallback, password logins
-  without a file in ephemeral and atmoz mode, the `{user}` rule),
-  security.md (the Landlock rules in atmoz and ephemeral mode),
-  release-checklist.md, `docs/examples/compose.yaml`, CHANGELOG.
+  `.github/workflows/{release,ci,tag,verify-release}.yml`,
+  `.github/scripts/release-guard.sh`; `.github/dependabot.yml`;
+  `test/packages/`, `test/docker/` (every `FROM` pinned by digest);
+  `test/docs/run-block.sh` and the marked blocks of docs/install.md.
+- **C, ephemeral and atmoz:** `internal/atmoz` (parser, mount builder and
+  fuzz target), `internal/cli/ephemeral.go` and `atmoz.go`, flags and mode
+  selection in `serve.go`, the root command's arguments and `noArgs` in
+  `cli.go`; the visible name in `internal/vfs` and `internal/config`
+  (`Display`, config/build.go); the Landlock rule of the ephemeral
+  directory in `internal/sandbox`; the atmoz step of B's `docker` job,
+  once that job exists; docs/migrate-from-atmoz.md.
+- **D, documentation:** docs/install.md (the prose around B's marked
+  blocks), quickstart.md, README, SECURITY.md (verification and the
+  minimum versions), operations.md (leftover files, needrestart with the
+  unattended-upgrades case, a Docker reload), configuration.md (the search
+  order with the permission-error skip and the atmoz fallback, password
+  logins without a file in ephemeral and atmoz mode), security.md (the
+  Landlock rule in ephemeral mode), release-checklist.md,
+  `docs/examples/compose.yaml`, CHANGELOG.
 
 ## Consequences
 
 - A release needs no local tools: the owner starts a workflow and
-  publishes a draft that the workflow has already verified. A signed tag
-  pushed instead runs the same pipeline, and `release.yml` applies
-  `tag.yml`'s checks to it.
+  publishes a draft that the workflow has already verified. A tag made
+  another way is released by running `release.yml` on it, and `tag.yml`'s
+  checks are then the owner's to do. Versions only go up: `tag.yml`
+  refuses one that is not higher than every release tag.
 - Tags carry no signature. Trust rests on the tag ruleset, the workflow
   identity in every certificate and attestation, and Immutable Releases
   once M6-05 turns them on; until then a published release's assets can
   still be replaced by someone with write access.
 - Image tags are public before the release is published; `latest` moves
-  only to the highest stable version, and a run for a published release
-  stops before building.
-- The signing job runs no generator and restores no Actions cache. Man
-  pages, completions and `THIRD_PARTY_LICENSES` come from a job without
-  credentials and stay trusted output of go-licenses, cobra/doc and their
-  dependencies.
+  only to a stable version that is the highest release tag, and only after
+  the verification step; a run for a published release stops before
+  building.
+- The signing job runs no generator, restores no Actions cache, takes only
+  an exact list of files from the generator job and builds with a pinned
+  BuildKit image. Man pages, completions and `THIRD_PARTY_LICENSES` come
+  from a job without credentials and stay trusted output of go-licenses,
+  cobra/doc and their dependencies.
 - The verification identity contains the repository's exact name. If the
   repository is renamed later (M0-17), new releases get the new identity;
   the documentation then gives both. ADR 0001 calls a rename cosmetic; for
@@ -1401,33 +1470,33 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - atmoz users change the port mapping, use argon2id or bcrypt hashes
   instead of MD5 or SHA-crypt, `chown` key and users files to root, and
   get files owned by 65532 unless they run with `--user`; upper-case names
-  and nested directories are refused. As in atmoz, an upload overwrites an
-  existing name, a user given twice is skipped, and a new user needs a
-  restart.
-- A mount with `{user}` before the last component gets Landlock rules per
-  user known at start, so a user added by a reload needs a restart for it;
-  key files under its prefix stay unwritable.
-- The estimate grows from 6–9 to 10–14 person-days: 8.5–12 from the
-  research, plus about 1.5–2 for the design review (the `verify-tag` and
-  `generate` jobs and the verification step, the CI cases, per-user
-  Landlock rules and state per mount, the atmoz edge cases).
+  and nested directories are refused; outside the image the users file
+  must be named with `--users-conf`. As in atmoz, an upload overwrites an
+  existing name, a user given twice is skipped, and any change needs a
+  restart. The configuration's mount rules do not change: atmoz mode
+  builds plain mounts with a visible name, which is not a configuration
+  key.
+- The estimate grows from 6–9 to 9–12 person-days: the research's
+  breakdown plus what the reviews added and kept (the `generate` job and
+  the release guard, the verification step before Publish, the CI cases
+  for packages and the image, atmoz mode's edge cases and visible names).
 - ROADMAP: §4.5 takes the tool versions; the M5 items and DoD take the
   decisions above (the release flow instead of signed tags, no apk, two
   attest steps, the `.intoto.jsonl`, reproducibility with the same Go and
   GoReleaser versions, the atmoz port, the DoD command from any directory,
-  the estimate); §6.1 item 4 allows `{user}` before the last path
-  component, with the overlap rule and per-user Landlock rules; §6.7 gets
-  the root-level spec form; §9.1 drops the `NFPM_MAINTAINER` variable and
-  lists `tag.yml`, `verify-release.yml` and the Dependabot directories;
-  §9.3 takes the flow, the `verify-tag` and `generate` jobs, `cache:
-  false`, the permissions without `artifact-metadata`, the verification
-  before Publish, the pinned tools without QEMU and a corrected fragment;
-  §9.4 the image's size, Dockerfile and `CMD`, the configuration
+  the estimate, also in the §5 table); §6.7 gets the root-level spec form;
+  §9.1 drops the `NFPM_MAINTAINER` variable, starts `release.yml` only by
+  dispatch and lists `tag.yml`, `verify-release.yml` and the Dependabot
+  directories; §9.3 takes the flow, the guard and the `generate` job,
+  `latest` after verification, `cache: false`, the permissions without
+  `artifact-metadata`, the verification before Publish, the pinned tools
+  without QEMU and a corrected fragment; §9.4 the image's size, Dockerfile and `CMD`, the configuration
   directory, the package formats, scripts, needrestart file and
   `Documentation=`; §9.5 cosign v3.1.4, the exact identities, the pinned
   `gh attestation verify`, verification by digest and the `.intoto.jsonl`;
   §9.6 skips signing in the local snapshot; §10 mounts a configuration
-  directory in the Docker Quickstart; D13 is decided.
+  directory in the Docker Quickstart; D13 is decided; the post-1.0
+  backlog gets releases from `release/1.N` branches.
 
 ## Alternatives considered
 
@@ -1438,9 +1507,9 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   the interface, but needs a signing key and the most steps. The notes come
   from CHANGELOG.md instead.
 - **Signed tags only** (`git tag -s`): needs a local git with a key
-  registered on GitHub for every release; the owner chose the workflow.
-  The pipeline accepts signed tags, so this can change without a change
-  here.
+  registered on GitHub for every release; the owner chose the workflow. A
+  signed tag pushed by hand is still released by a dispatch of
+  `release.yml`, so this can change without a change here.
 - **release-please:** its tags are made with `GITHUB_TOKEN` too, it would
   need GoReleaser in the same workflow, and it adds a bot's pull requests.
 - **GoReleaser v2.18.2:** wrong image digest (#7180). v2.18.3 is the
@@ -1448,13 +1517,20 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - **The before hooks in the release job**, GoReleaser's default: they
   would run third-party code with the release token, the OIDC token and
   the GHCR login, after the dirty-tree check.
-- **The checks only in `tag.yml`:** a pushed signed tag, or a tag created
-  through the API and dispatched by hand, would skip them.
+- **A `push: tags` trigger with a `verify-tag` job** repeating `tag.yml`'s
+  checks: it serves only the signed-tag path the owner did not choose,
+  duplicates every check, runs after the ruleset has made the tag
+  permanent, and starts a run with release credentials on any stray `git
+  push --tags`.
+- **`latest` as a `dockers_v2` tag** for the highest stable tag (an
+  `IS_LATEST` variable): GoReleaser would move it before the verification
+  step, and the rule guards against cases that cannot occur before 1.0
+  (only the latest minor is supported, `tag.yml` tags `main`). It comes
+  back, with tags off `main`, with the `release/1.N` branches of ROADMAP
+  §9.6 (backlog item 14).
 - **`latest` moved only after publication** (`docker buildx imagetools
   create` in a workflow on `release: published`): keeps `latest` off
-  drafts, but needs `packages: write` in a second workflow; the
-  highest-stable rule and the published-release guard already stop the
-  backwards moves.
+  drafts, but needs `packages: write` in a second workflow.
 - **`--certificate-identity-regexp`** or a repository rename before
   v0.5.0: a pattern loosens what is checked; the owner chose no rename.
   For the same reason `gh attestation verify` does not rely on `--repo`
@@ -1483,7 +1559,8 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - **Package scripts that enable and restart the service** (debhelper's
   default): an upgrade would end every session at a time the operator did
   not choose. Leaving needrestart alone and documenting it would do the
-  same on Ubuntu.
+  same on Ubuntu, also on the next unattended-upgrades run after any
+  upgrade that was not followed by a restart.
 - **A docs generator in `tools/`** (needs a `replace` of the main module and
   still cannot import `internal/`) or completions from running the built
   binary (wrong architecture when cross-building).
@@ -1502,14 +1579,24 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   **relaxing the ownership check for atmoz files** (§6.5 stays
   one rule), and **only positional specs** (atmoz's `SFTP_USERS` and
   users-file examples would need a changed command).
-- **atmoz: a Landlock rule on `/home`** for `{user}` mounts: simpler, and a
-  user added by a reload would work at once, but every key file under
-  `/home` would be writable to gosftpd, which ADR 0011 and docs/security.md
-  rule out.
+- **atmoz: `{user}` before the last path component**
+  (`/home/{user}/upload` as one mount for every user): one mount per
+  directory name, but it changes §6.1 item 4 of the configuration
+  contract that M6 freezes and needs a path helper at seven call sites,
+  state per mount, a new overlap rule and per-user Landlock rules created
+  at start (a rule on `/home` would make every key file under it
+  writable). Plain mounts with a visible name give the same layout.
+- **atmoz: a reload of the users file and the keys:** atmoz has none; it
+  would need Landlock read rules and `restart_required` cases, and would
+  read the old inode of a file replaced under a single-file mount.
 - **atmoz: `on_conflict = "rename"`**, gosftpd's default: OpenSSH
   overwrites, and jobs that write the same name would pile up copies.
 - **atmoz: a user given twice as an error:** stricter, but atmoz skips it
   with a warning, and a migrated setup may rely on that.
-- **atmoz's container conventions everywhere:** on a host, `/home`
-  discovery would expose real home directories and `/etc/ssh` would hand
-  out sshd's identity.
+- **atmoz's container conventions everywhere:** on a host, a leftover
+  `/etc/sftp/users.conf` would start password users, `/home` discovery
+  would expose real home directories and `/etc/ssh` would hand out sshd's
+  identity.
+- **atmoz: no `/home` discovery and no `/etc/ssh` host keys:** less code,
+  but five of the seven examples in atmoz's README name no directory and
+  would log in to an empty root, and clients would get a new host key.
