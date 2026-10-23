@@ -24,9 +24,11 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      # No image yet: pushing it needs buildx, the GHCR login and
+      # packages: write, which the release workflow of ADR 0012 brings.
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: v2.19.0
-          args: release --clean
+          args: release --clean --skip=docker
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

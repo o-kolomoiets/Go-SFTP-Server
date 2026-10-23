@@ -33,3 +33,10 @@ updates:
     groups:
       actions:
         update-types: [minor, patch]
+
+  # The base image's digest in packaging/docker/Dockerfile and the digests
+  # every FROM under test/ is pinned by (ADR 0012).
+  - package-ecosystem: docker
+    directories: [/packaging/docker, /test/packages, /test/docker]
+    schedule:
+      interval: weekly

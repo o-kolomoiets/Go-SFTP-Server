@@ -1,7 +1,8 @@
 # GoReleaser v2.19.0 configuration (ADR 0012): archives for Linux, macOS and
-# FreeBSD, checksums.txt and a draft GitHub release. Windows follows once
-# the isolation tests pass there (M3b).
+# FreeBSD, checksums.txt, the image ghcr.io/o-kolomoiets/gosftpd and a draft
+# GitHub release. Windows follows once the isolation tests pass there (M3b).
 # Check with: goreleaser check && goreleaser release --snapshot --clean
+# (the image needs Docker with buildx; without it add --skip=docker).
 version: 2
 project_name: gosftpd
 
@@ -74,8 +75,34 @@ archives:
 
 checksum: { name_template: checksums.txt, algorithm: sha256 }
 
-# The SBOMs and signatures (sboms, signs), the packages (nfpms) and the image
-# (dockers_v2, docker_signs, docker_digest) go here, in this order (ADR 0012).
+# The SBOMs and signatures (sboms, signs) and the packages (nfpms) go here,
+# in this order (ADR 0012).
+
+# linux/amd64 and linux/arm64 from packaging/docker/Dockerfile, which copies
+# the Linux binary and the empty directories make generate creates. Only
+# the version tag: release.yml points latest at a stable version once its
+# verification step has passed. A snapshot builds one image per platform
+# and appends the architecture: v<version>-amd64 and -arm64.
+dockers_v2:
+  - id: image
+    ids: [gosftpd]
+    dockerfile: packaging/docker/Dockerfile
+    extra_files: [out/docker]
+    images: [ghcr.io/o-kolomoiets/gosftpd]
+    tags: ["v{{ .Version }}"]
+    platforms: [linux/amd64, linux/arm64]
+    labels:
+      org.opencontainers.image.source: https://github.com/o-kolomoiets/Go-SFTP-Server
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+# docker_signs goes here (ADR 0012).
+
+# dist/digests.txt: "<hex>  ghcr.io/o-kolomoiets/gosftpd:<tag>" per pushed
+# tag, the digest users verify and run (docs/install.md). Not in a snapshot.
+docker_digest: { name_template: digests.txt }
 
 # Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit (git's
 # version sort ranks the rc higher).
