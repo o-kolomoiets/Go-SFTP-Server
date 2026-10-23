@@ -4,14 +4,21 @@
 # the host and the changes docs/migrate-from-atmoz.md asks for (-p 2222:2022,
 # chown of the mounted files, a bcrypt hash instead of MD5-crypt).
 #
-# Usage: test/docker/atmoz.sh IMAGE, an image that docker run finds
-# without pulling. Needs bash, docker, openssh-client (sftp, ssh-keygen,
-# ssh-keyscan) and, unless run as root, passwordless sudo for chown.
+# Usage: test/docker/atmoz.sh IMAGE, an image already loaded: the script
+# never pulls. Needs bash, docker, openssh-client (sftp, ssh-keygen,
+# ssh-keyscan) and, unless run as root, passwordless sudo for chown. It
+# runs under umask 002, as the docker CI job's other step does.
 # ATMOZ_PORT is the host port (default 2222); KEEP_WORK=1 keeps the work
-# directory.
+# directory. REQUIRE_LANDLOCK=1 (CI) fails when gosftpd does not apply
+# Landlock in a container.
 set -euo pipefail
+umask 002
 
 IMAGE=${1:?usage: test/docker/atmoz.sh IMAGE}
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "$IMAGE is not loaded: test/docker/atmoz.sh never pulls" >&2
+	exit 2
+fi
 PORT=${ATMOZ_PORT:-2222}
 WORK="$(mktemp -d)"
 NAME="gosftpd-atmoz-$$"
@@ -57,11 +64,30 @@ wait_up() {
 }
 
 # start ARG...: runs a container of IMAGE as NAME, port 2022 published as
-# PORT; ARG... are docker run's options, the image and its arguments.
+# PORT; ARG... are docker run's options, the image and its arguments. The
+# container must have applied Landlock; without REQUIRE_LANDLOCK a kernel
+# without it is accepted.
 start() {
 	docker rm -f "$NAME" >/dev/null 2>&1 || true
 	docker run -d --name "$NAME" -p "127.0.0.1:$PORT:2022" "$@" >/dev/null
 	wait_up || { echo "FAIL: the container did not start: docker run $*" >&2; exit 1; }
+	if ! logged 'landlock: ABI v[0-9]* applied' && { [ -n "${REQUIRE_LANDLOCK:-}" ] || ! logged 'landlock: not available'; }; then
+		fail "no Landlock ruleset: $(grep landlock "$WORK/log" | head -n 3)"
+	fi
+}
+
+# healthy: the image's health check passes within 30 s.
+healthy() {
+	local s
+	for _ in $(seq 120); do
+		s=$(docker inspect -f '{{.State.Health.Status}}' "$NAME")
+		case $s in
+		healthy) return 0 ;;
+		unhealthy) return 1 ;;
+		esac
+		sleep 0.25
+	done
+	return 1
 }
 
 # logged PATTERN: the container's output, its audit and operational log,
@@ -120,6 +146,7 @@ printf 'the second\n' >"$WORK/local/b.txt"
 
 # --- docker run -p 22:22 -d atmoz/sftp foo:pass:::upload -----------------
 start "$IMAGE" foo:pass:::upload
+healthy && pass "foo:pass:::upload: healthy" || fail "foo:pass:::upload: $(docker inspect -f '{{json .State.Health}}' "$NAME")"
 if sftp_pw foo pass "$(batch "put $WORK/local/a.txt upload/a.txt" "put $WORK/local/b.txt upload/a.txt" \
 	"get upload/a.txt $WORK/local/got.txt" "-put $WORK/local/a.txt /root.txt" '-mkdir /dir')"; then
 	pass "foo:pass:::upload: password login, two uploads of one name"
@@ -209,6 +236,14 @@ fi
 logged 'msg="atmoz mode" users_file=3 arguments=0 sftp_users=0' && logged '/etc/sftp/users.conf line 2 (user bar): no directories' &&
 	logged 'msg="atmoz mode: the uid and gid of user specs are ignored"' &&
 	pass "users.conf: logged with the warnings" || fail "users.conf: log: $(head -8 "$WORK/log")"
+# The new volume starts with the image's /home, which holds the base
+# image's /home/nonroot (0700, 65532): a directory in /home is not a user.
+home=$(docker volume inspect -f '{{.Mountpoint}}' "$VOLUME")
+if "${SUDO[@]}" test -d "$home/nonroot" && logged '^auth: .* 3 users,' && ! logged nonroot; then
+	pass "users.conf: the volume's nonroot directory is not a user"
+else
+	fail "users.conf: nonroot: $(grep nonroot "$WORK/log")"
+fi
 no_secrets "users.conf"
 
 # --- Encrypted password: MD5-crypt is refused, bcrypt works ---------------

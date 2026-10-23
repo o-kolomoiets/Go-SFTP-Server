@@ -722,16 +722,20 @@ jobs:
     `config example` and the `chown` with `sed -i "s|<paste your public
     key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`; and the `compose`
     block with `read_only` (its `image:`, a digest that cannot be retagged,
-    overridden with the local tag). M5-10 adds the atmoz step once the job
-    exists: `docker run -p 2222:2022 IMAGE foo:pass:::upload`, an upload
-    and a second one of the same name that overwrites it; a key file in a
-    host directory mounted on `/home/foo/.ssh/keys`, removed on the host
-    and refused after `docker restart` (a single-file mount cannot show
-    it: Docker 29 recreates a removed source as a directory and the
-    restart fails); and the missing configuration directory with
-    `SFTP_USERS` set, which must exit 2 with no listener. The step is
-    `test/docker/atmoz.sh IMAGE`, which also runs the other examples of
-    the atmoz README.
+    overridden with the local tag). A second step, `test/docker/atmoz.sh
+    IMAGE`, runs the examples of the atmoz README with OpenSSH's `sftp`
+    against the loaded image, on host port 2222 (`ATMOZ_PORT`): `docker
+    run -p 2222:2022 IMAGE foo:pass:::upload`, `healthy`, an upload and a
+    second one of the same name that overwrites it; a key file in a host
+    directory mounted on `/home/foo/.ssh/keys`, removed on the host and
+    refused after `docker restart` (a single-file mount cannot show it:
+    Docker 29 recreates a removed source as a directory and the restart
+    fails); `users.conf` with a new named volume on `/home`, whose copy of
+    the base image's `/home/nonroot` (0700, 65532) is not a user;
+    `SFTP_USERS`, `:e` (MD5-crypt refused, bcrypt), an `/etc/ssh` host
+    key; and the missing configuration directory with `SFTP_USERS` set,
+    which must exit 2 with no listener. Every container applies Landlock
+    in this step too.
   - The three new jobs join `ci-ok`'s needs; stream C adds one fuzz-smoke
     entry (`FuzzAtmozSpec`).
 - **Dependabot** gets `package-ecosystem: docker` with `directories:
@@ -1552,8 +1556,8 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   selection in `serve.go`, the root command's arguments and `noArgs` in
   `cli.go`; the visible name in `internal/vfs` and `internal/config`
   (`Display`, config/build.go); the Landlock rule of the ephemeral
-  directory in `internal/sandbox`; the atmoz step of B's `docker` job,
-  once that job exists; docs/migrate-from-atmoz.md.
+  directory in `internal/sandbox`; the atmoz step of B's `docker` job
+  (`test/docker/atmoz.sh`); docs/migrate-from-atmoz.md.
 - **D, documentation:** docs/install.md (the prose around B's marked
   blocks), quickstart.md, README, SECURITY.md (verification and the
   minimum versions), operations.md (leftover files, needrestart with the

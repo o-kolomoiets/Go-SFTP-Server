@@ -614,10 +614,11 @@ jobs:
 
   # The image goreleaser-check built, against the commands of
   # docs/install.md (test/docker/run.sh): the quickstart block, a reload, the
-  # hint for a missing configuration followed, the compose block. On amd64
-  # and on arm64 (real Landlock, no QEMU), as the runner's user under umask
-  # 002; every reference the run uses is tagged to the loaded image, so
-  # that nothing is pulled from GHCR (ADR 0012).
+  # hint for a missing configuration followed, the compose block; then
+  # against the examples of the atmoz/sftp README (test/docker/atmoz.sh).
+  # On amd64 and on arm64 (real Landlock, no QEMU), as the runner's user
+  # under umask 002; every reference the run uses is tagged to the loaded
+  # image, so that nothing is pulled from GHCR (ADR 0012).
   docker:
     name: docker (${{ matrix.arch }})
     needs: goreleaser-check
@@ -647,12 +648,16 @@ jobs:
           docker load --input "$RUNNER_TEMP/images/gosftpd-$ARCH.tar.gz"
       - name: The documented commands against the image
         run: test/docker/run.sh "ghcr.io/o-kolomoiets/gosftpd:v$V-$ARCH" "$V"
-      # The atmoz step goes here (TASKS M5-10, ADR 0012): docker run -p
-      # 2222:2022 IMAGE foo:pass:::upload, an upload and a second one of the
-      # same name that overwrites it; a key file mounted under
-      # /home/foo/.ssh/keys, removed on the host and refused after docker
-      # restart; the missing configuration directory with SFTP_USERS set,
-      # which must exit 2 with no listener.
+      # The atmoz README's examples with OpenSSH's sftp (ADR 0012): docker
+      # run -p 2222:2022 IMAGE foo:pass:::upload, an upload and a second one
+      # of the same name that overwrites it; keys in a host directory
+      # mounted on /home/foo/.ssh/keys, one removed on the host and refused
+      # after docker restart; users.conf, SFTP_USERS, :e hashes and an
+      # /etc/ssh host key; the missing configuration directory with
+      # SFTP_USERS set, which must exit 2 with no listener. Host port 2222,
+      # the loaded image only.
+      - name: The atmoz examples against the image
+        run: test/docker/atmoz.sh "ghcr.io/o-kolomoiets/gosftpd:v$V-$ARCH"
 
   # The packages goreleaser-check built, under systemd as PID 1
   # (test/packages/run.sh, ADR 0012): installed (for deb the deb block of
