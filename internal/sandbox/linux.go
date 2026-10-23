@@ -368,6 +368,20 @@ func infoOf(fi os.FileInfo, err error) (Info, error) {
 	return Info{Dev: dev, Ino: ino, Mode: fi.Mode().Type()}, nil
 }
 
+// HeldDir describes the directory that f holds open, for a rule added
+// through its descriptor: Options.Ephemeral. f must stay open until Start
+// has returned.
+func HeldDir(f *os.File) (MountDir, error) {
+	info, err := infoOf(f.Stat())
+	if err != nil {
+		return MountDir{}, err
+	}
+	if !info.IsDir() {
+		return MountDir{}, fmt.Errorf("%s: not a directory", f.Name())
+	}
+	return MountDir{FD: int(f.Fd()), Dev: info.Dev, Ino: info.Ino}, nil
+}
+
 // devIno returns a stat's device and inode as uint64: their types differ
 // between architectures.
 func devIno(st *syscall.Stat_t) (dev, ino uint64) {

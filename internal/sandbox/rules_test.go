@@ -699,6 +699,76 @@ func TestMountRules(t *testing.T) {
 	})
 }
 
+// TestEphemeralRule: serve --ephemeral's directory gets remove_file and
+// remove_dir, through the descriptor it holds, besides its data mount;
+// with --dir the mount is elsewhere. A directory swapped or removed after
+// it was made fails the start.
+func TestEphemeralRule(t *testing.T) {
+	t.Parallel()
+	const dir = "/tmp/gosftpd-ephemeral-1"
+	m := newMemFS(t).dirs(dir+"/data", "/srv/share").files(dir + "/id_ed25519")
+	ephemeralInput := func(t *testing.T, mount string, readOnly bool) Input {
+		t.Helper()
+		c := config.Default()
+		c.EphemeralDir = native(dir)
+		c.AddMount(filepath.Base(mount), native(mount)).ReadOnly = readOnly
+		in := input(t, m, c)
+		info, err := m.Stat(native(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Ephemeral = &MountDir{FD: 5, Dev: info.Dev, Ino: info.Ino}
+		return in
+	}
+	const remove = "dir " + dir + " remove_file,remove_dir"
+
+	p := compute(t, ephemeralInput(t, dir+"/data", false))
+	checkPlan(t, p, []string{remove, "dir " + dir + "/data " + rw})
+	for _, r := range p.Rules {
+		switch slash(r.Path) {
+		case dir:
+			if r.Open != "/proc/self/fd/5" || !slices.Equal(r.For, []string{"--ephemeral"}) {
+				t.Errorf("%s: Open %q, For %v", dir, r.Open, r.For)
+			}
+		case dir + "/data":
+			if !slices.Equal(r.For, []string{"--ephemeral data"}) {
+				t.Errorf("data: For %v", r.For)
+			}
+		}
+	}
+
+	// Read-only, the data mount's rule keeps the read rights; the
+	// directory's rule lets gosftpd delete what a test put there.
+	checkPlan(t, compute(t, ephemeralInput(t, dir+"/data", true)), []string{remove, "dir " + dir + "/data " + ro})
+
+	in := ephemeralInput(t, "/srv/share", false)
+	p = compute(t, in)
+	checkPlan(t, p, []string{remove, "dir /srv/share " + rw})
+	if i := slices.IndexFunc(p.Rules, func(r Rule) bool { return slash(r.Path) == "/srv/share" }); !slices.Equal(p.Rules[i].For, []string{"--dir share"}) {
+		t.Errorf("--dir: For %v", p.Rules[i].For)
+	}
+
+	// Without the descriptor, by its path.
+	in.Ephemeral = nil
+	p = compute(t, in)
+	if i := slices.IndexFunc(p.Rules, func(r Rule) bool { return slash(r.Path) == dir }); p.Rules[i].Open != p.Rules[i].Path {
+		t.Errorf("by path: Open %q", p.Rules[i].Open)
+	}
+
+	in = ephemeralInput(t, "/srv/share", false)
+	in.Ephemeral.Ino++
+	if _, err := Compute(in); err == nil || err.Error() != "--ephemeral: "+native(dir)+" is no longer the directory gosftpd created" {
+		t.Errorf("swapped: Compute = %v", err)
+	}
+	in = ephemeralInput(t, "/srv/share", false)
+	gone := newMemFS(t).dirs("/srv/share")
+	in.FS = gone
+	in.Mounts = input(t, gone, in.Config).Mounts
+	if _, err := Compute(in); err == nil || !strings.Contains(err.Error(), "is no longer the directory gosftpd created") {
+		t.Errorf("removed: Compute = %v", err)
+	}
+}
+
 // TestDedupe: one rule per path, with the rights of all; rules below a
 // directory rule that gives all their rights are left out.
 func TestDedupe(t *testing.T) {

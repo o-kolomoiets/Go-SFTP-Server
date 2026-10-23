@@ -257,6 +257,27 @@ level = "verbose"
 	}
 }
 
+// TestValidateEphemeral: the configuration of serve --ephemeral has no
+// host key file, which only it may lack, and validates without warnings.
+func TestValidateEphemeral(t *testing.T) {
+	t.Parallel()
+	hash, err := auth.HashPassword([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := Default()
+	c.Auth.Methods = []string{auth.MethodPublicKey, auth.MethodPassword}
+	c.AddMount("data", filepath.Join(t.TempDir(), "data"))
+	c.Users["test"] = &User{AuthorizedKeys: []string{pubKey(t)}, PasswordHash: hash, Access: map[string]string{"data": "full"}}
+	if _, err := c.Validate(); err == nil || !strings.Contains(err.Error(), "server.host_keys: at least one") {
+		t.Errorf("without EphemeralDir: %v", err)
+	}
+	c.EphemeralDir = t.TempDir()
+	if warns := mustValidate(t, c); len(warns) != 0 {
+		t.Errorf("warnings %q", warns)
+	}
+}
+
 func TestValidateMissingVersionAndWarnings(t *testing.T) {
 	t.Parallel()
 

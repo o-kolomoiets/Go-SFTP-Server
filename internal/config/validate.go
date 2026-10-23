@@ -140,7 +140,7 @@ func (c *Config) validateServer(p *problems) {
 			p.errorf("server.listen", "%v", err)
 		}
 	}
-	if len(s.HostKeys) == 0 && c.AnyUser == nil {
+	if len(s.HostKeys) == 0 && c.AnyUser == nil && c.EphemeralDir == "" {
 		p.errorf("server.host_keys", "at least one host key file is required (with host_key_auto_generate = true it is created on first start)")
 	}
 	for _, k := range s.HostKeys {

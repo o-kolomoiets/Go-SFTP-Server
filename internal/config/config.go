@@ -57,6 +57,11 @@ type Config struct {
 	// AnyUser is set in zero-config mode (serve --dir): every SSH user name
 	// is accepted with these keys and gets full access to every mount.
 	AnyUser *ZeroConfigUser `toml:"-"`
+	// EphemeralDir is set by serve --ephemeral (ADR 0012): the directory
+	// it created for the client key and, without --dir, the data, whose
+	// entries it removes at exit. The host key is generated in memory,
+	// so server.host_keys is empty.
+	EphemeralDir string `toml:"-"`
 
 	defined map[string]bool // keys set in File
 }

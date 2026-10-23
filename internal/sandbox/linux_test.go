@@ -153,6 +153,41 @@ func TestOSFS(t *testing.T) {
 	}
 }
 
+// TestHeldDir: the descriptor of a directory held open, with its device
+// and inode; a file is refused.
+func TestHeldDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	f, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	held, err := HeldDir(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(dir, &st); err != nil {
+		t.Fatal(err)
+	}
+	if dev, ino := devIno(&st); held.FD != int(f.Fd()) || held.Dev != dev || held.Ino != ino {
+		t.Errorf("HeldDir = %+v", held)
+	}
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if _, err := HeldDir(g); err == nil || err.Error() != file+": not a directory" {
+		t.Errorf("HeldDir of a file: %v", err)
+	}
+}
+
 // TestUnsandboxed runs the steps that are harmless in the test process.
 func TestUnsandboxed(t *testing.T) {
 	t.Parallel()
@@ -520,6 +555,109 @@ func applyChild(t *testing.T) {
 	if strings.TrimSpace(line) == "true" {
 		procSelf("after drop_caches")
 	}
+}
+
+// TestApplyEphemeral: the rule on serve --ephemeral's directory lets
+// gosftpd remove the client key and the data, also from a read-only
+// mount, through the directory it holds; it cannot read the key, list or
+// add to the directory, remove the directory itself or anything else in
+// $TMPDIR.
+func TestApplyEphemeral(t *testing.T) {
+	t.Parallel()
+	if role() == "ephemeral" {
+		ephemeralChild(t)
+		return
+	}
+	needLandlock(t)
+	base := t.TempDir()
+	dir := filepath.Join(base, "gosftpd-ephemeral-1")
+	for _, name := range []string{"gosftpd-ephemeral-1/id_ed25519", "gosftpd-ephemeral-1/data/fixture.txt", "gosftpd-ephemeral-1/data/sub/f.txt", "other.txt", "other/"} {
+		path := filepath.Join(base, name)
+		if strings.HasSuffix(name, "/") {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := child(t, "ephemeral", dirEnv+"="+base)
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "--- PASS: TestApplyEphemeral") {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+	if des, err := os.ReadDir(dir); err != nil || len(des) != 0 {
+		t.Errorf("%s: %v, %v; want it empty", dir, des, err)
+	}
+	for _, name := range []string{"other.txt", "other"} {
+		if _, err := os.Stat(filepath.Join(base, name)); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func ephemeralChild(t *testing.T) {
+	t.Helper()
+	base := os.Getenv(dirEnv)
+	dir := filepath.Join(base, "gosftpd-ephemeral-1")
+	data := filepath.Join(dir, "data")
+	c := config.Default()
+	c.EphemeralDir = dir
+	c.AddMount("data", data).ReadOnly = true
+	c.Server.Landlock = config.LandlockRequired
+	fd, err := unix.Open(data, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		t.Fatal(err)
+	}
+	dev, ino := devIno(&st)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := root.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := HeldDir(f)
+	if err != nil || held.FD != int(f.Fd()) {
+		t.Fatalf("HeldDir = %+v, %v", held, err)
+	}
+	l := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	if _, err := Start(t.Context(), Options{Config: c, Mounts: []MountDir{{Name: "data", FD: fd, Dev: dev, Ino: ino}}, Ephemeral: &held, Log: l}); err != nil {
+		t.Fatal(err)
+	}
+
+	denied := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s: %v, want permission denied", what, err)
+		}
+	}
+	_, err = os.ReadFile(filepath.Join(dir, "id_ed25519"))
+	denied("read the key", err)
+	_, err = os.ReadDir(dir)
+	denied("list the directory", err)
+	denied("create in the directory", root.WriteFile("new", nil, 0o600))
+	denied("mkdir in the directory", root.Mkdir("new", 0o700))
+	denied("upload to the read-only mount", os.WriteFile(filepath.Join(data, "new.txt"), nil, 0o600))
+	if err := root.Remove("id_ed25519"); err != nil {
+		t.Errorf("remove the key: %v", err)
+	}
+	if err := root.RemoveAll("data"); err != nil {
+		t.Errorf("remove the data: %v", err)
+	}
+	denied("remove the directory", os.Remove(dir))
+	denied("remove a file in $TMPDIR", os.Remove(filepath.Join(base, "other.txt")))
+	denied("remove a directory in $TMPDIR", os.Remove(filepath.Join(base, "other")))
 }
 
 // dropCaches makes the kernel reclaim dentries, through sudo -n as the
