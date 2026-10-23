@@ -664,10 +664,14 @@ jobs:
     block with `read_only` (its `image:`, a digest that cannot be retagged,
     overridden with the local tag). M5-10 adds the atmoz step once the job
     exists: `docker run -p 2222:2022 IMAGE foo:pass:::upload`, an upload
-    and a second one of the same name that overwrites it; a key file
-    mounted under `/home/foo/.ssh/keys`, removed on the host and refused
-    after `docker restart`; and the missing configuration directory with
-    `SFTP_USERS` set, which must exit 2 with no listener.
+    and a second one of the same name that overwrites it; a key file in a
+    host directory mounted on `/home/foo/.ssh/keys`, removed on the host
+    and refused after `docker restart` (a single-file mount cannot show
+    it: Docker 29 recreates a removed source as a directory and the
+    restart fails); and the missing configuration directory with
+    `SFTP_USERS` set, which must exit 2 with no listener. The step is
+    `test/docker/atmoz.sh IMAGE`, which also runs the other examples of
+    the atmoz README.
   - The three new jobs join `ci-ok`'s needs; stream C adds one fuzz-smoke
     entry (`FuzzAtmozSpec`).
 - **Dependabot** gets `package-ecosystem: docker` with `directories:
