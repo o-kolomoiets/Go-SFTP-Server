@@ -41,6 +41,14 @@ func TestFindTable(t *testing.T) {
 	file, dir := fakeInfo{}, fakeInfo{dir: true}
 	denied := func(p string) error { return &fs.PathError{Op: "stat", Path: p, Err: syscall.EACCES} }
 	notPermitted := func(p string) error { return &fs.PathError{Op: "stat", Path: p, Err: syscall.EPERM} }
+	// A stat through a file fails with ENOTDIR, which stops the search. On
+	// Windows ENOTDIR is ERROR_PATH_NOT_FOUND, a missing file, so the case
+	// uses another error that is neither a missing file nor a permission
+	// error.
+	var notDir error = syscall.ENOTDIR
+	if runtime.GOOS == "windows" {
+		notDir = syscall.EIO
+	}
 
 	for _, tt := range []struct {
 		name     string
@@ -122,8 +130,8 @@ func TestFindTable(t *testing.T) {
 			wantErr: ErrIsDir, wantMsg: etc + " is a directory",
 		},
 		{
-			name: "etc not a directory stays an error", files: map[string]any{etc: &fs.PathError{Op: "stat", Path: etc, Err: syscall.ENOTDIR}, user: file},
-			wantErr: syscall.ENOTDIR,
+			name: "etc not a directory stays an error", files: map[string]any{etc: &fs.PathError{Op: "stat", Path: etc, Err: notDir}, user: file},
+			wantErr: notDir,
 		},
 		{name: "nothing", wantErr: ErrNotFound, wantMsg: ErrNotFound.Error()},
 	} {

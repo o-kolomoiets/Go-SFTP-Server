@@ -314,6 +314,8 @@ func TestThirdPartyLicensesTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	// The names differ in more than case: macOS and Windows file systems
+	// ignore case.
 	file := func(name, text string) string {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
@@ -321,13 +323,13 @@ func TestThirdPartyLicensesTemplate(t *testing.T) {
 		}
 		return p
 	}
-	toml := license{"github.com/BurntSushi/toml", "v1.6.0", file("COPYING", "MIT text\n"), "https://example.com/toml", "MIT"}
-	psx := file("License", "BSD-3-Clause or GPL-2.0 text\n")
+	toml := license{"github.com/BurntSushi/toml", "v1.6.0", file("toml-COPYING", "MIT text\n"), "https://example.com/toml", "MIT"}
+	psx := file("psx-License", "BSD-3-Clause or GPL-2.0 text\n")
 	psxGPL := license{"kernel.org/pub/linux/libs/security/libcap/psx", "v1.2.77", psx, "Unknown", "GPL-2.0"}
 	psxBSD := psxGPL
 	psxBSD.LicenseName = "BSD-3-Clause"
-	sys := license{"golang.org/x/sys", "v0.49.0", file("LICENSE", "BSD text without a final newline"), "https://example.com/sys", "BSD-3-Clause"}
-	other := license{"example.com/other", "v1.0.0", file("OTHER", "Apache text\n"), "Unknown", "Apache-2.0"}
+	sys := license{"golang.org/x/sys", "v0.49.0", file("sys-LICENSE", "BSD text without a final newline"), "https://example.com/sys", "BSD-3-Clause"}
+	other := license{"example.com/other", "v1.0.0", file("other-LICENSE", "Apache text\n"), "Unknown", "Apache-2.0"}
 
 	entry := func(l license, text string) string {
 		return "\n" + strings.Repeat("=", 80) + "\n" + l.Name + " " + l.Version + "\nLicense: " + l.LicenseName + "\n\n" + text
