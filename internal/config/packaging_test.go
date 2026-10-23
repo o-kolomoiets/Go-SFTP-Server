@@ -172,8 +172,14 @@ func TestPackagingAgrees(t *testing.T) {
 	c, _, unix := loadPackaged(t)
 	unit := parseUnit(t, "systemd/gosftpd.service")
 
+	// The unit never reaches atmoz mode, as docs/migrate-from-atmoz.md
+	// says: --config is strict, and ProtectHome=yes hides /home, where
+	// atmoz mode looks for directories and keys (ADR 0012).
 	if got, want := unit.one(t, "Service.ExecStart"), "/usr/bin/gosftpd serve --config /etc/gosftpd/config.toml"; got != want {
 		t.Errorf("ExecStart=%s, want %s", got, want)
+	}
+	if got := unit.one(t, "Service.ProtectHome"); got != "yes" {
+		t.Errorf("ProtectHome=%s, want yes", got)
 	}
 	// The man page that the packages install (make generate writes
 	// gosftpd.1), then docs/install.md (ADR 0012).
