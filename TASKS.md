@@ -14,7 +14,7 @@ The plan, rationale and acceptance criteria are in [ROADMAP.md](ROADMAP.md). Thi
 | M3 Hardening | v0.3.0 | ✅ | 12 / 12 |
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user and Ops | v0.4.0 | 🔄 | 8 / 9 |
-| M5 Distribution | v0.5.0 | ⬜ | 0 / 7 |
+| M5 Distribution | v0.5.0 | 🔄 | 0 / 13 |
 | M6 v1.0 | v1.0.0 | ⬜ | 0 / 8 |
 
 ## M0: Foundation and cleanup
@@ -138,15 +138,23 @@ Three PRs: M3a — network and login (01–03, 07, 10, 12), M3b — disk and upl
 
 ## M5: Distribution (v0.5.0)
 
+Decisions and configuration: [ADR 0012](docs/adr/0012-distribution.md). Four streams: A — CLI groundwork (02–04), B — pipeline and packaging (05–08), C — ephemeral and atmoz (09, 10), D — documentation (11).
+
 | ID | Block | Status |
 |---|---|---|
-| M5-01 | Full `.goreleaser.yaml`, reproducible builds | ⬜ |
-| M5-02 | Docker image (distroless, GHCR) | ⬜ |
-| M5-03 | deb/rpm/apk/archlinux packages | ⬜ |
-| M5-04 | cosign signatures, SBOM, attestations, `THIRD_PARTY_LICENSES` | ⬜ |
-| M5-05 | Man pages and completions | ⬜ |
-| M5-06 | `--ephemeral`, migration from atmoz | ⬜ |
-| M5-07 | `docs/install.md`, M5 DoD, release `v0.5.0` | ⬜ |
+| M5-01 | ADR 0012 (release flow, signatures, image, packages, CLI changes, `--ephemeral`, atmoz) after a design review; ROADMAP §5 M5, §9.1, §9.3–§9.5 and D13 corrected (the §9.3 fragment as today's `.goreleaser.yaml` has it: `go mod tidy -diff`, `{{ .Tag }}`, no `"*.md"`; cosign v3.1.4, `artifact-metadata`, two attest steps, no QEMU, distroless size, postremove, DoD wording) | 🔄 |
+| M5-02 | CLI groundwork: `config.Find` treats a permission error on `./gosftpd.toml` as not found (`healthcheck` under `--user`, the DoD's `config validate` from `/root`); a missing `--config` file or a directory gives exit 2 with a `config example` and Docker hint; `cli.NewRootCommand()` exported | ⬜ |
+| M5-03 | Man pages and completions: `internal/cli/gendocs` via `go generate` → `out/man/*.1.gz`, `out/completions/*`, dated by `SOURCE_DATE_EPOCH`; CI checks that the tree stays clean | ⬜ |
+| M5-04 | `THIRD_PARTY_LICENSES`: go-licenses/v2 v2.0.1 in `tools/go.mod`, `packaging/third_party_licenses.tpl` (`.LicenseText`, psx once), before-hook with `GOOS=linux` and `GOROOT` | ⬜ |
+| M5-05 | Full `.goreleaser.yaml`: freebsd, archives with `info`/`builds_info`, the `out/` files, GoReleaser v2.19.0 in ci and release; draft release with notes from CHANGELOG; CI job `reproducible` | ⬜ |
+| M5-06 | Docker image: `packaging/docker/Dockerfile` (digest pin, `WORKDIR /`, directories owned by 65532, HEALTHCHECK, labels), `dockers_v2` and `docker_digest`, Dependabot `docker`; CI job `docker` on amd64 and arm64 (healthy, sftp, fingerprint, exit 2, ≤ 15 MB) | ⬜ |
+| M5-07 | Packages deb, rpm, archlinux (no apk in v0.5.0): contents with `users.d`, the drop-in template, docs, man pages, completions; scripts (postinstall, Arch `post_upgrade`, preremove, postremove only once the unit is gone); maintainer without an email address; `mtime`, `buildhost`; deb `Depends: procps`; `Documentation=man:gosftpd(1)`; CI job `packages` with install, upgrade and removal | ⬜ |
+| M5-08 | Signatures and provenance: `release.yml` permissions, cosign-installer v4.1.2 with cosign v3.1.4, syft v1.55.0, buildx, GHCR login; `signs`, keyless `docker_signs`, `sboms`; two attest steps; `.intoto.jsonl` on the draft; `tag.yml`; `verify-release.yml` | ⬜ |
+| M5-09 | `serve --ephemeral` with e2e tests (OpenSSH key login and password login) | ⬜ |
+| M5-10 | atmoz compatibility: spec parser and fuzz target, `--users-conf`, `SFTP_USERS`, specs as arguments, `/home/<user>/<dir>` without flattening (`{user}` before the last component of a mount path), `.ssh/keys`, warnings; e2e with the atmoz README examples; `docs/migrate-from-atmoz.md` | ⬜ |
+| M5-11 | Documents: `docs/install.md` (packages, archive, Docker, compose, verification), quickstart and README (Docker quickstart, install), SECURITY.md verification, `docs/operations.md` (upgrades, `.dpkg-dist` and `.rpmnew` files under Landlock), release checklist (the new flow and M5 smoke steps), CHANGELOG | ⬜ |
+| M5-12 | Owner: `v*` tag ruleset, GHCR package `gosftpd` public after rc.1, publish the drafts | ⬜ 👤 |
+| M5-13 | M5 DoD: `v0.5.0-rc.1` → `verify-release` and a Scorecard check → `v0.5.0` (published by the owner) | ⬜ |
 
 ## M6: v1.0.0
 
