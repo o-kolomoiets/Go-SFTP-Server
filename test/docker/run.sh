@@ -11,7 +11,10 @@
 #   followed (the key placeholder replaced before the chown and chmod) to
 #   a healthy container on named volumes;
 # - the compose block, with read_only, its image (a digest) overridden by
-#   the image under test.
+#   the image under test;
+# - serve --ephemeral in a container, as ADR 0012 has it: --listen
+#   0.0.0.0:2022 with the port mapped, the client key copied out with
+#   docker cp (the image has no shell for docker exec).
 #
 # Usage: test/docker/run.sh IMAGE V
 # IMAGE is the image under test, already loaded (in CI the snapshot that
@@ -22,10 +25,11 @@
 #
 # It runs as a user other than root with passwordless sudo and access to
 # Docker, under umask 002, as the Quickstart's users do. It uses ports 2022
-# (the blocks' own) and 2023, the container names gosftpd and
-# gosftpd-ci-hint, the volumes gosftpd-ci-data and gosftpd-ci-state and the
-# compose project "quickstart", and refuses to start when one of them is
-# in use; it removes them, the tags it added and its directory at the end.
+# (the blocks' own) and 2023, the container names gosftpd, gosftpd-ci-hint
+# and gosftpd-ci-ephemeral, the volumes gosftpd-ci-data and
+# gosftpd-ci-state and the compose project "quickstart", and refuses to
+# start when one of them is in use; it removes them, the tags it added and
+# its directory at the end.
 # REQUIRE_LANDLOCK=1 (CI) fails when gosftpd does not apply Landlock, which
 # is missing under QEMU, for example. Needs openssh-client and jq.
 
@@ -68,7 +72,7 @@ on_exit() {
 		echo "--- docker logs $CURRENT" >&2
 		docker logs "$CURRENT" >&2 || true
 	fi
-	docker rm -f gosftpd gosftpd-ci-hint >/dev/null 2>&1 || true
+	docker rm -f gosftpd gosftpd-ci-hint gosftpd-ci-ephemeral >/dev/null 2>&1 || true
 	if [ -n "$COMPOSE_DIR" ]; then
 		(cd "$COMPOSE_DIR" && docker compose down --volumes --timeout 5 >/dev/null 2>&1) || true
 	fi
@@ -176,7 +180,7 @@ tag() {
 
 phase "the image and the references the run uses"
 IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE") || die "$IMAGE is not loaded"
-for c in gosftpd gosftpd-ci-hint; do
+for c in gosftpd gosftpd-ci-hint gosftpd-ci-ephemeral; do
 	! docker container inspect "$c" >/dev/null 2>&1 || die "a container $c exists; remove it first"
 done
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=quickstart)" ] ||
@@ -339,6 +343,26 @@ check "the upload is in the volume data" \
 	sudo cmp -s "$WORK/upload.bin" "$(docker volume inspect -f '{{.Mountpoint}}' quickstart_data)/upload.bin"
 docker compose down --volumes >/dev/null 2>&1
 COMPOSE_DIR=
+CURRENT=
+
+phase "serve --ephemeral in a container"
+# The JSON line names the container's port and 127.0.0.1, which hold on the
+# host with the same port mapped there.
+docker run -d --name gosftpd-ci-ephemeral -p 127.0.0.1:2022:2022 "$REPO:v$V" serve --ephemeral --listen 0.0.0.0:2022 >/dev/null
+wait_healthy gosftpd-ci-ephemeral
+equal "the container's image" "$(image_of gosftpd-ci-ephemeral)" "$IMAGE_ID"
+landlock gosftpd-ci-ephemeral
+line=$(docker logs gosftpd-ci-ephemeral 2>/dev/null)
+equal "host, port and user" "$(jq -r '"\(.host) \(.port) \(.user)"' <<<"$line")" "127.0.0.1 2022 test"
+jq -r .known_hosts <<<"$line" >"$WORK/known_hosts.ephemeral"
+docker cp "gosftpd-ci-ephemeral:$(jq -r .private_key_path <<<"$line")" "$WORK/ephemeral_key"
+KEY="$WORK/ephemeral_key" check "an sftp upload as test, with the key docker cp copied and the known_hosts line" \
+	sftp_as test 2022 "$WORK/known_hosts.ephemeral" "put $WORK/upload.bin upload.bin"
+docker stop gosftpd-ci-ephemeral >/dev/null
+equal "the exit status after docker stop" "$(docker inspect -f '{{.State.ExitCode}}' gosftpd-ci-ephemeral)" 0
+equal "the lines on standard output" "$(docker logs gosftpd-ci-ephemeral 2>/dev/null | wc -l)" 1
+check "the key and the data are removed at the stop" grep -q 'msg="removed the client key' <<<"$(logs gosftpd-ci-ephemeral)"
+docker rm gosftpd-ci-ephemeral >/dev/null
 CURRENT=
 
 phase "nothing was pulled"

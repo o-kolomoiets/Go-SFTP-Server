@@ -614,8 +614,9 @@ jobs:
 
   # The image goreleaser-check built, against the commands of
   # docs/install.md (test/docker/run.sh): the quickstart block, a reload, the
-  # hint for a missing configuration followed, the compose block; then
-  # against the examples of the atmoz/sftp README (test/docker/atmoz.sh).
+  # hint for a missing configuration followed, the compose block, and serve
+  # --ephemeral in a container; then against the examples of the atmoz/sftp
+  # README (test/docker/atmoz.sh).
   # On amd64 and on arm64 (real Landlock, no QEMU), as the runner's user
   # under umask 002; every reference the run uses is tagged to the loaded
   # image, so that nothing is pulled from GHCR (ADR 0012).

@@ -722,11 +722,15 @@ jobs:
     `config example` and the `chown` with `sed -i "s|<paste your public
     key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`; and the `compose`
     block with `read_only` (its `image:`, a digest that cannot be retagged,
-    overridden with the local tag). A second step, `test/docker/atmoz.sh
-    IMAGE`, runs the examples of the atmoz README with OpenSSH's `sftp`
-    against the loaded image, on host port 2222 (`ATMOZ_PORT`): `docker
-    run -p 2222:2022 IMAGE foo:pass:::upload`, `healthy`, an upload and a
-    second one of the same name that overwrites it; a key file in a host
+    overridden with the local tag); and `serve --ephemeral --listen
+    0.0.0.0:2022` in a container (see `serve --ephemeral`): `healthy`, one
+    line on stdout, a key login with that key and the JSON's `known_hosts`
+    line, `docker stop` exiting 0 after removing the key and the data. A
+    second step, `test/docker/atmoz.sh IMAGE`, runs the examples of the
+    atmoz README with OpenSSH's `sftp` against the loaded image, on host
+    port 2222 (`ATMOZ_PORT`): `docker run -p 2222:2022 IMAGE
+    foo:pass:::upload`, `healthy`, an upload and a second one of the same
+    name that overwrites it; a key file in a host
     directory mounted on `/home/foo/.ssh/keys`, removed on the host and
     refused after `docker restart` (a single-file mount cannot show it:
     Docker 29 recreates a removed source as a directory and the restart
@@ -1177,8 +1181,11 @@ For persona U3: a throwaway server for tests, with the details on stdout.
   unreachable from outside and `private_key_path` is a container path: the
   docs show the atmoz specs for testcontainers and similar tools, or
   `--ephemeral --listen 0.0.0.0:2022` with the port mapped (the JSON's
-  `port` is the container's) and the key read with `docker exec` or
-  through a bind-mounted `$TMPDIR`.
+  `port` is the container's) and the key copied out with `docker cp`
+  (the image has no shell or `cat` for `docker exec`) or read through a
+  bind-mounted `$TMPDIR`. Without a configuration file the image's health
+  check probes port 2022, so such a container is `healthy`. The `docker`
+  CI job checks this way, with `docker cp`.
 
 ### atmoz compatibility
 
