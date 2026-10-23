@@ -616,14 +616,17 @@ jobs:
     snapshot mode skips publishing but not signing (`signs` and
     `docker_signs` run unless skipped), and `sboms` needs syft. It keeps
     the version check and the 12 MiB budget and adds: the archive check
-    for `*_freebsd_*`; `dpkg-deb -c` and the conffiles (the needrestart
-    file included), `dpkg-deb -f ... Depends` naming procps, `rpm -qp
-    --configfiles`; `docker image inspect` for `User 65532:65532`, the
-    health check, ports 2022 and 9090, `Cmd` `["serve"]` and
-    `GOSFTPD_ATMOZ_IMAGE=1` (and the labels, no `VOLUME` and no
-    `STOPSIGNAL`), and from `docker export` the owner and mode of the
-    binary and of the directories named volumes start from, with nothing
-    in them, and no `/etc/gosftpd`, `/etc/sftp` or `/etc/ssh`; the
+    for `*_freebsd_*`; `test/packages/contents.sh` for the six packages:
+    the exact file list (`dpkg-deb`, `rpm -qp`, `tar --zstd`) with owner
+    root, the modes and the commit time, the conffiles (the needrestart
+    file included), `%config(noreplace)` and the Arch `backup` entry,
+    `Depends: procps`, the maintainer, the rpm build host, the scripts as
+    in `packaging/scripts/` and the versions; `docker image inspect` for
+    `User 65532:65532`, the health check, ports 2022 and 9090, `Cmd`
+    `["serve"]` and `GOSFTPD_ATMOZ_IMAGE=1` (and the labels, no `VOLUME`
+    and no `STOPSIGNAL`), and from `docker export` the owner and mode of
+    the binary and of the directories named volumes start from, with
+    nothing in them, and no `/etc/gosftpd`, `/etc/sftp` or `/etc/ssh`; the
     compressed image size ≤ 15 MB, measured as the gzip of `docker save`
     (the layers as a registry stores them, plus tar headers); `git
     status --porcelain` empty after the hooks (a dirty tree shows as
@@ -658,6 +661,25 @@ jobs:
     package configured (deb: `ii`), `config.toml` root:gosftpd still
     holding the edit and the service active. The job prints `stat -fc %T
     /sys/fs/cgroup`, since cgroup v2 on the runners is assumed.
+    `test/packages/run.sh FORMAT DIR V` runs these steps as root, on the
+    runners and, through `test/packages/container.sh`, in containers
+    built from `test/packages/NAME.Dockerfile` (in the directory itself,
+    where Dependabot looks) and booted with systemd as PID 1. It also
+    checks: the owners and modes of the configuration and the directories,
+    the drop-in exactly where systemd lacks `Type=notify-reload`, Landlock,
+    `procps` installed with every deb, and a user added with `user add
+    --write` followed by a reload that reports "configuration reloaded",
+    which needs `users.d` at the start. Each upgrade keeps the running
+    process, its binary shown as deleted on every format. needrestart is
+    installed on both Ubuntu runners, and a reinstall without the
+    package's needrestart file must restart gosftpd, so that the check has
+    teeth. Where systemd knows `Type=notify-reload`, a stand-in
+    `systemd-analyze` ahead in the scripts' `PATH` makes postinstall
+    install the drop-in; the next upgrade must keep it (rpm runs the old
+    `%postun` after the new `%post`), and the one after, on the real
+    systemd, remove it. A removal also deletes `/usr/share/gosftpd` and
+    `/usr/share/doc/gosftpd`, and keeps the user, the host key, the data
+    and the audit log; deb keeps the configuration until `apt purge`.
   - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real
     Landlock, no QEMU), as a non-root user under umask 002, from the image
     `goreleaser-check` saved, tagged after `docker load` with every

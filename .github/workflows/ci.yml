@@ -387,6 +387,30 @@ jobs:
             done
           done
           exit $status
+      # The deb, rpm and Arch packages for amd64 and arm64: exactly the files
+      # of the Linux archive in the layout of docs/install.md, the
+      # documentation, man pages and completions, owned by root with their
+      # modes and the commit time; config.toml (and the deb's needrestart
+      # file) as conffiles, %config(noreplace) and backup;
+      # packaging/scripts/*.sh as their scripts; Depends: procps; the
+      # version with its pre-release (ADR 0012).
+      - name: The packages hold the release files, conffiles and scripts
+        run: |
+          rpm --version
+          test/packages/contents.sh dist
+      # For the packages job, which also moves the archive install to them.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/*_linux_*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - name: Release binaries stay within 12 MiB (ROADMAP §11.1, D21)
         run: |
           status=0
@@ -596,6 +620,66 @@ jobs:
       # restart; the missing configuration directory with SFTP_USERS set,
       # which must exit 2 with no listener.
 
+  # The packages goreleaser-check built, under systemd as PID 1
+  # (test/packages/run.sh, ADR 0012): installed (for deb the deb block of
+  # docs/install.md), reloaded, upgraded by a reinstall, removed, and
+  # installed over the archive install of docs/install.md. On the
+  # ubuntu-24.04 and ubuntu-24.04-arm runners themselves, with needrestart
+  # as on an Ubuntu server; in containers built from test/packages/ without
+  # procps (test/packages/container.sh): Debian 12 (systemd 252, the drop-in
+  # for systemd before 253) and 13, EL9 and Arch.
+  packages:
+    name: packages (${{ matrix.target }})
+    needs: goreleaser-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: ubuntu-24.04, os: ubuntu-24.04, format: deb }
+          - { target: ubuntu-24.04-arm, os: ubuntu-24.04-arm, format: deb }
+          - { target: debian-12, os: ubuntu-24.04, format: deb, container: true, legacy: "1" }
+          - { target: debian-13, os: ubuntu-24.04, format: deb, container: true }
+          - { target: el9, os: ubuntu-24.04, format: rpm, container: true }
+          - { target: arch, os: ubuntu-24.04, format: archlinux, container: true }
+    runs-on: ${{ matrix.os }}
+    env:
+      V: ${{ needs.goreleaser-check.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      FORMAT: ${{ matrix.format }}
+      # systemd 252 lacks Type=notify-reload: postinstall installs the
+      # drop-in.
+      EXPECT_LEGACY_DROPIN: ${{ matrix.legacy }}
+      # gosftpd must log that it applied Landlock under the unit.
+      REQUIRE_LANDLOCK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: ${{ runner.temp }}/packages
+      # cgroup v2 on the runners is assumed (ADR 0012).
+      - name: The runner's systemd and cgroups
+        run: |
+          systemctl --version | sed -n 1p
+          stat -fc %T /sys/fs/cgroup
+      # A standard Ubuntu server has needrestart, which the deb's
+      # /etc/needrestart/conf.d/gosftpd.conf keeps from restarting gosftpd.
+      - name: Install needrestart
+        if: ${{ !matrix.container }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q needrestart
+      - name: Install, upgrade and remove on the runner
+        if: ${{ !matrix.container }}
+        env:
+          NEEDRESTART: "1"
+        run: sudo --preserve-env=CI,EXPECT_LEGACY_DROPIN,NEEDRESTART,REQUIRE_LANDLOCK test/packages/run.sh "$FORMAT" "$RUNNER_TEMP/packages" "$V"
+      - name: Install, upgrade and remove in a container with systemd
+        if: ${{ matrix.container }}
+        run: test/packages/container.sh "$TARGET" "$FORMAT" "$RUNNER_TEMP/packages" "$V"
+
   vuln:
     runs-on: ubuntu-24.04
     steps:
@@ -614,7 +698,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed
