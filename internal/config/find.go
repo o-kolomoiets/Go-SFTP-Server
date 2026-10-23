@@ -30,6 +30,37 @@ const LocalFile = "gosftpd.toml"
 // ErrNotFound means no configuration file was found.
 var ErrNotFound = errors.New("no configuration file found")
 
+// ErrIsDir means the configuration file is a directory. Docker creates one
+// when the host file of a bind mount does not exist.
+var ErrIsDir = errors.New("is a directory")
+
+// FileError is a configuration file that Find was given or found but
+// cannot use. Err is the error of stat, fs.ErrNotExist among them, or
+// ErrIsDir.
+type FileError struct {
+	From string // "--config" or "$GOSFTPD_CONFIG"; empty for a search path
+	Path string
+	Err  error
+}
+
+func (e *FileError) Error() string {
+	var msg string
+	switch {
+	case errors.Is(e.Err, fs.ErrNotExist):
+		msg = e.Path + " does not exist"
+	case errors.Is(e.Err, ErrIsDir):
+		msg = e.Path + " " + ErrIsDir.Error()
+	default:
+		msg = e.Err.Error()
+	}
+	if e.From == "" {
+		return msg
+	}
+	return e.From + ": " + msg
+}
+
+func (e *FileError) Unwrap() error { return e.Err }
+
 // SearchPaths returns the default locations, in order: ./gosftpd.toml,
 // /etc/gosftpd/config.toml (not on Windows) and the user configuration
 // directory.
@@ -46,22 +77,41 @@ func SearchPaths() []string {
 
 // Find returns the configuration file to use: explicit (from --config) if
 // set, else $GOSFTPD_CONFIG, else the first of SearchPaths that exists. An
-// explicit or environment path must exist.
+// explicit or environment path must exist, and no file it returns is a
+// directory. A permission error on ./gosftpd.toml counts as not found, so
+// that a working directory the user cannot read (/root under sudo -u, the
+// image's under docker run --user) does not stop the search; on every
+// other path it is an error (ADR 0012). Its errors other than ErrNotFound
+// are *FileError.
 func Find(explicit string, getenv func(string) string) (string, error) {
+	return find(explicit, getenv, SearchPaths(), os.Stat)
+}
+
+func find(explicit string, getenv func(string) string, search []string, stat func(string) (fs.FileInfo, error)) (string, error) {
 	for _, p := range []struct{ path, from string }{{explicit, "--config"}, {getenv(EnvConfig), "$" + EnvConfig}} {
 		if p.path == "" {
 			continue
 		}
-		if _, err := os.Stat(p.path); err != nil {
-			return "", fmt.Errorf("%s: %w", p.from, err)
+		fi, err := stat(p.path)
+		if err == nil && fi.IsDir() {
+			err = ErrIsDir
+		}
+		if err != nil {
+			return "", &FileError{From: p.from, Path: p.path, Err: err}
 		}
 		return p.path, nil
 	}
-	for _, p := range SearchPaths() {
-		if _, err := os.Stat(p); err == nil {
+	for _, p := range search {
+		fi, err := stat(p)
+		switch {
+		case err == nil && fi.IsDir():
+			return "", &FileError{Path: p, Err: ErrIsDir}
+		case err == nil:
 			return p, nil
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
+		case errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, fs.ErrPermission) && !filepath.IsAbs(p):
+		default:
+			return "", &FileError{Path: p, Err: err}
 		}
 	}
 	return "", ErrNotFound

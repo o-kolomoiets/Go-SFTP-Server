@@ -253,7 +253,7 @@ func TestNoConfigFound(t *testing.T) {
 	noSystemConfig(t)
 	t.Chdir(t.TempDir())
 	for _, args := range [][]string{{"serve", "--allow-root"}, {"config", "validate"}, {"config", "show"}, {"user", "list"}} {
-		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, "gosftpd init") {
+		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.HasPrefix(stderr, "Error: no configuration file found") || !strings.HasSuffix(stderr, wantHint) {
 			t.Errorf("%q: exit %d: %s", args, code, stderr)
 		}
 	}

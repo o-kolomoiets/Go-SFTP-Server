@@ -8,6 +8,29 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Changed
+
+- A missing configuration file is explained: when `--config` or
+  `$GOSFTPD_CONFIG` names a file that does not exist, when the
+  configuration file is a directory, or when no file is found, the error
+  (still exit code 2) gives the commands that create one with `gosftpd
+  config example` and mount it in Docker as a directory, and links the
+  Docker section of docs/install.md. A directory, which Docker creates
+  when the host file of a bind mount does not exist, is named as the
+  cause; so is, in the container image, a mounted `/etc/gosftpd` that
+  holds no `config.toml` (ADR 0012).
+- A configuration file that is a directory is reported as one, also by
+  `healthcheck`, instead of failing when it is read.
+
+### Fixed
+
+- The search for a configuration file no longer stops at a permission
+  error on `./gosftpd.toml`: from a working directory the user cannot read,
+  such as `sudo -u gosftpd gosftpd config validate` run from `/root`, or
+  `healthcheck` in a container started with `--user`, it goes on to
+  `/etc/gosftpd/config.toml`. `--config`, `$GOSFTPD_CONFIG` and the other
+  paths of the search still fail on such an error.
+
 ## [0.4.0] - 2026-10-17
 
 Multi-user operation: reload on SIGHUP, users in `users.d`, SSH

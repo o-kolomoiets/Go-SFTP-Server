@@ -27,7 +27,7 @@ func Run(ctx context.Context, args []string) int {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	root := newRootCmd()
+	root := NewRootCommand()
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
@@ -51,7 +51,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return exitFailure
 }
 
-func newRootCmd() *cobra.Command {
+// NewRootCommand returns the gosftpd command with all its subcommands, as
+// Run executes it; exported for the generator of the man pages and shell
+// completions (ADR 0012).
+func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "gosftpd",
 		Short:         "Turn a folder into an SFTP drop-box with an audit log",
