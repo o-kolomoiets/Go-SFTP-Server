@@ -459,7 +459,7 @@ func TestAtmozModeSelection(t *testing.T) {
 		},
 		{
 			name: "--users-conf missing", args: []string{"serve", "--users-conf", missing},
-			want: "Error: the users file: stat " + missing + ": no such file or directory\n",
+			want: "Error: the users file: " + statError(t, missing) + "\n",
 		},
 		{
 			name: "--authorized-keys", env: map[string]string{atmoz.EnvUsers: "foo:" + pw}, args: []string{"serve", "--authorized-keys", empty},
@@ -495,6 +495,17 @@ func TestAtmozModeSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// statError is the message of os.Stat for path, which differs between
+// platforms.
+func statError(t *testing.T, path string) string {
+	t.Helper()
+	_, err := os.Stat(path)
+	if err == nil {
+		t.Fatalf("%s exists", path)
+	}
+	return err.Error()
 }
 
 func mkImageConfigDir(t *testing.T) {
