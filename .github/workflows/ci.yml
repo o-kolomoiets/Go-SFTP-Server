@@ -406,6 +406,70 @@ jobs:
           git tag -d v999.0.0-rc.1 v999.0.0
           if [ "$tag" != v999.0.0 ]; then echo "::error::the build took $tag, want v999.0.0"; exit 1; fi
 
+  # Two cold builds of the commit give the same files (ADR 0012):
+  # checkouts at two paths, the second cloned and built under umask 002,
+  # each with its own build and module cache and no Actions cache. With one
+  # shared build cache and -trimpath, the second build would reuse the
+  # first one's compiled packages and show only that packaging is
+  # deterministic. Signatures, SBOMs and images are out of scope.
+  reproducible:
+    runs-on: ubuntu-24.04
+    env:
+      # checksums.txt lists the six archives.
+      ENTRIES: 6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: a
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.19.0
+          install-only: true
+      - name: A second checkout, cloned under umask 002 at another path
+        run: |
+          umask 002
+          git -c advice.detachedHead=false clone --quiet --no-local a "$RUNNER_TEMP/b"
+          git -C "$RUNNER_TEMP/b" remote set-url origin "$(git -C a remote get-url origin)"
+          test "$(git -C "$RUNNER_TEMP/b" rev-parse HEAD)" = "$(git -C a rev-parse HEAD)"
+          stat -c '%A %n' a/LICENSE "$RUNNER_TEMP/b/LICENSE"
+      - name: Build in the first checkout
+        working-directory: a
+        env:
+          GOCACHE: ${{ runner.temp }}/cache-a/build
+          GOMODCACHE: ${{ runner.temp }}/cache-a/mod
+        run: goreleaser release --snapshot --clean --skip=sign,sbom,docker
+      - name: Build in the second checkout, under umask 002
+        working-directory: ${{ runner.temp }}/b
+        env:
+          GOCACHE: ${{ runner.temp }}/cache-b/build
+          GOMODCACHE: ${{ runner.temp }}/cache-b/mod
+        run: |
+          umask 002
+          goreleaser release --snapshot --clean --skip=sign,sbom,docker
+      - name: Both builds gave the same binaries and checksums.txt
+        run: |
+          a=a/dist b="$RUNNER_TEMP/b/dist"
+          cat "$a/checksums.txt"
+          status=0
+          if ! diff -u "$a/checksums.txt" "$b/checksums.txt"; then
+            echo "::error::checksums.txt differs between the two builds"; status=1
+          fi
+          entries=$(wc -l < "$a/checksums.txt")
+          if [ "$entries" -ne "$ENTRIES" ]; then
+            echo "::error::checksums.txt has $entries entries, want $ENTRIES"; status=1
+          fi
+          if ! diff -u <(cd "$a" && sha256sum gosftpd*/gosftpd) <(cd "$b" && sha256sum gosftpd*/gosftpd); then
+            echo "::error::the binaries differ between the two builds"; status=1
+          fi
+          exit $status
+
   vuln:
     runs-on: ubuntu-24.04
     steps:
@@ -424,7 +488,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed

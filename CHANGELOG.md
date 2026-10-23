@@ -31,6 +31,12 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Changed
 
+- Release archives are reproducible: every entry belongs to root (uid 0)
+  with mode 0644, or 0755 for the binary, and the time of the commit, so
+  that a rebuild of a tag with the same Go and GoReleaser versions gives
+  the same archives whatever the checkout's umask and time. A CI job builds
+  each commit twice, from two checkouts with cold caches, one of them made
+  under umask 002, and compares the checksums (ADR 0012).
 - Releases are built with GoReleaser v2.19.0, as a draft whose notes are
   the version's section of CHANGELOG.md (for a pre-release without one,
   the Unreleased section); `.github/scripts/release-notes.sh` extracts it
