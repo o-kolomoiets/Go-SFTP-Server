@@ -630,7 +630,11 @@ jobs:
     compressed image size ≤ 15 MB, measured as the gzip of `docker save`
     (the layers as a registry stores them, plus tar headers); `git
     status --porcelain` empty after the hooks (a dirty tree shows as
-    `+dirty` in the SBOM). It uploads the packages for the jobs below and,
+    `+dirty` in the SBOM); one SPDX 2.3 SBOM per archive that names the
+    archive with its checksum and lists gosftpd's module and those of the
+    archive's binary with the versions `go version -m` gives, and the
+    standard library; and `checksums.txt` listing exactly the archives,
+    packages and SBOMs. It uploads the packages for the jobs below and,
     with `V=$(jq -r .version dist/metadata.json)`, those gzipped `docker
     save` tarballs of `ghcr.io/o-kolomoiets/gosftpd:v$V-amd64` and
     `-arm64`, and passes `V` to the `docker` job as a job output.

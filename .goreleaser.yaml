@@ -1,12 +1,16 @@
 # GoReleaser v2.19.0 configuration (ADR 0012): archives for Linux, macOS and
-# FreeBSD, deb, rpm and Arch packages, checksums.txt, the image
-# ghcr.io/o-kolomoiets/gosftpd and a draft GitHub release. Windows follows
-# once the isolation tests pass there (M3b).
+# FreeBSD with their SBOMs, deb, rpm and Arch packages, checksums.txt and its
+# signature, the signed image ghcr.io/o-kolomoiets/gosftpd and a draft
+# GitHub release. Windows follows once the isolation tests pass there (M3b).
 # Check with: goreleaser check && goreleaser release --snapshot --clean
-# (the image needs Docker with buildx; without it add --skip=docker).
+# --skip=sign (the SBOMs need syft, the image Docker with buildx; without
+# them add sbom and docker to --skip).
 version: 2
 project_name: gosftpd
 
+# CI and local snapshots run the hooks; release.yml runs the same two
+# commands in its generate job, without credentials, and passes
+# --skip=before (ADR 0012).
 before:
   hooks:
     - go mod tidy -diff
@@ -76,7 +80,20 @@ archives:
 
 checksum: { name_template: checksums.txt, algorithm: sha256 }
 
-# The SBOMs and signatures (sboms, signs) go here (ADR 0012).
+# One SPDX JSON per archive, written by syft with GoReleaser's default
+# arguments (--enrich all goes online); checksums.txt lists them.
+sboms:
+  - artifacts: archive
+
+# Keyless cosign through GitHub's OIDC token in release.yml: the Sigstore
+# bundle checksums.txt.sigstore.json signs checksums.txt, which lists every
+# archive, package and SBOM. Snapshot mode skips publishing, not signing:
+# CI and local snapshots pass --skip=sign.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, "--bundle=${signature}", "${artifact}", --yes]
 
 # deb, rpm and Arch packages of the Linux build: the files of the Linux
 # archive in the layout docs/install.md gives, and the documentation. No
@@ -166,7 +183,12 @@ dockers_v2:
       org.opencontainers.image.created: "{{ .CommitDate }}"
       org.opencontainers.image.licenses: Apache-2.0
 
-# docker_signs goes here (ADR 0012).
+# The pushed image index, signed by digest, keyless like checksums.txt (the
+# default arguments use --key=cosign.key). Not in a snapshot, which pushes
+# nothing.
+docker_signs:
+  - cmd: cosign
+    args: [sign, "${artifact}@${digest}", --yes]
 
 # dist/digests.txt: "<hex>  ghcr.io/o-kolomoiets/gosftpd:<tag>" per pushed
 # tag, the digest users verify and run (docs/install.md). Not in a snapshot.

@@ -308,6 +308,10 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      # syft writes the SBOMs, as in release.yml.
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.55.0
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: v2.19.0
@@ -398,6 +402,35 @@ jobs:
         run: |
           rpm --version
           test/packages/contents.sh dist
+      # One SPDX 2.3 SBOM per archive (ADR 0012): it names the archive with
+      # its checksum and lists the modules of the archive's binary, gosftpd's
+      # own included, with the versions go version -m gives, and the Go
+      # standard library. checksums.txt, which release.yml signs, lists
+      # exactly the archives, the packages and the SBOMs.
+      - name: The SBOMs describe the archives, and checksums.txt lists them
+        run: |
+          status=0
+          mapfile -t archives < <(jq -r '.[] | select(.type == "Archive") | .path' dist/artifacts.json | sort)
+          if [ "${#archives[@]}" -ne 6 ]; then echo "::error::${#archives[@]} archives in artifacts.json, want 6"; status=1; fi
+          for a in "${archives[@]}"; do
+            sbom="$a.sbom.json"
+            if [ ! -f "$sbom" ]; then echo "::error::$sbom is missing"; status=1; continue; fi
+            bin="$(jq -r --arg a "$a" '(.[] | select(.path == $a)) as $x
+              | .[] | select(.type == "Binary" and .goos == $x.goos and .goarch == $x.goarch) | .path' dist/artifacts.json)"
+            want="$(printf 'SPDX-2.3 %s sha256:%s' "${a#dist/}" "$(sha256sum "$a" | cut -d ' ' -f 1)")"
+            got="$(jq -r '[.spdxVersion, .name, (.packages[] | select(.SPDXID | startswith("SPDXRef-DocumentRoot-")) | .versionInfo)] | join(" ")' "$sbom")"
+            if [ "$got" != "$want" ]; then echo "::error file=$sbom::the document is \"$got\", want \"$want\""; status=1; fi
+            want="$({ go version -m "$bin" | awk '$1 == "mod" || $1 == "dep" { print $2, $3 }'; go version "$bin" | awk '{ print "stdlib", $2 }'; } | sort)"
+            got="$(jq -r '.packages[] | select(.SPDXID | startswith("SPDXRef-Package-go-module-")) | "\(.name) \(.versionInfo)"' "$sbom" | sort)"
+            if ! diff -u <(echo "$want") <(echo "$got"); then
+              echo "::error file=$sbom::the modules differ from those of $bin (+ is in the SBOM)"; status=1
+            fi
+          done
+          if ! diff -u <(cd dist && printf '%s\n' *.tar.gz *.deb *.rpm *.pkg.tar.zst *.sbom.json | sort) <(awk '{ print $2 }' dist/checksums.txt | sort); then
+            echo "::error file=dist/checksums.txt::it does not list exactly the archives, packages and SBOMs (+ is listed)"; status=1
+          fi
+          (cd dist && sha256sum --check --quiet checksums.txt) || status=1
+          exit $status
       # For the packages job, which also moves the archive install to them.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
