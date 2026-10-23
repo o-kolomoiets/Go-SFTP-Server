@@ -306,6 +306,13 @@ jobs:
         with:
           version: v2.18.2
           args: release --snapshot --clean
+      # make generate, a before hook, writes only to out/, which git
+      # ignores; a change elsewhere would mark the build as modified
+      # (vcs.modified, ADR 0012).
+      - name: The before hooks leave the tree clean
+        run: |
+          changed="$(git status --porcelain)"
+          if [ -n "$changed" ]; then echo "::error::the before hooks changed the tree"; echo "$changed"; exit 1; fi
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version

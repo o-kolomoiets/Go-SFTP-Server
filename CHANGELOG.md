@@ -8,6 +8,14 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Added
+
+- Man pages, one per command, and bash, zsh and fish completions:
+  `make generate` writes them into `out/` (not committed) with
+  `internal/cli/gendocs`, from the command definitions, dated by the
+  commit (`SOURCE_DATE_EPOCH`), so that the same commit gives the same
+  files. The release archives and packages will carry them (ADR 0012).
+
 ### Changed
 
 - A missing configuration file is explained: when `--config` or

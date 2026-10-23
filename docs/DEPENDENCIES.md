@@ -95,6 +95,16 @@ support as a whole added 72 KiB (73 728 bytes, linux/amd64,
 |----------------------|---------|-----------------------|-------|
 | `go.uber.org/goleak` | v1.3.0  | goroutine leak checks | M1    |
 
+## Man pages
+
+`internal/cli/gendocs`, which `make generate` runs, writes the man pages
+with `github.com/spf13/cobra/doc` ([ADR 0012](adr/0012-distribution.md)).
+That package brings `github.com/cpuguy83/go-md2man/v2` v2.0.6,
+`github.com/russross/blackfriday/v2` v2.1.0 and `go.yaml.in/yaml/v3`
+v3.0.4, and the tests of yaml/v3 `github.com/kr/text` v0.2.0: indirect
+requirements of `go.mod`. None of them is linked into gosftpd (`go
+version -m`), but govulncheck scans them with the rest of the module.
+
 ## Developer tools (`tools/go.mod`)
 
 govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12.

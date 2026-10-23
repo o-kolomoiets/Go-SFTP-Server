@@ -12,14 +12,15 @@ before proposing larger changes, and open an issue first to discuss them.
 - Other tools (govulncheck, staticcheck, gotestsum, actionlint) live in
   `tools/go.mod` and run via `go tool -modfile=tools/go.mod <tool>`.
 
-| Command      | What it does                                   |
-|--------------|------------------------------------------------|
-| `make test`  | unit tests with `-race`                        |
-| `make lint`  | gofmt, go vet, golangci-lint, actionlint       |
-| `make fmt`   | apply gofumpt and goimports                    |
-| `make vuln`  | govulncheck                                    |
-| `make build` | build `bin/gosftpd`                            |
-| `make tidy`  | `go mod tidy` for both modules                 |
+| Command         | What it does                                   |
+|-----------------|------------------------------------------------|
+| `make test`     | unit tests with `-race`                        |
+| `make lint`     | gofmt, go vet, golangci-lint, actionlint       |
+| `make fmt`      | apply gofumpt and goimports                    |
+| `make vuln`     | govulncheck                                    |
+| `make build`    | build `bin/gosftpd`                            |
+| `make tidy`     | `go mod tidy` for both modules                 |
+| `make generate` | man pages and completions into `out/`          |
 
 ## Pull requests
 
