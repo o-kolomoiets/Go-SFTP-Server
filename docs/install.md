@@ -316,6 +316,29 @@ Two settings are not in the unit, because they break common setups:
 Exec hooks run inside the unit's sandbox; what they cannot do there is in
 [hooks.md](hooks.md#sandboxes-and-containers).
 
+## Packages
+
+The releases have deb, rpm and Arch packages for amd64 and arm64. They
+install the files of [What goes where](#what-goes-where), create the user
+and the directories, and install the drop-in for systemd before 253 where
+it is needed. They never enable, start or restart the service.
+
+### Debian and Ubuntu
+
+In the directory with the package for your architecture and the release's
+`checksums.txt`:
+
+<!-- ci:deb -->
+```sh
+V=0.5.0
+sha256sum --check --ignore-missing checksums.txt
+sudo apt install -y "./gosftpd_${V}_linux_$(dpkg --print-architecture).deb"
+sudo systemctl enable --now gosftpd
+systemctl is-active gosftpd
+sudo -u gosftpd gosftpd config validate --check-fs
+```
+<!-- /ci -->
+
 ## Docker
 
 The image `ghcr.io/o-kolomoiets/gosftpd` (linux/amd64 and linux/arm64,
