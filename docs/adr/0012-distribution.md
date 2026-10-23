@@ -665,9 +665,12 @@ jobs:
     tag the blocks of docs/install.md name, and the one the hint names,
     `ghcr.io/o-kolomoiets/gosftpd:` with the image's `version` output (a
     snapshot reports the last tag: `v0.4.0`, never pushed, or after rc.1 a
-    real image other than the one under test). It runs the `quickstart`
-    block (`healthy`, an sftp upload, the host key fingerprint after
-    recreating the container); a reload: the configuration edited with
+    real image other than the one under test). `test/docker/run.sh` runs
+    the checks, and also checks that every container runs the loaded image.
+    It runs the `quickstart` block, which puts `~/.ssh/id_ed25519.pub` in
+    place of the key placeholder with the same `sed -i` (`healthy`, an sftp
+    upload, the host key fingerprint after recreating the container with
+    the block's own `docker run`); a reload: the configuration edited with
     `sed -i` (a new inode), `docker kill -s HUP`, and a user removed from
     it refused; the hint, reached by starting with `-v
     ./gosftpd:/etc/gosftpd:ro` while `./gosftpd` does not exist, then its

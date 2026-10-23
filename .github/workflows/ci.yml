@@ -554,6 +554,48 @@ jobs:
           fi
           exit $status
 
+  # The image goreleaser-check built, against the commands of
+  # docs/install.md (test/docker/run.sh): the quickstart block, a reload, the
+  # hint for a missing configuration followed, the compose block. On amd64
+  # and on arm64 (real Landlock, no QEMU), as the runner's user under umask
+  # 002; every reference the run uses is tagged to the loaded image, so
+  # that nothing is pulled from GHCR (ADR 0012).
+  docker:
+    name: docker (${{ matrix.arch }})
+    needs: goreleaser-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-24.04 }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    env:
+      V: ${{ needs.goreleaser-check.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      # gosftpd must log that it applied Landlock in every container.
+      REQUIRE_LANDLOCK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images
+          path: ${{ runner.temp }}/images
+      - name: Load the image
+        run: |
+          docker version --format 'Docker {{.Server.Version}}, {{.Server.Os}}/{{.Server.Arch}}'
+          docker load --input "$RUNNER_TEMP/images/gosftpd-$ARCH.tar.gz"
+      - name: The documented commands against the image
+        run: test/docker/run.sh "ghcr.io/o-kolomoiets/gosftpd:v$V-$ARCH" "$V"
+      # The atmoz step goes here (TASKS M5-10, ADR 0012): docker run -p
+      # 2222:2022 IMAGE foo:pass:::upload, an upload and a second one of the
+      # same name that overwrites it; a key file mounted under
+      # /home/foo/.ssh/keys, removed on the host and refused after docker
+      # restart; the missing configuration directory with SFTP_USERS set,
+      # which must exit 2 with no listener.
+
   vuln:
     runs-on: ubuntu-24.04
     steps:
@@ -572,7 +614,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed

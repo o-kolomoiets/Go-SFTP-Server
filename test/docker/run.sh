@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# The image against the documented Docker commands, as the CI job "docker"
+# runs them on amd64 and arm64 (ADR 0012):
+# - the quickstart block of docs/install.md: the container becomes healthy,
+#   applies Landlock and takes an sftp upload, stops cleanly, and a new
+#   container keeps the host key;
+# - a reload: the configuration replaced with sed -i (a new inode) in the
+#   mounted directory and docker kill -s HUP; a removed user is refused;
+# - the hint: started with -v ./gosftpd:/etc/gosftpd:ro while ./gosftpd
+#   does not exist, the container exits 2 with the hint, whose commands are
+#   followed (the key placeholder replaced before the chown and chmod) to
+#   a healthy container on named volumes;
+# - the compose block, with read_only, its image (a digest) overridden by
+#   the image under test.
+#
+# Usage: test/docker/run.sh IMAGE V
+# IMAGE is the image under test, already loaded (in CI the snapshot that
+# goreleaser-check saved); V is the version the blocks name as v$V. Every
+# reference the run uses is tagged to IMAGE first, so that docker run
+# never pulls (a snapshot reports the last release tag, whose real image
+# may exist in GHCR), and every container is checked to run IMAGE.
+#
+# It runs as a user other than root with passwordless sudo and access to
+# Docker, under umask 002, as the Quickstart's users do. It uses ports 2022
+# (the blocks' own) and 2023, the container names gosftpd and
+# gosftpd-ci-hint, the volumes gosftpd-ci-data and gosftpd-ci-state and the
+# compose project "quickstart", and refuses to start when one of them is
+# in use; it removes them, the tags it added and its directory at the end.
+# REQUIRE_LANDLOCK=1 (CI) fails when gosftpd does not apply Landlock, which
+# is missing under QEMU, for example. Needs openssh-client and jq.
+
+# Functions called through check and the EXIT trap are not unreachable.
+# shellcheck disable=SC2317,SC2329
+set -euo pipefail
+umask 002
+
+if [ $# -ne 2 ]; then
+	echo "usage: test/docker/run.sh IMAGE V" >&2
+	exit 2
+fi
+IMAGE=$1
+export V=$2
+REPO=ghcr.io/o-kolomoiets/gosftpd
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [ "$(id -u)" = 0 ]; then
+	echo "run test/docker/run.sh as a user other than root: the Quickstart runs without root" >&2
+	exit 2
+fi
+sudo -n true || { echo "test/docker/run.sh needs passwordless sudo" >&2; exit 2; }
+
+FAILED=0
+WORK="$(mktemp -d)"
+# HOME for the blocks: the Quickstart reads ~/.ssh/id_ed25519.pub.
+BLOCK_HOME="$WORK/home"
+KEY="$BLOCK_HOME/.ssh/id_ed25519"
+ADDED_TAGS=()
+COMPOSE_DIR=
+# The container whose log a failure prints.
+CURRENT=
+
+fail() { echo "FAIL: $*" >&2; FAILED=1; }
+pass() { echo "ok:   $*"; }
+die() { fail "$*"; exit 1; }
+phase() { printf '\n=== %s\n' "$*"; }
+on_exit() {
+	local status=$?
+	if [ -n "$CURRENT" ] && { [ "$FAILED" != 0 ] || [ "$status" != 0 ]; }; then
+		echo "--- docker logs $CURRENT" >&2
+		docker logs "$CURRENT" >&2 || true
+	fi
+	docker rm -f gosftpd gosftpd-ci-hint >/dev/null 2>&1 || true
+	if [ -n "$COMPOSE_DIR" ]; then
+		(cd "$COMPOSE_DIR" && docker compose down --volumes --timeout 5 >/dev/null 2>&1) || true
+	fi
+	docker volume rm gosftpd-ci-data gosftpd-ci-state >/dev/null 2>&1 || true
+	for t in "${ADDED_TAGS[@]}"; do docker rmi "$t" >/dev/null 2>&1 || true; done
+	# The data and state directories belong to 65532.
+	sudo rm -rf "$WORK"
+}
+trap on_exit EXIT
+
+# check WHAT COMMAND...: pass or fail by the command's exit status.
+check() {
+	local what=$1
+	shift
+	if "$@"; then pass "$what"; else fail "$what"; fi
+}
+
+# equal WHAT GOT WANT
+equal() {
+	if [ "$2" = "$3" ]; then pass "$1: $2"; else fail "$1: got \"$2\", want \"$3\""; fi
+}
+
+# wait_healthy CONTAINER: waits up to 60 s for the health check to pass.
+wait_healthy() {
+	local c=$1 state start=$SECONDS
+	CURRENT=$c
+	for _ in $(seq 240); do
+		state=$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$c")
+		case $state in
+		"running healthy")
+			pass "$c is healthy after $((SECONDS - start)) s"
+			return 0
+			;;
+		"running unhealthy" | exited* | dead*) break ;;
+		esac
+		sleep 0.25
+	done
+	docker inspect -f '{{json .State.Health}}' "$c" >&2 || true
+	die "$c is not healthy: $state"
+}
+
+# landlock CONTAINER: the container's log says that Landlock was applied;
+# without REQUIRE_LANDLOCK a kernel without it only skips.
+landlock() {
+	local log
+	log=$(logs "$1")
+	if grep -q 'landlock: ABI v[0-9]* applied' <<<"$log"; then
+		pass "$1: $(grep -o 'landlock: ABI v[0-9]* applied' <<<"$log" | head -n 1)"
+	elif [ -z "${REQUIRE_LANDLOCK:-}" ] && grep -q 'landlock: not available' <<<"$log"; then
+		echo "skip: $1: $(grep -o 'landlock: not available.*' <<<"$log" | head -n 1 | tr -d '"')"
+	else
+		fail "$1: no Landlock ruleset: $(grep landlock <<<"$log" | head -n 3)"
+	fi
+}
+
+# keyscan PORT FILE: writes the server's ed25519 host key to the
+# known_hosts FILE and prints its fingerprint.
+keyscan() {
+	local out
+	for _ in $(seq 20); do
+		out=$(ssh-keyscan -p "$1" -t ed25519 127.0.0.1 2>/dev/null) && [ -n "$out" ] && break
+		sleep 0.5
+	done
+	[ -n "$out" ] || die "ssh-keyscan found no host key on port $1"
+	printf '%s\n' "$out" >"$2"
+	ssh-keygen -lf "$2" | awk '{ print $2 }'
+}
+
+# sftp_as USER PORT KNOWN_HOSTS COMMAND...: runs the sftp commands as USER
+# with the test key, checking the host key against KNOWN_HOSTS.
+sftp_as() {
+	local user=$1 port=$2 kh=$3
+	shift 3
+	printf '%s\n' "$@" | sftp -q -b - -F /dev/null -P "$port" -i "$KEY" \
+		-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+		-o UserKnownHostsFile="$kh" -o GlobalKnownHostsFile=/dev/null \
+		"$user@127.0.0.1"
+}
+
+# refused USER PORT KNOWN_HOSTS: USER cannot log in.
+refused() { ! sftp_as "$1" "$2" "$3" ls 2>/dev/null; }
+
+# logs CONTAINER: the container's standard output and error.
+logs() { docker logs "$1" 2>&1; }
+
+# count PATTERN TEXT: the number of lines of TEXT that match PATTERN.
+count() { grep -c -- "$1" <<<"$2" || true; }
+
+# image_of CONTAINER: the image ID the container runs.
+image_of() { docker inspect -f '{{.Image}}' "$1"; }
+
+# owner_mode PATH: uid:gid and the octal mode, read with sudo.
+owner_mode() { sudo stat -c '%u:%g %a' "$1"; }
+
+# tag REF: tags IMAGE as REF, which must not exist yet or be IMAGE already.
+tag() {
+	local id
+	if id=$(docker image inspect -f '{{.Id}}' "$1" 2>/dev/null); then
+		[ "$id" = "$IMAGE_ID" ] || die "$1 exists and is another image ($id); remove it first"
+		return
+	fi
+	docker tag "$IMAGE" "$1"
+	ADDED_TAGS+=("$1")
+}
+
+phase "the image and the references the run uses"
+IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE") || die "$IMAGE is not loaded"
+for c in gosftpd gosftpd-ci-hint; do
+	! docker container inspect "$c" >/dev/null 2>&1 || die "a container $c exists; remove it first"
+done
+[ -z "$(docker ps -aq --filter label=com.docker.compose.project=quickstart)" ] ||
+	die "the compose project quickstart has containers; remove them first"
+for v in gosftpd-ci-data gosftpd-ci-state quickstart_data quickstart_state; do
+	! docker volume inspect "$v" >/dev/null 2>&1 || die "a volume $v exists; remove it first"
+done
+for port in 2022 2023; do
+	! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null || die "port $port is in use"
+done
+arch=$(docker image inspect -f '{{.Architecture}}' "$IMAGE")
+info=$(docker run --rm "$IMAGE" version --json)
+equal "the binary's platform" "$(jq -r .platform <<<"$info")" "linux/$arch"
+version=$(jq -r .version <<<"$info")
+# The hint names the binary's own version, or latest for a build that is
+# not a release's (internal/cli/hint.go).
+if [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$ ]]; then
+	HINT_REF="$REPO:$version"
+else
+	HINT_REF="$REPO:latest"
+fi
+tag "$REPO:v$V"
+tag "$HINT_REF"
+pass "$IMAGE (linux/$arch, version $version) tagged $REPO:v$V and $HINT_REF"
+mkdir -p "$BLOCK_HOME/.ssh"
+ssh-keygen -q -t ed25519 -N '' -C gosftpd-docker-test -f "$KEY"
+head -c 2000000 /dev/urandom >"$WORK/upload.bin"
+
+phase "the quickstart block"
+QS="$WORK/quickstart"
+mkdir "$QS"
+cd "$QS"
+HOME="$BLOCK_HOME" "$ROOT/test/docs/run-block.sh" quickstart
+equal "gosftpd/config.toml" "$(owner_mode gosftpd/config.toml)" "0:65532 640"
+equal "data" "$(owner_mode data | cut -d' ' -f1)" "65532:65532"
+equal "state" "$(owner_mode state | cut -d' ' -f1)" "65532:65532"
+wait_healthy gosftpd
+equal "the container's image" "$(image_of gosftpd)" "$IMAGE_ID"
+landlock gosftpd
+equal "the stop timeout" "$(docker inspect -f '{{.Config.StopTimeout}}' gosftpd)" 40
+fp=$(keyscan 2022 "$WORK/known_hosts")
+log=$(logs gosftpd)
+equal "the logged host key fingerprint" "$(grep -o 'SHA256:[A-Za-z0-9+/]*' <<<"$log" | head -n 1)" "$fp"
+equal "host keys generated at the first start" "$(count '(generated' "$log")" 1
+check "an sftp upload as alice" sftp_as alice 2022 "$WORK/known_hosts" "put $WORK/upload.bin upload.bin"
+check "the upload is in ./data" sudo cmp -s "$WORK/upload.bin" data/upload.bin
+equal "its owner" "$(owner_mode data/upload.bin | cut -d' ' -f1)" "65532:65532"
+
+phase "a new container keeps the host key"
+start=$SECONDS
+docker stop gosftpd >/dev/null
+equal "the exit status after docker stop" "$(docker inspect -f '{{.State.ExitCode}}' gosftpd)" 0
+check "docker stop took $((SECONDS - start)) s, less than the stop timeout" test $((SECONDS - start)) -lt 40
+docker rm gosftpd >/dev/null
+# The block's docker run command, as the block runs it.
+run_cmd=$("$ROOT/test/docs/run-block.sh" --print quickstart | awk '/^docker run -d / { on = 1 } on { print; if (!/\\$/) exit }')
+[ -n "$run_cmd" ] || die "the quickstart block has no docker run -d command"
+bash -euo pipefail -c "$run_cmd" >/dev/null
+wait_healthy gosftpd
+equal "the host key fingerprint" "$(keyscan 2022 "$WORK/known_hosts.2")" "$fp"
+equal "host keys generated at the second start" "$(count '(generated' "$(logs gosftpd)")" 0
+check "an sftp download as alice, with the first known_hosts" \
+	sftp_as alice 2022 "$WORK/known_hosts" "get upload.bin $WORK/download.bin"
+check "the download is the upload" cmp -s "$WORK/upload.bin" "$WORK/download.bin"
+
+phase "a reload after sed -i in the mounted directory"
+inode=$(stat -c %i gosftpd/config.toml)
+sudo sed -i 's/^\[users\.alice\]$/[users.bob]/' gosftpd/config.toml
+check "the configuration names bob instead of alice" sudo grep -qx '\[users\.bob\]' gosftpd/config.toml
+check "sed -i replaced the file (inode $inode)" test "$(stat -c %i gosftpd/config.toml)" != "$inode"
+equal "gosftpd/config.toml" "$(owner_mode gosftpd/config.toml)" "0:65532 640"
+reloads=$(count 'configuration reloaded' "$(logs gosftpd)")
+docker kill -s HUP gosftpd >/dev/null
+for _ in $(seq 40); do
+	[ "$(count 'configuration reloaded' "$(logs gosftpd)")" -gt "$reloads" ] && break
+	sleep 0.25
+done
+check "the log says \"configuration reloaded\"" test "$(count 'configuration reloaded' "$(logs gosftpd)")" -gt "$reloads"
+check "alice, removed, is refused" refused alice 2022 "$WORK/known_hosts"
+check "bob, added, logs in" sftp_as bob 2022 "$WORK/known_hosts" ls
+docker rm -f gosftpd >/dev/null
+
+phase "the hint for a missing host directory, followed"
+HINT="$WORK/hint"
+mkdir "$HINT"
+cd "$HINT"
+status=0
+docker run --rm -v ./gosftpd:/etc/gosftpd:ro "$REPO:v$V" >out 2>err.docker || status=$?
+# Without the platform warning of a docker run under emulation.
+grep -v "^WARNING: The requested image's platform" err.docker >err || true
+equal "the exit status without a configuration" "$status" 2
+equal "./gosftpd, which Docker created" "$(owner_mode gosftpd)" "0:0 755"
+equal "the first line" "$(head -n 1 err)" \
+	"Error: /etc/gosftpd is mounted but holds no config.toml; check the host path of -v (Docker creates a missing one as an empty directory owned by root)"
+check "nothing on standard output" test ! -s out
+mapfile -t cmds < <(sed -n 's/^  //p' err)
+# The hint's text, which the shell must not expand here.
+# shellcheck disable=SC2016
+want=(
+	'mkdir -p gosftpd && sudo chown "$(id -u):$(id -g)" gosftpd'
+	"docker run --rm $HINT_REF config example > gosftpd/config.toml"
+	'# replace the key placeholder in gosftpd/config.toml with your public key, then:'
+	'sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml'
+	'docker run ... -v ./gosftpd:/etc/gosftpd:ro ...'
+)
+if [ "${cmds[*]}" != "${want[*]}" ]; then
+	cat err >&2
+	die "the hint's commands differ from: $(printf '\n  %s' "${want[@]}")"
+fi
+pass "the hint's commands name $HINT_REF"
+for cmd in "${cmds[@]}"; do
+	case $cmd in
+	'#'*)
+		sed -i "s|<paste your public key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml
+		;;
+	'docker run ... '*' ...')
+		cmd=${cmd#docker run ... }
+		cmd="docker run -d --name gosftpd-ci-hint -p 2023:2022 ${cmd% ...} -v gosftpd-ci-data:/srv/sftp -v gosftpd-ci-state:/var/lib/gosftpd $HINT_REF"
+		;&
+	*)
+		echo "+ $cmd"
+		bash -euo pipefail -c "$cmd" >/dev/null
+		;;
+	esac
+done
+equal "gosftpd/config.toml" "$(owner_mode gosftpd/config.toml)" "0:65532 640"
+wait_healthy gosftpd-ci-hint
+equal "the container's image" "$(image_of gosftpd-ci-hint)" "$IMAGE_ID"
+landlock gosftpd-ci-hint
+# A new named volume takes the owner and mode of the image's directory.
+for v in gosftpd-ci-data:750 gosftpd-ci-state:700; do
+	equal "the volume ${v%:*}" "$(owner_mode "$(docker volume inspect -f '{{.Mountpoint}}' "${v%:*}")")" "65532:65532 ${v#*:}"
+done
+keyscan 2023 "$WORK/known_hosts.hint" >/dev/null
+check "an sftp upload as alice" sftp_as alice 2023 "$WORK/known_hosts.hint" "put $WORK/upload.bin upload.bin"
+docker rm -f gosftpd-ci-hint >/dev/null
+
+phase "the compose block"
+cd "$QS"
+COMPOSE_DIR=$QS
+# A stand-in for the release's digests.txt; the override replaces the
+# image, a digest that a local image cannot be tagged with, and never
+# pulls.
+digest=${IMAGE_ID#sha256:}
+printf '%s  %s\n' "$digest" "$REPO:v$V" >digests.txt
+printf 'services:\n  gosftpd:\n    image: %s\n    pull_policy: never\n' "$REPO:v$V" >compose.override.yaml
+HOME="$BLOCK_HOME" "$ROOT/test/docs/run-block.sh" compose
+equal "the image of compose.yaml" "$(docker compose -f compose.yaml config --images)" "$REPO:v$V@sha256:$digest"
+c=$(docker compose ps --format '{{.Name}}' gosftpd)
+[ -n "$c" ] || die "docker compose started no container for the service gosftpd"
+wait_healthy "$c"
+equal "the container's image" "$(image_of "$c")" "$IMAGE_ID"
+equal "read_only, cap_drop, security_opt, stop_grace_period" \
+	"$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.Config.StopTimeout}}' "$c")" \
+	"true [ALL] [no-new-privileges:true] 40"
+landlock "$c"
+keyscan 2022 "$WORK/known_hosts.compose" >/dev/null
+check "an sftp upload as bob" sftp_as bob 2022 "$WORK/known_hosts.compose" "put $WORK/upload.bin upload.bin"
+check "the upload is in the volume data" \
+	sudo cmp -s "$WORK/upload.bin" "$(docker volume inspect -f '{{.Mountpoint}}' quickstart_data)/upload.bin"
+docker compose down --volumes >/dev/null 2>&1
+COMPOSE_DIR=
+CURRENT=
+
+phase "nothing was pulled"
+for ref in "$REPO:v$V" "$HINT_REF"; do
+	equal "$ref" "$(docker image inspect -f '{{.Id}}' "$ref")" "$IMAGE_ID"
+done
+
+if [ "$FAILED" != 0 ]; then
+	echo "test/docker/run.sh: FAILED" >&2
+fi
+exit "$FAILED"

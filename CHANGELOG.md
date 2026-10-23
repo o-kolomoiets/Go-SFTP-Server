@@ -28,6 +28,18 @@ Incompatible changes are prefixed with **BREAKING:**.
   `make generate`. Every release archive carries the file.
 - Release archives for FreeBSD (amd64, arm64): Tier 2, cross-built and not
   tested (ADR 0012).
+- The container image `ghcr.io/o-kolomoiets/gosftpd` for linux/amd64 and
+  linux/arm64, built by GoReleaser from `packaging/docker/Dockerfile` and
+  tagged with the version (`vX.Y.Z`): distroless
+  (`static-debian13:nonroot`, pinned by digest and updated by Dependabot),
+  about 5 MB compressed, running gosftpd as uid 65532 with `serve`, which
+  finds `/etc/gosftpd/config.toml` in a mounted configuration directory, a
+  health check that turns `healthy` within seconds, and ports 2022 and
+  9090. `/var/lib/gosftpd` and `/srv/sftp` belong to uid 65532, so named
+  volumes need no `chown`; there is no `VOLUME`. docs/install.md gives the
+  Docker Quickstart and a compose file with a read-only root file system,
+  which a CI job runs against the image on amd64 and arm64, together with
+  a reload and the hint for a missing configuration (ADR 0012).
 
 ### Changed
 

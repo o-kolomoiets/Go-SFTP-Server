@@ -335,6 +335,13 @@ func TestWorkflowBlocks(t *testing.T) {
 			names[m[1]] = append(names[m[1]], f)
 		}
 	}
+	// The docker job runs these two (ADR 0012); the packages job and the
+	// release workflows add theirs.
+	for _, want := range []string{"quickstart", "compose"} {
+		if names[want] == nil {
+			t.Errorf("no workflow or test script runs the %s block", want)
+		}
+	}
 	for name, by := range names {
 		got := runBlock(t, t.TempDir(), []string{"V=0.0.0"}, "", "--print", name)
 		if got.code != 0 || got.stdout == "" {
