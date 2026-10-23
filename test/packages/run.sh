@@ -9,7 +9,9 @@
 #   same steps with dnf and pacman; the check again from /. Then the owners
 #   and modes, the drop-in for systemd before 253 exactly where systemd
 #   lacks Type=notify-reload, Landlock, a reload (deb: with procps, which
-#   the package depends on), and a user added with --write and a reload.
+#   the package depends on), and a user added with --write and a reload
+#   while /etc/gosftpd also holds a file of the administrator's, which
+#   needs the package's users.d.
 # - An upgrade, as a reinstall: installing the installed version again is
 #   a no-op that runs no script. The edited configuration, the user's file,
 #   the drop-in and the running process stay, its binary shown as deleted;
@@ -248,15 +250,20 @@ if [ "$FORMAT" = deb ]; then
 fi
 
 phase "reload, and a user added with --write"
-systemctl reload gosftpd
-check "systemctl reload: the status is \"configuration reloaded\"" status_is "configuration reloaded"
+check "systemctl reload" systemctl reload gosftpd
+check "the status is \"configuration reloaded\"" status_is "configuration reloaded"
+# With a file of the administrator's in /etc/gosftpd, the directory is not
+# gosftpd's own, and Landlock covers only the include directories that
+# exist at the start (ADR 0011): without the package's users.d, the reload
+# after the first user add --write fails until a restart.
+echo "# the administrator's notes" >/etc/gosftpd/NOTES
+systemctl restart gosftpd || die "systemctl restart gosftpd"
 gosftpd user add partner --key "$KEY" --access inbox=upload --write --config "$CONFIG" >/dev/null
 users=1
 equal "users.d/partner.toml" "$(owner_mode /etc/gosftpd/users.d/partner.toml)" "root:gosftpd 640"
-systemctl reload gosftpd
-# Without users.d at the start, Landlock would keep the new file out until
-# a restart: "configuration reloaded; restart needed for: ...".
-check "the reload with the new user: \"configuration reloaded\"" status_is "configuration reloaded"
+check "systemctl reload with the new user" systemctl reload gosftpd
+check "the status is \"configuration reloaded\"" status_is "configuration reloaded"
+rm /etc/gosftpd/NOTES
 out=$(validate /) || fail "config validate --check-fs as gosftpd: $out"
 equal "config validate with the user" "$(tail -n 1 <<<"$out")" "$CONFIG: OK (1 mounts, 1 users)"
 
@@ -287,13 +294,13 @@ if [ -n "${NEEDRESTART:-}" ]; then
 	equal "is-active" "$(systemctl is-active gosftpd || true)" active
 fi
 # The operator restarts gosftpd after an upgrade.
-systemctl restart gosftpd
+systemctl restart gosftpd || die "systemctl restart gosftpd"
 pid=$(main_pid)
 running "$pid"
 equal "the binary after the restart" "$(exe "$pid")" /usr/bin/gosftpd
 landlock
-systemctl reload gosftpd
-check "systemctl reload: \"configuration reloaded\"" status_is "configuration reloaded"
+check "systemctl reload" systemctl reload gosftpd
+check "the status is \"configuration reloaded\"" status_is "configuration reloaded"
 
 if [ -z "${EXPECT_LEGACY_DROPIN:-}" ]; then
 	phase "upgrades and the drop-in, where systemd knows Type=notify-reload"
@@ -424,7 +431,7 @@ check "the package's configuration is $new" same "$WORK/archive/packaging/config
 equal "/etc/gosftpd/users.d" "$(owner_mode /etc/gosftpd/users.d)" "root:gosftpd 750"
 running "$pid"
 dropin_expected
-systemctl restart gosftpd
+systemctl restart gosftpd || die "systemctl restart gosftpd"
 running "$(main_pid)"
 landlock
 out=$(validate /) || fail "config validate --check-fs as gosftpd: $out"

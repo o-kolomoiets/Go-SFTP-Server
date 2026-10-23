@@ -667,7 +667,8 @@ jobs:
     where Dependabot looks) and booted with systemd as PID 1. It also
     checks: the owners and modes of the configuration and the directories,
     the drop-in exactly where systemd lacks `Type=notify-reload`, Landlock,
-    `procps` installed with every deb, and a user added with `user add
+    `procps` installed with every deb, and, with a file of the
+    administrator's in `/etc/gosftpd`, a user added with `user add
     --write` followed by a reload that reports "configuration reloaded",
     which needs `users.d` at the start. Each upgrade keeps the running
     process, its binary shown as deleted on every format. needrestart is
@@ -862,7 +863,7 @@ nfpms:
 | `/usr/lib/tmpfiles.d/gosftpd.conf` | `packaging/gosftpd.tmpfiles` |
 | `/usr/share/gosftpd/legacy-notify.conf` | `packaging/systemd/legacy-notify.conf`, an inactive template that postinstall copies |
 | `/etc/gosftpd/config.toml` | `packaging/config.toml`, `type: config\|noreplace`, 0640 (a conffile in deb, `%config(noreplace)` in rpm, `backup` in Arch). Packages carry owner names, and the group does not exist at unpack time, so the file lands root:root and postinstall changes the group |
-| `/etc/gosftpd/users.d/` | `type: dir`, 0750, group changed by postinstall. Without it the first `user add --write` needs a restart under Landlock, because the include directory did not exist at start (reproduced) |
+| `/etc/gosftpd/users.d/` | `type: dir`, 0750, group changed by postinstall. Without it the first `user add --write` needs a restart under Landlock, because the include directory did not exist at start (reproduced); this holds once `/etc/gosftpd` also holds a file of the administrator's, since a directory with only `config.toml` is gosftpd's own and its rule covers a new `users.d` (seen in the implementation) |
 | `/etc/gosftpd/`, `/usr/share/gosftpd/`, `/usr/share/doc/gosftpd/` | `type: dir`, 0755: rpm owns, and removes once empty, only the directories a package lists; deb and Arch list every parent directory anyway |
 | `/etc/needrestart/conf.d/gosftpd.conf` (deb only, `packager: deb`) | `packaging/needrestart.conf`, `type: config\|noreplace`, 0644: `$nrconf{override_rc}{qr(^gosftpd\.service$)} = 0;` (see below) |
 | `/usr/share/doc/gosftpd/config.example.toml` | `internal/config/example-full.toml` (§6.6) |
