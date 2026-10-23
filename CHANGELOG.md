@@ -64,7 +64,8 @@ Incompatible changes are prefixed with **BREAKING:**.
   provenance bundle (`gosftpd_X.Y.Z.intoto.jsonl`) and `digests.txt`, the
   image's digest. docs/install.md gives the commands that verify a
   release (cosign v3.0 or later); the release workflow runs them before
-  the release is published (ADR 0012).
+  the release is published, and a workflow runs them against every
+  published release (ADR 0012).
 
 ### Changed
 

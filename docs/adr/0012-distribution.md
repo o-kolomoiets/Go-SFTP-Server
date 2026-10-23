@@ -624,8 +624,9 @@ jobs:
   assets) with the literal identities and the digest from `digests.txt`,
   pulls the image anonymously by that digest (this fails while the GHCR
   package is still private) and checks that `docker run --rm IMAGE
-  version` prints the tag. It sees what users see: the published assets
-  and an anonymous pull.
+  version --json` prints the tag and the tag's commit. It sees what users
+  see: the published assets, and the package read without credentials (an
+  empty `DOCKER_CONFIG` for cosign, gh and docker).
 - **`ci.yml`:**
   - `goreleaser-check` moves to v2.19.0, installs syft as above, pins
     BuildKit as above and runs `release --snapshot --clean --skip=sign`:
