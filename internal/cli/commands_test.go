@@ -482,6 +482,44 @@ func TestServeFlagsNeedDir(t *testing.T) {
 	}
 }
 
+// sftpConn is an SFTP client with its connection.
+type sftpConn struct {
+	*sftp.Client
+	conn *ssh.Client
+}
+
+// Close closes the client and the connection; serve's shutdown would wait
+// for an open one.
+func (c *sftpConn) Close() {
+	_ = c.Client.Close()
+	_ = c.conn.Close()
+}
+
+// putFile uploads data to path.
+func putFile(c *sftpConn, path, data string) error {
+	f, err := c.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(f, data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// waitLog waits until the log holds s.
+func waitLog(t *testing.T, logs func() string, s string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for !strings.Contains(logs(), s) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q in:\n%s", s, logs())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // lockedBuffer is a bytes.Buffer safe for concurrent use; writes can be
 // made to fail.
 type lockedBuffer struct {

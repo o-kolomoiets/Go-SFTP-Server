@@ -10,6 +10,19 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Added
 
+- `gosftpd serve --ephemeral`, a throwaway server for tests (ADR 0012). It
+  serves a new temporary directory, or the one `--dir` names, as `/` to the
+  user `test`, who logs in with a random password or a generated ed25519
+  key, and once it serves prints the connection details as one JSON line on
+  stdout: `host`, `port`, `user`, `password`, `private_key_path`, `dir`,
+  `host_key_fingerprint`, `known_hosts` (a line for `UserKnownHostsFile`),
+  `pid` and `version`. Nothing else goes to stdout: logs and the audit log
+  go to stderr. It listens on `127.0.0.1:0` unless `--listen`, given once,
+  names another address; `$GOSFTPD_CONFIG` and `$GOSFTPD_LISTEN` are
+  ignored with a warning, and SIGHUP is logged and otherwise ignored. The
+  host key exists only in memory. On SIGINT or SIGTERM it deletes the
+  client key and the temporary data; under Landlock a rule on its
+  directory allows that, and the directory itself stays, empty.
 - Man pages, one per command, and bash, zsh and fish completions:
   `make generate` writes them into `out/` (not committed) with
   `internal/cli/gendocs`, from the command definitions, dated by the
