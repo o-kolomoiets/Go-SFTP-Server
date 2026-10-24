@@ -24,10 +24,15 @@ Incompatible changes are prefixed with **BREAKING:**.
   client key and the temporary data; under Landlock a rule on its
   directory allows that, and the directory itself stays, empty.
 - Atmoz mode: the user specs of atmoz/sftp,
-  `user:pass[:e][:uid[:gid[:dir1[,dir2]...]]]`, work unchanged (ADR 0012,
-  docs/migrate-from-atmoz.md). They come as arguments to the root command
-  (`docker run IMAGE foo:pass:::upload`), in `$SFTP_USERS` or in a users
-  file (`--users-conf`, or in the container image `/etc/sftp/users.conf`).
+  `user:pass[:e][:uid[:gid[:dir1[,dir2]...]]]`, work as in atmoz (ADR 0012,
+  docs/migrate-from-atmoz.md), except those gosftpd refuses with exit 2 and
+  a fix: MD5-crypt, SHA-crypt and yescrypt hashes (`:e` takes bcrypt or
+  argon2id), user names with upper case or a leading `.` or `_`, nested
+  directories (`a/b`) and extra fields. The uid and gid are ignored: files
+  belong to the user gosftpd runs as. The specs come as arguments to the
+  root command (`docker run IMAGE foo:pass:::upload`), in `$SFTP_USERS` or
+  in a users file (`--users-conf`, or in the container image
+  `/etc/sftp/users.conf`).
   User foo with directory upload sees `/upload`, stored in
   `/home/foo/upload`, one mount per user and directory under a read-only
   root, and logs in with the password, a bcrypt or argon2id hash (`:e`),
