@@ -3,10 +3,16 @@
 package docs
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -159,5 +165,83 @@ func TestComposeExample(t *testing.T) {
 	example := readFile(t, "docs", "examples", "compose.yaml")
 	if want := strings.ReplaceAll(example, "<digest>", digest); string(data) != want {
 		t.Errorf("the compose block writes\n%s\ndocs/examples/compose.yaml, with the digest, is\n%s", data, want)
+	}
+}
+
+// macOSCheck matches the sentence that gives the macOS checksum command,
+// in text whose white space is collapsed: the command, then what follows
+// up to the sentence's end.
+var macOSCheck = regexp.MustCompile("On macOS, check (?:the archive )?with `([^`]+)`([^.]*)\\.")
+
+// TestMacOSChecksum checks the macOS checksum command of docs/install.md,
+// docs/quickstart.md and README.md, which no CI job runs: the three give
+// the same sentence, and the command checks the one archive downloaded
+// against a checksums.txt laid out like a release's, which also lists each
+// archive's SBOM (<archive>.sbom.json) and the packages. It runs with the
+// shasum that macOS has, Perl's Digest::SHA, which the Ubuntu runners have
+// too, for darwin_arm64 and for darwin_amd64, which the sentence names
+// for an Intel Mac.
+func TestMacOSChecksum(t *testing.T) {
+	t.Parallel()
+	var sentence, cmd string
+	for _, name := range []string{"docs/install.md", "docs/quickstart.md", "README.md"} {
+		text := strings.Join(strings.Fields(readFile(t, filepath.FromSlash(name))), " ")
+		m := macOSCheck.FindStringSubmatch(text)
+		if m == nil {
+			t.Fatalf("%s has no sentence \"On macOS, check the archive with `COMMAND`\"", name)
+		}
+		switch {
+		case sentence == "":
+			sentence, cmd = m[0], m[1]
+		case m[0] != sentence:
+			t.Errorf("%s says %q, docs/install.md %q", name, m[0], sentence)
+		}
+	}
+	if !strings.Contains(sentence, "`darwin_amd64`") {
+		t.Errorf("the macOS sentence does not name darwin_amd64 for an Intel Mac: %q", sentence)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the command runs in a POSIX shell")
+	}
+	if _, err := exec.LookPath("shasum"); err != nil {
+		t.Skip("no shasum here: it comes with Perl")
+	}
+	const v = "0.5.0"
+	for _, arch := range []string{"arm64", "amd64"} {
+		t.Run(arch, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			archive := "gosftpd_" + v + "_darwin_" + arch + ".tar.gz"
+			data := []byte("the archive for darwin_" + arch)
+			write(t, dir, archive, string(data))
+			sum := sha256.Sum256(data)
+			var names []string
+			for _, p := range []string{"darwin_amd64", "darwin_arm64", "freebsd_amd64", "freebsd_arm64", "linux_amd64", "linux_arm64"} {
+				a := "gosftpd_" + v + "_" + p + ".tar.gz"
+				names = append(names, a, a+".sbom.json")
+				if strings.HasPrefix(p, "linux_") {
+					for _, ext := range []string{".deb", ".rpm", ".pkg.tar.zst"} {
+						names = append(names, "gosftpd_"+v+"_"+p+ext)
+					}
+				}
+			}
+			slices.Sort(names)
+			var sums strings.Builder
+			for i, n := range names {
+				h := fmt.Sprintf("%064x", i+1)
+				if n == archive {
+					h = hex.EncodeToString(sum[:])
+				}
+				fmt.Fprintf(&sums, "%s  %s\n", h, n)
+			}
+			write(t, dir, "checksums.txt", sums.String())
+			c := strings.ReplaceAll(cmd, "darwin_arm64", "darwin_"+arch)
+			run := exec.CommandContext(t.Context(), "bash", "-c", c)
+			run.Dir = dir
+			out, err := run.CombinedOutput()
+			if want := archive + ": OK\n"; err != nil || string(out) != want {
+				t.Errorf("%s: %v, output:\n%s\nwant %q", c, err, out, want)
+			}
+		})
 	}
 }

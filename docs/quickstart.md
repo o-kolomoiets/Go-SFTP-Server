@@ -20,8 +20,9 @@ sudo install gosftpd /usr/local/bin/
 gosftpd version
 ```
 
-On macOS, check the archive with `grep darwin_arm64 checksums.txt | shasum
--a 256 -c -`. Or build it with Go 1.26.5 or newer:
+On macOS, check the archive with
+`grep 'darwin_arm64\.tar\.gz$' checksums.txt | shasum -a 256 -c -`
+(`darwin_amd64` on an Intel Mac). Or build it with Go 1.26.5 or newer:
 
 ```sh
 go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest

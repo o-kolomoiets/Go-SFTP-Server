@@ -461,8 +461,10 @@ sudo install gosftpd /usr/local/bin/ && gosftpd version
 ```
 
 Replace `linux_amd64` with `linux_arm64`, `darwin_amd64` or `darwin_arm64`
-(from v0.5.0 also `freebsd_amd64` or `freebsd_arm64`) as needed. On macOS,
-check with `grep darwin_arm64 checksums.txt | shasum -a 256 -c -`.
+(from v0.5.0 also `freebsd_amd64` or `freebsd_arm64`) as needed.
+On macOS, check the archive with
+`grep 'darwin_arm64\.tar\.gz$' checksums.txt | shasum -a 256 -c -`
+(`darwin_amd64` on an Intel Mac).
 
 **With Go 1.26.5 or newer:**
 

@@ -279,9 +279,10 @@ file added there needs a restart"
 ([configuration.md](configuration.md#landlock)).
 
 macOS and FreeBSD (Tier 2: cross-built, not tested) have no service files:
-run the binary from the archive as in the [Quickstart](quickstart.md). On
-macOS, check the archive with `grep darwin_arm64 checksums.txt | shasum -a
-256 -c -`.
+run the binary from the archive as in the [Quickstart](quickstart.md).
+On macOS, check the archive with
+`grep 'darwin_arm64\.tar\.gz$' checksums.txt | shasum -a 256 -c -`
+(`darwin_amd64` on an Intel Mac).
 
 ## Add users
 
