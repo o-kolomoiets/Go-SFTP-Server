@@ -12,7 +12,10 @@
 # as PID 1 and sudo: it runs in the CI job "systemd" on a throwaway
 # ubuntu-24.04 runner, and refuses to run unless CI=true or
 # GOSFTPD_SYSTEMD_TEST=1. Usage: test/systemd/run.sh (from anywhere).
-# Needs Go, openssh-client and jq.
+# Needs Go, openssh-client, jq and findmnt. In a container, make / shared
+# first (mount --make-rshared /), as systemd does at boot on a machine:
+# the phase with a disk mounted while gosftpd runs fails with a setup
+# error otherwise.
 
 # Functions called through check are not unreachable.
 # shellcheck disable=SC2317
@@ -227,31 +230,42 @@ check "bob logs in after the reload" sftp_as bob 2022 "$WORK/ls.batch"
 
 phase "a disk mounted on the mount's directory: Landlock needs a restart"
 # A tmpfs stands for a disk mounted on the inbox while gosftpd runs; the
-# reload sees it only if it reaches the unit's mount namespace. 2 GiB,
-# since min_free_space is 1 GiB.
-sudo mount -t tmpfs -o "size=2g,mode=0750,uid=$(id -u gosftpd),gid=$(id -g gosftpd)" gosftpd-ci "$INBOX"
-REMOUNTED=$INBOX
-mark=$(journal_mark)
-sudo systemctl reload gosftpd
-check "status names mounts.inbox.path" status_is "configuration reloaded; restart needed for: mounts.inbox.path"
-check "server.reload: restart_required=mounts.inbox.path" last_reload_is '.restart_required == "mounts.inbox.path"'
-check "the journal says to restart" \
-	journal_has "$mark" "mounts\.inbox\.path: $INBOX: outside the Landlock ruleset applied at start; restart gosftpd"
-printf 'put %s remount.bin\n' "$WORK/payload" >"$WORK/remount.batch"
-check "an upload before the restart is refused" refused sftp_as alice 2022 "$WORK/remount.batch"
-mark=$(journal_mark)
-sudo systemctl restart gosftpd
-check "landlock applied after the restart" journal_has "$mark" 'landlock: ABI v[2-5] applied'
-check "an upload after the restart" sftp_as alice 2022 "$WORK/remount.batch"
-check "it is on the tmpfs" test "$(sudo stat -f -c %T "$INBOX/remount.bin")" = tmpfs
-check "it is the upload" sudo cmp -s "$WORK/payload" "$INBOX/remount.bin"
-# Back to the inbox that the phases below use.
-sudo systemctl stop gosftpd
-sudo umount "$INBOX"
-REMOUNTED=
-check "the refused upload left nothing below the mount point" sudo test ! -e "$INBOX/remount.bin"
-sudo rm -f "$INBOX/remount.bin"
-start
+# reload sees it only if it reaches the unit's mount namespace. systemd
+# makes that namespace a slave of the machine's, so only a mount below a
+# mount with shared propagation reaches it: on a machine systemd makes /
+# shared at boot, but a container keeps the private / it was given. The
+# check fails as a setup error then, instead of five checks that would
+# blame gosftpd. 2 GiB, since min_free_space is 1 GiB. (With sudo: the
+# inbox is gosftpd's.)
+propagation=$(sudo findmnt -no PROPAGATION --target "$INBOX")
+holder=$(sudo findmnt -no TARGET --target "$INBOX")
+if [[ ,$propagation, != *,shared,* ]]; then
+	fail "setup: $holder, the mount that holds $INBOX, has the propagation \"$propagation\", not shared: a disk mounted while gosftpd runs cannot reach the unit's mount namespace, so this phase cannot test gosftpd here (in a container, run mount --make-rshared / first)"
+else
+	sudo mount -t tmpfs -o "size=2g,mode=0750,uid=$(id -u gosftpd),gid=$(id -g gosftpd)" gosftpd-ci "$INBOX"
+	REMOUNTED=$INBOX
+	mark=$(journal_mark)
+	sudo systemctl reload gosftpd
+	check "status names mounts.inbox.path" status_is "configuration reloaded; restart needed for: mounts.inbox.path"
+	check "server.reload: restart_required=mounts.inbox.path" last_reload_is '.restart_required == "mounts.inbox.path"'
+	check "the journal says to restart" \
+		journal_has "$mark" "mounts\.inbox\.path: $INBOX: outside the Landlock ruleset applied at start; restart gosftpd"
+	printf 'put %s remount.bin\n' "$WORK/payload" >"$WORK/remount.batch"
+	check "an upload before the restart is refused" refused sftp_as alice 2022 "$WORK/remount.batch"
+	mark=$(journal_mark)
+	sudo systemctl restart gosftpd
+	check "landlock applied after the restart" journal_has "$mark" 'landlock: ABI v[2-5] applied'
+	check "an upload after the restart" sftp_as alice 2022 "$WORK/remount.batch"
+	check "it is on the tmpfs" test "$(sudo stat -f -c %T "$INBOX/remount.bin")" = tmpfs
+	check "it is the upload" sudo cmp -s "$WORK/payload" "$INBOX/remount.bin"
+	# Back to the inbox that the phases below use.
+	sudo systemctl stop gosftpd
+	sudo umount "$INBOX"
+	REMOUNTED=
+	check "the refused upload left nothing below the mount point" sudo test ! -e "$INBOX/remount.bin"
+	sudo rm -f "$INBOX/remount.bin"
+	start
+fi
 
 phase "host key rotation by reload"
 as_gosftpd /usr/bin/gosftpd hostkey rotate --config "$CONFIG" >/dev/null
