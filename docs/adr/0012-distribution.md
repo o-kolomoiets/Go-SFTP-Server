@@ -285,10 +285,10 @@ release:
   and verified by then. If the newer tag is a pre-release, `latest` stays
   on the previous release until the owner points it at the verified
   digest with the same command, or the next stable release does. In a
-  snapshot `.Tag` and `.Prerelease`
-  come from the last reachable tag (after v0.5.0-rc.1: `v0.5.0-rc.1` and
-  `rc.1`) and `dockers_v2` appends the architecture, so CI refers to its
-  images as `v<.Version>-amd64` and `-arm64`.
+  snapshot `.Tag` and `.Prerelease` come from the last reachable tag
+  (after v0.5.0-rc.1: `v0.5.0-rc.1` and `rc.1`) and `dockers_v2` appends
+  the architecture, so CI refers to its images as `v<.Version>-amd64` and
+  `-arm64`.
 - `docker_signs` sets its own `args`: the default is `sign
   --key=cosign.key ...`.
 - **`git.prerelease_suffix: "-"`.** Without a tag named in
@@ -544,9 +544,8 @@ jobs:
   progress waits, and its guard runs after the other has finished.
   GitHub keeps one pending run per group, so a third dispatch cancels the
   waiting one, which the owner dispatches again if its tag is still the
-  highest. The guard checks `GITHUB_REF_NAME`, and
-  GoReleaser is given that name (`release` below): on its own it would
-  not build it.
+  highest. The guard checks `GITHUB_REF_NAME`, and GoReleaser is given
+  that name (`release` below): on its own it would not build it.
 - **`generate`** (`contents: read` only, no `id-token`; setup-go `cache:
   false`) runs the guard, then `go mod tidy -diff && make generate`, and
   uploads only `out/man/`, `out/completions/` and
