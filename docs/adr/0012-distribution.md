@@ -742,9 +742,20 @@ jobs:
     `systemd-analyze` ahead in the scripts' `PATH` makes postinstall
     install the drop-in; the next upgrade must keep it (rpm runs the old
     `%postun` after the new `%post`), and the one after, on the real
-    systemd, remove it. A removal also deletes `/usr/share/gosftpd` and
+    systemd, remove it. Before the upgrades above, two reinstalls with
+    `config.toml` and `users.d` given another group (`users.d` also mode
+    2770), first with the packaged `config.toml` and then with an edited
+    one, must leave what "Owners after an upgrade" below gives for the
+    format. A removal also deletes `/usr/share/gosftpd` and
     `/usr/share/doc/gosftpd`, and keeps the user, the host key, the data
-    and the audit log; deb keeps the configuration until `apt purge`.
+    and the audit log; deb keeps `config.toml` until `apt purge`, and
+    `users.d` with a user's file in it stays in every format, also after
+    `apt purge`. `test/packages/container.sh` then starts a second
+    container of the same image whose PID 1 is not systemd, as in an image
+    build: `test/packages/offline.sh` installs the package there, runs
+    `systemctl enable gosftpd`, upgrades (still enabled), removes (no
+    `multi-user.target.wants` link, not even one whose target is gone, and
+    no empty `users.d`) and installs again (`is-enabled` says `disabled`).
   - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real
     Landlock, no QEMU), as a non-root user under umask 002, from the image
     `goreleaser-check` saved, tagged after `docker load` with every
@@ -955,12 +966,35 @@ nfpms:
   builds): `systemd-sysusers gosftpd.conf`; `systemd-tmpfiles --create
   gosftpd.conf`; when the group `gosftpd` exists, `chgrp gosftpd` on
   `/etc/gosftpd/config.toml` and `/etc/gosftpd/users.d` if their group is
-  still root (an administrator's choice of group is kept); the offline
+  root (another group is left alone, but not every upgrade keeps it: see
+  "Owners after an upgrade" below); the offline
   `Type=notify-reload` probe of ADR 0011 (`systemd-analyze verify
   --man=no`), which installs `/usr/share/gosftpd/legacy-notify.conf` as
   `/etc/systemd/system/gosftpd.service.d/legacy-notify.conf` where the type
   is unknown and removes it elsewhere (also after systemd was upgraded);
   `systemctl daemon-reload || true` when `/run/systemd/system` exists.
+- **Owners after an upgrade differ by format** (found in the
+  implementation review). deb keeps a changed owner, group and mode of
+  `config.toml` and `users.d`, also when it installs a newer packaged
+  `config.toml` over an unedited one. rpm lays `users.d` down as
+  root:root 0750 again at every upgrade, reinstall or downgrade, and rpm
+  and pacman do the same with a `config.toml` that was not edited (0640);
+  postinstall then gives them the group, so they end up root:gosftpd 0750
+  and 0640. An edited `config.toml` keeps its owner, group and mode in
+  every format, and pacman keeps a changed `users.d` ("warning: directory
+  permissions differ"). Seen with dpkg 1.21 and 1.22 (Debian 12, Ubuntu
+  24.04), rpm 4.16 (EL9) and pacman 7.1 (Arch), on upgrades, reinstalls
+  and downgrades; the packages job checks it on a reinstall. So another
+  group on these files does not survive every upgrade, and another
+  account runs gosftpd through the group `gosftpd`: a drop-in that
+  changes only `User=` keeps the unit's `Group=gosftpd`, one that also
+  sets `Group=` adds `SupplementaryGroups=gosftpd`, or the account joins
+  the group `gosftpd`. On EL9 each of the three still reloaded after `dnf
+  reinstall`; a drop-in with another account's `User=` and `Group=` and
+  the files given to that group failed the reload, and the next start
+  exited 2. A preinstall script that saved the group and mode for
+  postinstall to restore would make every format keep them; the packages
+  have none. docs/install.md says this.
 - **The scripts never enable, start or restart the service.** The operator
   enables it (the DoD runs `systemctl enable --now gosftpd`) and restarts
   it after an upgrade (docs/operations.md): a restart ends every session,
@@ -984,9 +1018,16 @@ nfpms:
   installed, and an operator who wants the restart edits or deletes it (a
   conffile, so an upgrade keeps that choice). docs/operations.md names it
   in the Ubuntu notes, with the unattended-upgrades case.
-- **preremove** stops and disables the service on a removal, not on an
-  upgrade: deb passes `upgrade` and rpm passes `1` then, and pacman runs
-  `pre_remove` only for a removal.
+- **preremove** disables the service on a removal, not on an upgrade: deb
+  passes `upgrade` and rpm passes `1` then, and pacman runs `pre_remove`
+  only for a removal. Where systemd runs (`/run/systemd/system` exists) it
+  runs `systemctl disable --now`, which also stops the service; elsewhere
+  (an image build, a chroot) `systemctl disable`, which needs no running
+  systemd and deletes the enablement links, as Fedora's `%systemd_preun`
+  does (found in the implementation review: the first version skipped
+  the disable there, and on Debian 12, EL9 and Arch an operator's
+  `systemctl enable` in a container without systemd survived the removal,
+  so a later install came back enabled).
 - **postremove** deletes the drop-in (and its directory when empty) only
   when `/usr/lib/systemd/system/gosftpd.service` no longer exists, then
   reloads systemd. The test is on the file, not on `$1`: on an upgrade rpm
@@ -1003,12 +1044,19 @@ nfpms:
   was gone too).
 - **What a removal keeps differs by format.** The data, the host keys and
   the audit log (`/srv/sftp`, `/var/lib/gosftpd`, `/var/log/gosftpd`)
-  belong to no package and stay everywhere. deb: `apt remove` keeps
-  `config.toml` and `users.d` until `apt purge`. rpm and Arch: a removal
-  renames an edited `config.toml` to `config.toml.rpmsave` or
+  belong to no package and stay everywhere. In every format `users.d`
+  stays while it holds files, also after `apt purge` (dpkg warns that the
+  directory is not empty), and goes with the removal when it is empty,
+  also with `apt remove` (found in the implementation review: the first
+  text had deb keep `users.d` until `apt purge`). It holds the users'
+  password hashes and keys, so a complete removal deletes it by hand.
+  deb: `apt remove` keeps `config.toml` until `apt purge`. rpm and Arch: a
+  removal renames an edited `config.toml` to `config.toml.rpmsave` or
   `config.toml.pacsave` (rpm and pacman print a warning) and deletes an
-  unedited one; `users.d` stays while it holds files, and Arch removes it
-  when empty. After a removal and a new install the packaged default is
+  unedited one, and `/etc/gosftpd` itself once nothing is left in it.
+  Seen with dpkg 1.21 and 1.22, rpm 4.16 and pacman 7.1, with an empty
+  `users.d` and with a user's file in it, and an unedited and an edited
+  `config.toml`. After a removal and a new install the packaged default is
   back, so the saved file is moved back before the service starts. An
   upgrade or downgrade done as one transaction (`rpm -U`, `dnf`, `pacman
   -U`) keeps the edited file. docs/install.md states this per format and

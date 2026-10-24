@@ -668,7 +668,9 @@ jobs:
   # ubuntu-24.04 and ubuntu-24.04-arm runners themselves, with needrestart
   # as on an Ubuntu server; in containers built from test/packages/ without
   # procps (test/packages/container.sh): Debian 12 (systemd 252, the drop-in
-  # for systemd before 253) and 13, EL9 and Arch.
+  # for systemd before 253) and 13, EL9 and Arch, each also without systemd
+  # as PID 1, as in an image build, where a removal must still disable the
+  # service (test/packages/offline.sh).
   packages:
     name: packages (${{ matrix.target }})
     needs: goreleaser-check
@@ -717,7 +719,7 @@ jobs:
         env:
           NEEDRESTART: "1"
         run: sudo --preserve-env=CI,EXPECT_LEGACY_DROPIN,NEEDRESTART,REQUIRE_LANDLOCK test/packages/run.sh "$FORMAT" "$RUNNER_TEMP/packages" "$V"
-      - name: Install, upgrade and remove in a container with systemd
+      - name: Install, upgrade and remove in containers with and without systemd
         if: ${{ matrix.container }}
         run: test/packages/container.sh "$TARGET" "$FORMAT" "$RUNNER_TEMP/packages" "$V"
 
