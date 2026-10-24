@@ -98,6 +98,11 @@ logged() {
 	grep -q -- "$1" "$WORK/log"
 }
 
+# started: the container's log holds the audit event server.start, which
+# gosftpd writes once its listeners are bound, before it serves. Unlike a
+# probe of the port, it still tells after the container has exited.
+started() { logged '"event":"server.start"'; }
+
 # no_secrets WHAT: no log shows a password, a spec or a hash.
 no_secrets() {
 	docker logs "$NAME" >"$WORK/log" 2>&1
@@ -283,12 +288,18 @@ got=$(ssh-keygen -lf "$WORK/known_hosts" | awk '{print $2}')
 [ "$want" = "$got" ] && pass "host key: /etc/ssh/ssh_host_ed25519_key is served" || fail "host key: $got, want $want"
 
 # --- A missing configuration directory with SFTP_USERS: exit 2 ----------
+# The container is checked once it has exited, when its port is closed
+# whatever it did: the log tells whether it listened. The container of the
+# last step listened, and after docker stop the check must still see it.
+docker stop "$NAME" >/dev/null
+started && pass "a container that listened and exited: its log has server.start" ||
+	fail "a container that listened and exited: no server.start in its log: $(head -3 "$WORK/log")"
 docker rm -f "$NAME" >/dev/null
 docker run -d --name "$NAME" -p "127.0.0.1:$PORT:2022" -v "$WORK/missing:/etc/gosftpd:ro" -e "SFTP_USERS=foo:$PW1:::upload" "$IMAGE" >/dev/null
 code=$(docker wait "$NAME")
 if [ "$code" = 2 ] && logged '/etc/gosftpd is mounted but holds no config.toml' &&
-	! logged 'msg="atmoz mode"' && ! ssh-keyscan -T 2 -p "$PORT" 127.0.0.1 >/dev/null 2>&1; then
-	pass "missing configuration directory: exit 2 with the hint, never atmoz mode, no listener"
+	! logged 'msg="atmoz mode"' && ! started; then
+	pass "missing configuration directory: exit 2 with the hint, never atmoz mode, never listened"
 else
 	fail "missing configuration directory: exit $code: $(head -3 "$WORK/log")"
 fi

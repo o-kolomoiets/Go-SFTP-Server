@@ -738,8 +738,11 @@ jobs:
     the base image's `/home/nonroot` (0700, 65532) is not a user;
     `SFTP_USERS`, `:e` (MD5-crypt refused, bcrypt), an `/etc/ssh` host
     key; and the missing configuration directory with `SFTP_USERS` set,
-    which must exit 2 with no listener. Every container applies Landlock
-    in this step too.
+    which must exit 2 with no listener. Once the container has exited its
+    port is closed in any case, so its log is checked: no `server.start`,
+    the audit event gosftpd writes once it listens, which the same check
+    finds in a container that listened and exited. Every container applies
+    Landlock in this step too.
   - The three new jobs join `ci-ok`'s needs; stream C adds one fuzz-smoke
     entry (`FuzzAtmozSpec`).
 - **Dependabot** gets `package-ecosystem: docker` with `directories:
