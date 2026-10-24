@@ -530,9 +530,10 @@ jobs:
           retention-days: 7
       # git.prerelease_suffix (ADR 0012): without GORELEASER_CURRENT_TAG,
       # GoReleaser takes the first tag on HEAD in git's version sort, which
-      # ranks v0.5.0-rc.1 above v0.5.0; the suffix makes a local or snapshot
-      # run on a final tagged on its rc's commit build the final. The build
-      # runs in a worktree, so that dist/ stays for the steps after it.
+      # ranks v0.5.0-rc.1 above v0.5.0; the suffix makes a run without the
+      # variable, a release run too, on a final tagged on its rc's commit
+      # build the final. The build runs in a worktree, so that dist/ stays
+      # for the steps after it.
       - name: Tag a final and its rc on HEAD (local tags, never pushed)
         run: |
           git worktree add --quiet --detach "$RUNNER_TEMP/suffix"

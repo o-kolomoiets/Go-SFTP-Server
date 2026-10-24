@@ -73,7 +73,7 @@
   on that tag (**Run workflow** with the tag selected, or `gh workflow run
   release.yml --ref vX.Y.Z`); `tag.yml`'s checks are then the owner's
   responsibility. GoReleaser builds the tag the run was dispatched on,
-  also when it shares its commit with an rc (`GORELEASER_CURRENT_TAG`,
+  also when other tags share its commit (`GORELEASER_CURRENT_TAG`,
   Workflows). `release.yml` has no `push: tags` trigger (see
   Alternatives).
 - **Why a workflow dispatch.** Events caused by `GITHUB_TOKEN` start no
@@ -226,8 +226,8 @@ docker_signs:
 
 docker_digest: { name_template: digests.txt }
 
-# Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit.
-# release.yml names its tag with GORELEASER_CURRENT_TAG (Workflows).
+# Every run without GORELEASER_CURRENT_TAG, with which release.yml names
+# its tag (Workflows): v0.5.0 before v0.5.0-rc.1 on one commit.
 git: { prerelease_suffix: "-" }
 
 release:
@@ -281,9 +281,10 @@ release:
 - **`git.prerelease_suffix: "-"`.** Without a tag named in
   `GORELEASER_CURRENT_TAG`, GoReleaser takes the first tag of `git tag
   --points-at HEAD --sort -version:refname`, and git's version sort ranks
-  `v0.5.0-rc.1` above `v0.5.0`. The suffix makes a local or snapshot run
-  on a commit that carries both pick `v0.5.0`; the release job does not
-  rely on it (Workflows).
+  `v0.5.0-rc.1` above `v0.5.0`. The suffix makes any run without the
+  variable on a commit that carries both pick `v0.5.0`, a release run as
+  well as a local or snapshot one; the release job names its tag anyway,
+  since another tag on the commit could still rank first (Workflows).
 - `preflight.fail_on_error` (since v2.18) stops the run before building
   only when the tag's release is already immutable; it does not check that
   the token can publish (`CanRelease` only reads the repository and the
@@ -542,15 +543,17 @@ jobs:
   ignored), writes the notes and runs `goreleaser release --clean
   --skip=before` (`before` is a release skip key in v2.19.0) with
   `GORELEASER_CURRENT_TAG=$GITHUB_REF_NAME`. On its own GoReleaser v2.19.0
-  ignores `GITHUB_REF` and takes the first tag of `git tag --points-at
-  HEAD --sort -version:refname`, the highest tag on HEAD by git's version
-  sort, which ranks `v0.5.0-rc.1` above `v0.5.0` (reproduced). When the
-  final is tagged on its rc's commit, the usual way to promote an rc and
-  what `tag.yml` does when `main` has not moved, the run for `v0.5.0` would
-  build, push and sign `v0.5.0-rc.1` after the guard had passed. With the
-  variable it builds exactly the tag the guard checked, and its own
-  validation still requires that tag on HEAD (`git describe --exact-match
-  --tags --match`). The next step fails unless `jq -r .tag
+  ignores `GITHUB_REF` and takes the first tag of `git -c
+  versionsort.suffix=- tag --points-at HEAD --sort -version:refname`, the
+  highest tag on HEAD by git's version sort (the suffix comes from
+  `git.prerelease_suffix`, so a final on its rc's commit, the usual way to
+  promote an rc, already ranks above the rc, in a release run too). That
+  can be a tag the guard does not count: with a stray `v0.9.0-dev` on the
+  commit, the run for `v0.5.0` would build, push and sign `v0.9.0-dev`
+  after the guard had passed (reproduced). With the variable it builds
+  exactly the tag the guard checked, and its own validation still
+  requires that tag on HEAD (`git describe --exact-match --tags
+  --match`). The next step fails unless `jq -r .tag
   dist/metadata.json` equals `$GITHUB_REF_NAME`; it runs after the image
   has been pushed and signed, so it catches a regression before the
   attestations, the verification and `latest`, and does not replace the
@@ -1663,8 +1666,9 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - **Signed tags only** (`git tag -s`): needs a local git with a key
   registered on GitHub for every release; the owner chose the workflow. A
   signed tag pushed by hand is still released by a dispatch of
-  `release.yml`, which builds that tag even on its rc's commit
-  (`GORELEASER_CURRENT_TAG`), so this can change without a change here.
+  `release.yml`, which builds that tag whatever else is tagged on its
+  commit (`GORELEASER_CURRENT_TAG`), so this can change without a change
+  here.
 - **release-please:** its tags are made with `GITHUB_TOKEN` too, it would
   need GoReleaser in the same workflow, and it adds a bot's pull requests.
 - **GoReleaser v2.18.2:** wrong image digest (#7180). v2.18.3 is the

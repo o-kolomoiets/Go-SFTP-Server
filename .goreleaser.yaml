@@ -194,8 +194,9 @@ docker_signs:
 # tag, the digest users verify and run (docs/install.md). Not in a snapshot.
 docker_digest: { name_template: digests.txt }
 
-# Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit (git's
-# version sort ranks the rc higher).
+# Every run that does not name its tag in GORELEASER_CURRENT_TAG, as
+# release.yml does: v0.5.0 before v0.5.0-rc.1 on one commit (git's version
+# sort ranks the rc higher).
 git: { prerelease_suffix: "-" }
 
 # A draft, which the owner publishes once it is complete and checked
