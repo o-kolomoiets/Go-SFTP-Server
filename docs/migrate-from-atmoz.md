@@ -5,14 +5,15 @@ as that image does: user specs as arguments, in `SFTP_USERS` or in
 `/etc/sftp/users.conf`, directories under `/home/<user>`, keys in
 `/home/<user>/.ssh/keys/` and host keys in `/etc/ssh`. This is atmoz mode
 ([ADR 0012](adr/0012-distribution.md#atmoz-compatibility)). Most atmoz
-commands keep working after four changes:
+commands keep working after five changes:
 
 | atmoz/sftp | gosftpd |
 |---|---|
 | `atmoz/sftp` | `ghcr.io/o-kolomoiets/gosftpd:v0.5.0` |
 | `-p 22:22`, `-p 2222:22` | `-p 22:2022`, `-p 2222:2022`: the container listens on 2022 |
 | `:e` with an MD5-crypt or SHA-crypt hash | `:e` with a bcrypt (cost 10 to 14) or argon2id hash ([Passwords](#passwords)) |
-| a mounted `users.conf` or key file of any owner | owned by root and not writable by group or others: `sudo chown root:root FILE && sudo chmod 0644 FILE` |
+| a mounted `users.conf` of any owner | owned by root, readable by the image's group 65532 and not by others, as it holds passwords: `sudo chown root:65532 users.conf && sudo chmod 0640 users.conf` |
+| a mounted key file of any owner | owned by root and not writable by group or others: `sudo chown root:root FILE && sudo chmod 0644 FILE` |
 
 Files that clients upload belong to the user the image runs as, 65532, not
 to the uid of the spec ([Ownership](#ownership)). An upload to an existing
@@ -64,12 +65,15 @@ sftp:
 **Store users in config:**
 
 ```sh
-sudo chown root:root <host-dir>/users.conf && sudo chmod 0644 <host-dir>/users.conf
+sudo chown root:65532 <host-dir>/users.conf && sudo chmod 0640 <host-dir>/users.conf
 docker run \
     -v <host-dir>/users.conf:/etc/sftp/users.conf:ro \
     -v mySftpVolume:/home \
     -p 2222:2022 -d ghcr.io/o-kolomoiets/gosftpd:v0.5.0
 ```
+
+The file holds passwords: the image's group 65532 and mode 0640 let
+gosftpd read it, and not the other users of the host.
 
 `users.conf` holds one spec per line; blank lines and lines starting with
 `#` are skipped. Its users `foo:123:1001:100` and so on name no directory:
@@ -181,8 +185,11 @@ and keeps only the hash. Better, give a hash with `:e`:
 
 ```sh
 docker run --rm -it ghcr.io/o-kolomoiets/gosftpd:v0.5.0 user hash-password   # argon2id, asked twice
-htpasswd -bnBC 10 "" 'the password' | tr -d ':\n'                         # bcrypt
+htpasswd -nBC 10 "" | tr -d ':\n'                                            # bcrypt, asked twice
 ```
+
+Both ask for the password, so that it stays out of the shell history and
+the process list; do not give it to `htpasswd` with `-b`.
 
 `htpasswd`'s default bcrypt cost, 5, is below gosftpd's minimum of 10:
 pass `-C 10` or more (up to 14). MD5-crypt (`$1$`), SHA-crypt (`$5$`,
@@ -228,7 +235,9 @@ atmoz's ownership back, run the container as that user: `--user 1001:100`
 with a volume for the host key that this user can write
 (`-v <host-dir>/state:/var/lib/gosftpd`, owned by 1001) and a volume for
 each user's directories; then the users file and the keys may also
-belong to 1001.
+belong to 1001. The users file then takes that group instead of 65532
+(`sudo chown root:100 users.conf && sudo chmod 0640 users.conf`), or
+belongs to 1001 with mode 0600.
 
 ## When atmoz mode starts
 

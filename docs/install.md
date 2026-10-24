@@ -370,30 +370,36 @@ container keeps it.
 
 ### Compose
 
-In the directory of the Quickstart, with the release's `digests.txt`, which
-names the image's digest:
+Compose takes over from the Quickstart, in its directory, with the
+release's `digests.txt`, which names the image's digest. The first command
+removes the Quickstart's container, which holds port 2022; the service
+mounts the same `./gosftpd`, `./data` and `./state`, so the configuration,
+the uploads and the host key stay. The file is also in
+[examples/compose.yaml](examples/compose.yaml), with `<digest>` in place
+of the digest.
 
 <!-- ci:compose -->
 ```sh
 V=0.5.0
+docker rm -f gosftpd
 DIGEST=$(awk -v t="ghcr.io/o-kolomoiets/gosftpd:v$V" '$2 == t { print $1 }' digests.txt)
 cat > compose.yaml <<EOF
+# In the directory of the Quickstart (docs/install.md): ./gosftpd holds
+# config.toml; ./data and ./state, owned by 65532, keep the uploads and
+# the host key.
 services:
   gosftpd:
     image: ghcr.io/o-kolomoiets/gosftpd:v$V@sha256:$DIGEST
     ports: ["2022:2022"]
     volumes:
       - ./gosftpd:/etc/gosftpd:ro
-      - data:/srv/sftp
-      - state:/var/lib/gosftpd
+      - ./data:/srv/sftp
+      - ./state:/var/lib/gosftpd
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 40s
     # init: true   # with exec hooks (docs/hooks.md)
-volumes:
-  data:
-  state:
 EOF
 docker compose up -d --wait
 ```

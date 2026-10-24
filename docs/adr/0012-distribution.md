@@ -673,8 +673,8 @@ jobs:
 - **`ci.yml`:**
   - `goreleaser-check` moves to v2.19.0, installs syft as above, pins
     BuildKit as above and runs `release --snapshot --clean --skip=sign`:
-    snapshot mode skips publishing but not signing (`signs` and
-    `docker_signs` run unless skipped), and `sboms` needs syft. It keeps
+    snapshot mode skips publishing, `docker_signs` included (a publisher),
+    but not `signs`, which `--skip=sign` covers; `sboms` needs syft. It keeps
     the version check and the 12 MiB budget and adds: the archive check
     for `*_freebsd_*`; `test/packages/contents.sh` for the six packages:
     the exact file list (`dpkg-deb`, `rpm -qp`, `tar --zstd`) with owner
@@ -776,7 +776,10 @@ jobs:
     `config example` and the `chown` with `sed -i "s|<paste your public
     key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`; and the `compose`
     block with `read_only` (its `image:`, a digest that cannot be retagged,
-    overridden with the local tag); and `serve --ephemeral --listen
+    overridden with the local tag), run as a reader runs it, in the
+    Quickstart's directory while the Quickstart's container still holds
+    port 2022 (the block removes that container, and the service serves
+    the Quickstart's host key and upload); and `serve --ephemeral --listen
     0.0.0.0:2022` in a container (see `serve --ephemeral`): `healthy`, one
     line on stdout, a key login with that key and the JSON's `known_hosts`
     line, `docker stop` exiting 0 after removing the key and the data. A
@@ -792,8 +795,11 @@ jobs:
     the base image's `/home/nonroot` (0700, 65532) is not a user;
     `SFTP_USERS`, `:e` (MD5-crypt refused, bcrypt), an `/etc/ssh` host
     key; and the missing configuration directory with `SFTP_USERS` set,
-    which must exit 2 with no listener. Every container applies Landlock
-    in this step too.
+    which must exit 2 with no listener. Once the container has exited its
+    port is closed in any case, so its log is checked: no `server.start`,
+    the audit event gosftpd writes once it listens, which the same check
+    finds in a container that listened and exited. Every container applies
+    Landlock in this step too.
   - The three new jobs join `ci-ok`'s needs; stream C adds one fuzz-smoke
     entry (`FuzzAtmozSpec`).
 - **Dependabot** gets `package-ecosystem: docker` with `directories:
@@ -1476,9 +1482,10 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   docs/migrate-from-atmoz.md maps every atmoz example and says that
   outside the image `--users-conf` is required. It also shows `$$`
   for each `$` of an `$argon2id$` or `$2b$` hash in compose `command:` and
-  `environment:`, and `htpasswd -bnBC 10 "" PASS` (htpasswd's default
-  bcrypt cost, 5, is below gosftpd's minimum of 10) or `gosftpd user
-  hash-password`.
+  `environment:`, and `gosftpd user hash-password` or `htpasswd -nBC 10
+  ""` (htpasswd's default bcrypt cost, 5, is below gosftpd's minimum of
+  10), both of which ask for the password: given on the command line, it
+  would stay in the shell history and show in the process list.
 
 ### Verification by users
 
@@ -1539,8 +1546,10 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   archive install to a package" and what a removal keeps per format), the
   archive, Docker (the Quickstart with a configuration directory, named
   volumes as the variant without `chown`, `--stop-timeout 40`, a reload
-  with `docker kill -s HUP`) and compose (`docs/examples/compose.yaml`:
-  the image by digest, the configuration directory, `read_only: true`,
+  with `docker kill -s HUP`) and compose (`docs/examples/compose.yaml`,
+  which a test keeps equal to the file the compose block writes: the image
+  by digest, the Quickstart's configuration, data and state directories,
+  so that the host key and the uploads stay, `read_only: true`,
   `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,
   `stop_grace_period: 40s`, `init: true` when exec hooks are used). The
   blocks that CI runs carry `ci:` markers (Workflows).
