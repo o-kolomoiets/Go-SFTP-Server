@@ -85,9 +85,11 @@ status is healthy. Use /healthz for liveness and /readyz for readiness.`,
 		Example: `  gosftpd healthcheck
   gosftpd healthcheck --address 127.0.0.1:2022 --ready
   gosftpd healthcheck --url http://127.0.0.1:9090/readyz`,
-		Args: func(_ *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return healthError{fmt.Sprintf("unexpected argument %q", args[0])}
+		// noArgs never shows an argument with ':', which may be an atmoz
+		// user spec with its password; healthUsage keeps the exit code 1.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := noArgs(cmd, args); err != nil {
+				return healthUsage(err)
 			}
 			return nil
 		},

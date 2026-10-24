@@ -1400,7 +1400,9 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     `--state-dir` or `--audit-output` that looks like a spec and does not
     exist exits 2, naming the flag only, instead of being created and
     logged. The flags of the other commands and modes are not spec
-    positions and show their values.
+    positions and show their values. `healthcheck`, which checked its
+    arguments on its own and repeated them, uses `noArgs` too and keeps
+    its exit status 1 (found in the final review).
 - **Layout as in atmoz:** user `foo` with directory `upload` sees
   `/upload`, stored in `/home/foo/upload`, so atmoz-style volumes
   (`-v ./upload:/home/foo/upload`) work unchanged. A user's directories are
