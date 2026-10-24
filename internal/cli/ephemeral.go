@@ -318,12 +318,18 @@ func (e *ephemeral) remove(ctx context.Context) error {
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("--ephemeral: cleaning up %s: %w", e.dir, err)
 	}
-	if e.log != nil {
-		if e.landlocked {
-			e.log.InfoContext(ctx, "removed the client key and the data; under Landlock the empty directory stays", "dir", e.dir)
-		} else {
-			e.log.InfoContext(ctx, "removed the client key, the data and the directory", "dir", e.dir)
-		}
+	if e.log == nil {
+		return nil
+	}
+	switch {
+	case !e.ownData && e.landlocked:
+		e.log.InfoContext(ctx, "removed the client key; --dir is kept; under Landlock the empty directory stays", "dir", e.dir, "data", e.data)
+	case !e.ownData:
+		e.log.InfoContext(ctx, "removed the client key and the directory; --dir is kept", "dir", e.dir, "data", e.data)
+	case e.landlocked:
+		e.log.InfoContext(ctx, "removed the client key and the data; under Landlock the empty directory stays", "dir", e.dir)
+	default:
+		e.log.InfoContext(ctx, "removed the client key, the data and the directory", "dir", e.dir)
 	}
 	return nil
 }
