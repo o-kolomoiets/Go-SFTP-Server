@@ -132,6 +132,31 @@ func TestEphemeralUnderDev(t *testing.T) {
 	}
 }
 
+// TestEphemeralDirUnderDev: a mount of serve --ephemeral under /dev, or a
+// link there, cannot be used, as for serve --dir. The warning says to
+// serve another directory with --dir: $TMPDIR has nothing to do with a
+// --dir mount, and a directory of its own there fails the start
+// (TestEphemeralUnderDev), so it cannot help with a data directory
+// replaced by a link either.
+func TestEphemeralDirUnderDev(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/proc/self", "/tmp/gosftpd-ephemeral-1", "/dev/shm/x").
+		symlink("/srv/x", "/dev/shm/x").symlink("/tmp/gosftpd-ephemeral-1/data", "/dev/shm/x")
+	const why = " under /dev or /proc, which never get a Landlock rule: the mount cannot be used; serve another directory with --dir"
+	for _, tt := range []struct{ name, path, want string }{
+		{"x", "/dev/shm/x", "--dir x: /dev/shm/x is" + why},
+		{"x", "/srv/x", "--dir x: /srv/x resolves to /dev/shm/x" + why},
+		{"data", "/tmp/gosftpd-ephemeral-1/data", "--ephemeral data: /tmp/gosftpd-ephemeral-1/data resolves to /dev/shm/x" + why},
+	} {
+		c := config.Default()
+		c.EphemeralDir = "/tmp/gosftpd-ephemeral-1"
+		c.AddMount(tt.name, tt.path)
+		in := input(t, m, c)
+		in.Linux = true
+		checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro, "dir /tmp/gosftpd-ephemeral-1 remove_file,remove_dir"}, tt.want)
+	}
+}
+
 // TestResolverWarnings: a name-resolution file replaced after start is
 // reported; a systemd-resolved stub replaced inside its /run directory
 // stays covered.

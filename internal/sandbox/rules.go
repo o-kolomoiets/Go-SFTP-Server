@@ -701,11 +701,14 @@ func (p *planner) mountRules() error {
 }
 
 // elsewhere says what to do about a mount under /dev or /proc. serve
-// --ephemeral has no server.landlock to turn off.
+// --ephemeral has no server.landlock to turn off, and TMPDIR does not
+// help: a directory of its own under /dev fails the start
+// (ephemeralRule), so the mount is the --dir one, or a data directory
+// replaced by a link.
 func (p *planner) elsewhere() string {
 	switch {
 	case p.c.EphemeralDir != "":
-		return "set TMPDIR to another directory, or serve another one with --dir"
+		return "serve another directory with --dir"
 	case p.c.Atmoz:
 		return "make it a directory, or mount one there"
 	}
