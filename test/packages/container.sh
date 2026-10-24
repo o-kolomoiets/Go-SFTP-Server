@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Runs test/packages/run.sh in a container with systemd as PID 1, as the CI
-# job "packages" does for Debian 12 and 13, EL9 and Arch (ADR 0012). The
-# image is built from test/packages/NAME.Dockerfile; the checkout and DIR
-# are mounted read-only; the container is removed at the end.
+# Runs test/packages/run.sh in a container with systemd as PID 1, then
+# test/packages/offline.sh in one of the same image without it (an image
+# build), as the CI job "packages" does for Debian 12 and 13, EL9 and Arch
+# (ADR 0012). The image is built from test/packages/NAME.Dockerfile; the
+# checkout and DIR are mounted read-only; the containers are removed at the
+# end.
 #
 # Usage: test/packages/container.sh NAME FORMAT DIR V
 # FORMAT, DIR and V are run.sh's. EXPECT_LEGACY_DROPIN, NEEDRESTART and
 # REQUIRE_LANDLOCK are passed on to it. IMAGE names an image to use instead
 # of building one, CONTAINER the container (default:
-# gosftpd-packages-NAME). Needs Docker and the right to run a privileged
-# container.
+# gosftpd-packages-NAME; the second one gets "-offline" appended). Needs
+# Docker and the right to run a privileged container.
 set -euo pipefail
 
 if [ $# -ne 4 ] || ! [[ $1 =~ ^[a-z0-9][a-z0-9.-]*$ ]]; then
@@ -37,11 +39,13 @@ else
 	exit 1
 fi
 
-docker container inspect "$CONTAINER" >/dev/null 2>&1 && {
-	echo "test/packages/container.sh: a container $CONTAINER exists; remove it first" >&2
-	exit 1
-}
-trap 'docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true' EXIT
+for c in "$CONTAINER" "$CONTAINER-offline"; do
+	docker container inspect "$c" >/dev/null 2>&1 && {
+		echo "test/packages/container.sh: a container $c exists; remove it first" >&2
+		exit 1
+	}
+done
+trap 'docker rm -f -v "$CONTAINER" "$CONTAINER-offline" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$CONTAINER" --privileged --cgroupns=host \
 	-v "$cgroup:/sys/fs/cgroup:rw" --tmpfs /run --tmpfs /run/lock \
 	-v "$ROOT:/src:ro" -v "$DIR:/packages:ro" "$IMAGE" >/dev/null
@@ -65,5 +69,13 @@ degraded) docker exec "$CONTAINER" systemctl --failed --no-pager || true ;;
 	;;
 esac
 
+status=0
 docker exec -e GOSFTPD_PACKAGES_TEST=1 -e EXPECT_LEGACY_DROPIN -e NEEDRESTART -e REQUIRE_LANDLOCK \
-	"$CONTAINER" /src/test/packages/run.sh "$FORMAT" /packages "$V"
+	"$CONTAINER" /src/test/packages/run.sh "$FORMAT" /packages "$V" || status=$?
+
+# The same image, its command replaced: PID 1 is not systemd.
+printf '\n%s (%s): without systemd\n' "$NAME" "$IMAGE"
+docker run --rm --name "$CONTAINER-offline" -e GOSFTPD_PACKAGES_TEST=1 \
+	-v "$ROOT:/src:ro" -v "$DIR:/packages:ro" "$IMAGE" \
+	/src/test/packages/offline.sh "$FORMAT" /packages "$V" || status=$?
+exit "$status"

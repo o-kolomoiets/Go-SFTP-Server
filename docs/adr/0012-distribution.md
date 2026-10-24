@@ -702,6 +702,12 @@ jobs:
     systemd, remove it. A removal also deletes `/usr/share/gosftpd` and
     `/usr/share/doc/gosftpd`, and keeps the user, the host key, the data
     and the audit log; deb keeps the configuration until `apt purge`.
+    `test/packages/container.sh` then starts a second container of the
+    same image whose PID 1 is not systemd, as in an image build:
+    `test/packages/offline.sh` installs the package there, runs `systemctl
+    enable gosftpd`, upgrades (still enabled), removes (no
+    `multi-user.target.wants` link, not even one whose target is gone) and
+    installs again (`is-enabled` says `disabled`).
   - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real
     Landlock, no QEMU), as a non-root user under umask 002, from the image
     `goreleaser-check` saved, tagged after `docker load` with every
@@ -941,9 +947,16 @@ nfpms:
   installed, and an operator who wants the restart edits or deletes it (a
   conffile, so an upgrade keeps that choice). docs/operations.md names it
   in the Ubuntu notes, with the unattended-upgrades case.
-- **preremove** stops and disables the service on a removal, not on an
-  upgrade: deb passes `upgrade` and rpm passes `1` then, and pacman runs
-  `pre_remove` only for a removal.
+- **preremove** disables the service on a removal, not on an upgrade: deb
+  passes `upgrade` and rpm passes `1` then, and pacman runs `pre_remove`
+  only for a removal. Where systemd runs (`/run/systemd/system` exists) it
+  runs `systemctl disable --now`, which also stops the service; elsewhere
+  (an image build, a chroot) `systemctl disable`, which needs no running
+  systemd and deletes the enablement links, as Fedora's `%systemd_preun`
+  does (found in the implementation review: the first version skipped
+  the disable there, and on Debian 12, EL9 and Arch an operator's
+  `systemctl enable` in a container without systemd survived the removal,
+  so a later install came back enabled).
 - **postremove** deletes the drop-in (and its directory when empty) only
   when `/usr/lib/systemd/system/gosftpd.service` no longer exists, then
   reloads systemd. The test is on the file, not on `$1`: on an upgrade rpm

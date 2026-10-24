@@ -300,10 +300,11 @@ func TestLegacyNotifyDropIn(t *testing.T) {
 // The scripts of the deb, rpm and Arch packages (ADR 0012) run in CI only on
 // the systems of the packages job; this checks what can drift without a
 // package: postinstall's probe is the documented one, no script enables,
-// starts or restarts the service, preremove skips an upgrade by "$1",
-// postremove deletes the drop-in by the unit file and not by "$1", every
-// file of the package they use is in .goreleaser.yaml, and the deb's
-// needrestart file names exactly gosftpd.service.
+// starts or restarts the service, preremove skips an upgrade by "$1" and
+// disables the service also where systemd does not run, postremove deletes
+// the drop-in by the unit file and not by "$1", every file of the package
+// they use is in .goreleaser.yaml, and the deb's needrestart file names
+// exactly gosftpd.service.
 func TestPackageScripts(t *testing.T) {
 	t.Parallel()
 
@@ -344,17 +345,21 @@ func TestPackageScripts(t *testing.T) {
 		}
 	}
 
-	// systemctl: only daemon-reload, and on a removal disable --now.
-	systemctl := regexp.MustCompile(`\bsystemctl((?:\s+-{0,2}[a-z][a-z.-]*)*)`)
+	// systemctl: only daemon-reload, and on a removal disable --now where
+	// systemd runs, else disable, which needs no running systemd (an image
+	// build, a chroot). "command -v systemctl" is a guard, not a call.
+	systemctl := regexp.MustCompile(`\bcommand -v systemctl\b|\bsystemctl((?:\s+-{0,2}[a-z][a-z.-]*)*)`)
 	allowed := map[string][]string{
 		"postinstall": {"daemon-reload"},
-		"preremove":   {"disable --now gosftpd.service"},
+		"preremove":   {"disable --now gosftpd.service", "disable gosftpd.service"},
 		"postremove":  {"daemon-reload"},
 	}
 	for name, s := range scripts {
 		var calls []string
 		for _, m := range systemctl.FindAllStringSubmatch(s, -1) {
-			calls = append(calls, strings.TrimSpace(m[1]))
+			if !strings.HasPrefix(m[0], "command") {
+				calls = append(calls, strings.TrimSpace(m[1]))
+			}
 		}
 		if !slices.Equal(calls, allowed[name]) {
 			t.Errorf("%s.sh runs systemctl %q, want only %q", name, calls, allowed[name])

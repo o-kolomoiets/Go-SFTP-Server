@@ -123,7 +123,9 @@ status_is() {
 }
 # exe PID: the binary the process runs, " (deleted)" once it was replaced.
 exe() { readlink "/proc/$1/exe"; }
-absent() { [ ! -e "$1" ]; }
+# absent PATH: nothing there, not even a symlink whose target is gone (an
+# enablement link once the unit was removed).
+absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
 # same FILE1 FILE2: both exist with the same content (EL9 has no cmp).
 same() { [ -f "$1" ] && [ -f "$2" ] && [ "$(sha256sum <"$1")" = "$(sha256sum <"$2")" ]; }
 user_exists() { getent passwd gosftpd >/dev/null; }
