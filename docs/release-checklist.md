@@ -44,7 +44,7 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    `--skip=sign,sbom,docker`. Delete `dist/` and the two images
    afterwards.
 5. The versions that Dependabot does not update are current, and the same
-   in every workflow that names them:
+   in every file that names them:
 
    | Tool | Where |
    |---|---|
@@ -52,12 +52,16 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    | cosign | `cosign-release:` in `release.yml` and `verify-release.yml` |
    | syft | `syft-version:` in `release.yml` and `ci.yml` |
    | BuildKit | `image=moby/buildkit:VERSION@sha256:DIGEST` in the `driver-opts:` of `release.yml` and `ci.yml` |
+   | SBOM scanner | `generator=docker.io/docker/buildkit-syft-scanner:VERSION@sha256:DIGEST` in the `flags` of `dockers_v2` in `.goreleaser.yaml`, and its copy in ADR 0012 |
 
    Update one in a pull request of its own, with `goreleaser-check` green,
    before the release rather than with it: a new GoReleaser or cosign
-   changes how the release is built and verified. Pin BuildKit by the
-   digest of its multi-platform index, which `docker buildx imagetools
-   inspect moby/buildkit:VERSION` prints.
+   changes how the release is built and verified. Pin BuildKit and the
+   SBOM scanner by the digest of their multi-platform index, which `docker
+   buildx imagetools inspect IMAGE:VERSION` prints (`moby/buildkit`,
+   `docker/buildkit-syft-scanner`). A test (`TestChecklistPins` in
+   `test/release`) fails when a file pins one that this table does not
+   name.
 
 ## Tag and build
 
