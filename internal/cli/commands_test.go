@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -510,6 +511,20 @@ func putFile(c *sftpConn, path, data string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// logged returns msg as the text log writes it in a quoted value, such as
+// the detail of a configuration warning: a Windows path's backslashes are
+// doubled there.
+func logged(msg string) string {
+	q := strconv.Quote(msg)
+	return q[1 : len(q)-1]
+}
+
+// mentions reports whether the log names path: in the banner as it is,
+// in a quoted value as logged writes it.
+func mentions(logs, path string) bool {
+	return strings.Contains(logs, path) || strings.Contains(logs, logged(path))
 }
 
 // waitLog waits until the log holds s.

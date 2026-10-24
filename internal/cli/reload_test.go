@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -296,8 +295,7 @@ access = { data = "full" }
 	}
 	writeFile(t, path, base+"[log]\nlevel = \"debug\"\n")
 	ts.reload(t, ts.stdout.String)
-	want := strconv.Quote(`log.level = "debug" in ` + path + ` has no effect: $GOSFTPD_LOG_LEVEL overrides it`)
-	if !strings.Contains(ts.stderr.String(), want[1:len(want)-1]) {
+	if !strings.Contains(ts.stderr.String(), logged(`log.level = "debug" in `+path+` has no effect: $GOSFTPD_LOG_LEVEL overrides it`)) {
 		t.Errorf("no warning about the overridden log.level:\n%s", ts.stderr.String())
 	}
 }

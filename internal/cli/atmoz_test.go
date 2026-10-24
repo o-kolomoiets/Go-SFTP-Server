@@ -288,7 +288,7 @@ func TestAtmozImage(t *testing.T) {
 	for _, want := range []string{
 		`msg="atmoz mode" users_file=3 arguments=0 sftp_users=2`,
 		`msg="atmoz mode: the uid and gid of user specs are ignored"`,
-		atmozUsersFile + " line 1 (user foo): no directories, so the user logs in to an empty read-only root, as in atmoz; name directories in the spec's last field (user:pass:::upload) or mount them under " + filepath.Join(home, "foo"),
+		logged(atmozUsersFile + " line 1 (user foo): no directories, so the user logs in to an empty read-only root, as in atmoz; name directories in the spec's last field (user:pass:::upload) or mount them under " + filepath.Join(home, "foo")),
 		"SFTP_USERS entry 2 (user quux): the password is in plain text",
 		"host key: " + filepath.Join(imageStateDir, hostkey.DefaultFile) + " (generated, 0600)",
 	} {
@@ -328,7 +328,7 @@ func TestAtmozImageHostKeys(t *testing.T) {
 
 	t.Setenv(envImage, "")
 	ts = startRun(t, "--allow-root", "--listen", "127.0.0.1:0", "foo:"+pw+":::up")
-	if logs := ts.stderr.String(); strings.Contains(logs, atmozHostKeys[0]) || !strings.Contains(logs, "(generated, 0600)") {
+	if logs := ts.stderr.String(); mentions(logs, atmozHostKeys[0]) || !strings.Contains(logs, "(generated, 0600)") {
 		t.Errorf("outside the image:\n%s", logs)
 	}
 	ts.stop(t)
@@ -360,7 +360,7 @@ func TestAtmozFlags(t *testing.T) {
 	ts.stop(t)
 	for _, want := range []string{
 		`msg="atmoz mode" users_file=1 arguments=1 sftp_users=0`,
-		"SFTP_USERS entry 1: user foo is already defined by " + users + " line 2; skipped, as atmoz skips it",
+		logged("SFTP_USERS entry 1: user foo is already defined by " + users + " line 2; skipped, as atmoz skips it"),
 	} {
 		if !strings.Contains(ts.stderr.String(), want) {
 			t.Errorf("no %q in the log:\n%s", want, ts.stderr.String())
@@ -397,7 +397,7 @@ func TestAtmozUnavailableDirectory(t *testing.T) {
 	c.Close()
 	ts.stop(t)
 	path := filepath.Join(home, "foo", "blocked")
-	if want := "argument 1 (user foo): directory blocked cannot be created (" + path + " is not a directory), so it is unavailable to foo; give it a volume of its own (-v HOST_DIR:" + path + ")"; !strings.Contains(ts.stderr.String(), want) {
+	if want := logged("argument 1 (user foo): directory blocked cannot be created (" + path + " is not a directory), so it is unavailable to foo; give it a volume of its own (-v HOST_DIR:" + path + ")"); !strings.Contains(ts.stderr.String(), want) {
 		t.Errorf("no %q in the log:\n%s", want, ts.stderr.String())
 	}
 	denied := events(t, ts.stdout.String(), "fs.denied")
@@ -434,7 +434,7 @@ func TestAtmozUnopenableDirectory(t *testing.T) {
 		t.Errorf("exit %d", code)
 	}
 	logs := ts.stderr.String()
-	if want := "argument 1 (user foo): directory upload cannot be opened (open " + up + ": permission denied), so it is unavailable to foo"; !strings.Contains(logs, want) {
+	if want := logged("argument 1 (user foo): directory upload cannot be opened (open " + up + ": permission denied), so it is unavailable to foo"); !strings.Contains(logs, want) {
 		t.Errorf("no %q in the log:\n%s", want, logs)
 	}
 	if strings.Contains(logs, "atmoz1") {
@@ -566,7 +566,7 @@ func TestAtmozUsersFileOnlyInImage(t *testing.T) {
 			}
 			ts.stop(t)
 			logs := ts.stderr.String()
-			if !strings.Contains(logs, `msg="atmoz mode" users_file=0 `) || strings.Contains(logs, atmozUsersFile) {
+			if !strings.Contains(logs, `msg="atmoz mode" users_file=0 `) || mentions(logs, atmozUsersFile) {
 				t.Errorf("the default users file is read outside the image:\n%s", logs)
 			}
 			noSecret(t, ts)
@@ -577,7 +577,7 @@ func TestAtmozUsersFileOnlyInImage(t *testing.T) {
 	writeFile(t, keys, authorizedKey(newSigner(t))+"\n")
 	ts := startServe(t, "--listen", "127.0.0.1:0", "--dir", t.TempDir(), "--authorized-keys", keys, "--state-dir", t.TempDir())
 	ts.stop(t)
-	if logs := ts.stderr.String(); strings.Contains(logs, atmozUsersFile) {
+	if logs := ts.stderr.String(); mentions(logs, atmozUsersFile) {
 		t.Errorf("serve --dir outside the image names the default users file:\n%s", logs)
 	}
 }
@@ -650,7 +650,7 @@ func TestAtmozIgnoredSources(t *testing.T) {
 		ts.stop(t)
 		logs := ts.stderr.String()
 		for _, src := range []string{"$SFTP_USERS", atmozUsersFile} {
-			if want := src + " is ignored: " + tt.reason; !strings.Contains(logs, want) {
+			if want := logged(src + " is ignored: " + tt.reason); !strings.Contains(logs, want) {
 				t.Errorf("%q: no %q in the log:\n%s", tt.args, want, logs)
 			}
 		}
