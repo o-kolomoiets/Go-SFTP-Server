@@ -164,8 +164,12 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
     links to the docs at the release tag (`blob/vX.Y.Z/docs/...`), and "to
     hear when vX ships". In the docs, the examples name the version too
     (`V=X.Y.Z`, `gosftpd:vX.Y.Z`): the blocks of install.md, with the
-    copies of its Quickstart in README.md and docs/quickstart.md, which a
-    test compares, and migrate-from-atmoz.md. With the binary from the
+    copies of its Quickstart in README.md and docs/quickstart.md;
+    migrate-from-atmoz.md; configuration.md (the GitHub Actions step and
+    the container example); and docs/examples/compose.yaml, the file that
+    install.md's compose block writes. `TestDocVersions` and
+    `TestComposeExample` in `test/docs` fail on one that names another
+    version than install.md's Quickstart. With the binary from the
     release archive, capture the banner, the partner-inbox `sftp`
     transcript and its audit event again, and record `docs/assets/demo.gif`
     again with `docs/assets/record-demo.py` and `agg`, as its docstring

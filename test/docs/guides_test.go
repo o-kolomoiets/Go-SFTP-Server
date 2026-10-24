@@ -245,3 +245,56 @@ func TestMacOSChecksum(t *testing.T) {
 		})
 	}
 }
+
+// docVersion matches a version that a documented example names: V=X.Y.Z
+// and the image's tag gosftpd:vX.Y.Z, with a pre-release suffix.
+var docVersion = regexp.MustCompile(`\bV=([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.-]*)|\bgosftpd:v([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.-]*)`)
+
+// TestDocVersions checks that the examples of README.md, SECURITY.md and
+// docs/ (but the ADRs, which record what was decided when) name the
+// version that the Quickstart block of docs/install.md names, so that step
+// 13 of the release checklist, which moves them to the new release, leaves
+// none behind: the GitHub Actions step and the container example of
+// configuration.md, migrate-from-atmoz.md, examples/compose.yaml and the
+// copies of the Quickstart.
+func TestDocVersions(t *testing.T) {
+	t.Parallel()
+	m := regexp.MustCompile("(?m)^<!-- ci:quickstart -->\n```sh\nV=(\\S+)$").FindStringSubmatch(readFile(t, "docs", "install.md"))
+	if m == nil {
+		t.Fatal("docs/install.md: no quickstart block that starts with a V= line")
+	}
+	want := m[1]
+	files := []string{filepath.Join(root, "README.md"), filepath.Join(root, "SECURITY.md")}
+	err := filepath.WalkDir(filepath.Join(root, "docs"), func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && d.Name() == "adr":
+			return filepath.SkipDir
+		case !d.IsDir() && (strings.HasSuffix(path, ".md") || strings.HasPrefix(filepath.ToSlash(path), filepath.ToSlash(filepath.Join(root, "docs", "examples"))+"/")):
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			for _, m := range docVersion.FindAllStringSubmatch(line, -1) {
+				found++
+				if got := m[1] + m[2]; got != want {
+					t.Errorf("%s:%d: %q names %s; the Quickstart of docs/install.md names %s", f, i+1, m[0], got, want)
+				}
+			}
+		}
+	}
+	if found < 10 {
+		t.Errorf("only %d versions found in the examples: the pattern no longer matches them", found)
+	}
+}
