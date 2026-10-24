@@ -497,6 +497,48 @@ func TestAtmozModeSelection(t *testing.T) {
 	}
 }
 
+// TestAtmozUsersFileOnlyInImage: outside the image the default users file,
+// on a host perhaps one left over from atmoz with plain passwords, is never
+// read, also when an argument or $SFTP_USERS starts atmoz mode, and no
+// other mode warns that it is ignored. The case "users file outside the
+// image" of TestAtmozModeSelection has no other source, so it cannot tell
+// the two checks apart.
+func TestAtmozUsersFileOnlyInImage(t *testing.T) {
+	atmozEnv(t, false)
+	writeImageUsers(t) // foo
+	for _, tt := range []struct {
+		name, env string
+		args      []string
+	}{
+		{"an argument", "", []string{"--allow-root", "--listen", "127.0.0.1:0", "bar:" + pw + ":::d"}},
+		{"SFTP_USERS", "bar:" + pw + ":::d", []string{"serve", "--allow-root", "--listen", "127.0.0.1:0"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(atmoz.EnvUsers, tt.env)
+			ts := startRun(t, tt.args...)
+			mustLogin(t, ts.addr, "bar", ssh.Password(pw)).Close()
+			if c, err := atmozLogin(t, ts.addr, "foo", ssh.Password(pw)); err == nil {
+				c.Close()
+				t.Error("foo of the default users file logs in outside the image")
+			}
+			ts.stop(t)
+			logs := ts.stderr.String()
+			if !strings.Contains(logs, `msg="atmoz mode" users_file=0 `) || strings.Contains(logs, atmozUsersFile) {
+				t.Errorf("the default users file is read outside the image:\n%s", logs)
+			}
+			noSecret(t, ts)
+		})
+	}
+
+	keys := filepath.Join(t.TempDir(), "keys")
+	writeFile(t, keys, authorizedKey(newSigner(t))+"\n")
+	ts := startServe(t, "--listen", "127.0.0.1:0", "--dir", t.TempDir(), "--authorized-keys", keys, "--state-dir", t.TempDir())
+	ts.stop(t)
+	if logs := ts.stderr.String(); strings.Contains(logs, atmozUsersFile) {
+		t.Errorf("serve --dir outside the image names the default users file:\n%s", logs)
+	}
+}
+
 // statError is the message of os.Stat for path, which differs between
 // platforms.
 func statError(t *testing.T, path string) string {
