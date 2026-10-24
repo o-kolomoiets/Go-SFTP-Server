@@ -1147,8 +1147,11 @@ For persona U3: a throwaway server for tests, with the details on stdout.
   generated in memory and never written.
 - **Output.** Exactly one JSON line on stdout, printed after the sandbox
   step and once the listener serves, just before the server reports ready
-  (`health.SetReady`); a failure before that exits 1 without printing it.
-  Then nothing else on stdout:
+  (`health.SetReady`); a failure before that exits 1 without printing it,
+  and a line that cannot be written stops the server at once with exit 1.
+  SIGPIPE is caught for the whole run, so a stdout or stderr whose reader
+  has gone makes the writes fail instead of killing gosftpd before its
+  clean-up. Then nothing else on stdout:
 
   ```json
   {"host":"127.0.0.1","port":40123,"user":"test","password":"…","private_key_path":"/tmp/gosftpd-ephemeral-123/id_ed25519","dir":"/tmp/gosftpd-ephemeral-123/data","host_key_fingerprint":"SHA256:…","known_hosts":"[127.0.0.1]:40123 ssh-ed25519 AAAA…","pid":4242,"version":"v0.5.0"}

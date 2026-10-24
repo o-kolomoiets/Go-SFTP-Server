@@ -460,6 +460,13 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 				err = errors.Join(err, rerr)
 			}
 		}()
+		// A write to a stdout or stderr whose reader has gone raises
+		// SIGPIPE, whose default action would kill the process before
+		// that clean-up; caught, it makes the write fail with EPIPE.
+		// Caught, not ignored, which a child such as the Landlock probe
+		// would inherit; never stopped, as the clean-up and the error
+		// come last.
+		signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 		modeWarns = append(modeWarns, eph.warnings...)
 	case modeAtmoz:
 		if c, atm, err = newAtmoz(flags, o, getenv); err != nil {
