@@ -82,7 +82,9 @@ printf '%s\n' "$block" >"$tmp/block.sh"
 # Sourced before the block: gh release download is skipped when every
 # pattern it is given matches a file in its directory (-D, else the
 # current one); everything else goes to gh. The ERR trap names the line
-# of the block that failed.
+# of the block that failed. bash 3.2, macOS's, gives a trap that runs in
+# a function the line of the function's definition instead, so there it
+# names the function and the line that called it.
 cat >"$tmp/prelude.sh" <<'EOF'
 gh() {
 	if [ "${1:-}" = release ] && [ "${2:-}" = download ]; then
@@ -107,7 +109,14 @@ gh() {
 	fi
 	command gh "$@"
 }
-trap 'echo "run-block.sh: the $RUN_BLOCK block failed at line $LINENO with exit status $?" >&2' ERR
+run_block_failed() {
+	if [ "${BASH_VERSINFO[0]}" -lt 4 ] && [ "${FUNCNAME[1]:-source}" != source ]; then
+		echo "run-block.sh: the $RUN_BLOCK block failed in the function ${FUNCNAME[1]}, called at line ${BASH_LINENO[1]}, with exit status $1" >&2
+	else
+		echo "run-block.sh: the $RUN_BLOCK block failed at line $2 with exit status $1" >&2
+	fi
+}
+trap 'run_block_failed $? $LINENO' ERR
 EOF
 {
 	echo "$me: the $name block of $doc${V:+, with V=$V}:"

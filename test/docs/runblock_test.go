@@ -16,7 +16,9 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -64,6 +66,25 @@ func runBlock(t *testing.T, dir string, env []string, stdin string, args ...stri
 	}
 	r.stdout, r.stderr = out.String(), errOut.String()
 	return r
+}
+
+// bashVersion is the major version of the bash that runBlock runs.
+var bashVersion = sync.OnceValues(func() (int, error) {
+	out, err := exec.Command("bash", "-c", `echo "${BASH_VERSINFO[0]}"`).Output()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(out)))
+})
+
+// bashMajor returns bashVersion or fails the test.
+func bashMajor(t *testing.T) int {
+	t.Helper()
+	v, err := bashVersion()
+	if err != nil {
+		t.Fatalf("the version of bash: %v", err)
+	}
+	return v
 }
 
 // write writes text to name in dir.
@@ -122,6 +143,10 @@ func TestRunBlock(t *testing.T) {
 		want   string // standard output; "$PWD" stands for the directory it runs in
 		code   int
 		stderr string // a part of standard error
+		// bash32 is the part of standard error with bash 3.2, macOS's, if
+		// it differs: a trap in a function gets the line of the
+		// function's definition, so run-block.sh names the call instead.
+		bash32 string
 	}{
 		{
 			name: "only the marked block, with the caller's V",
@@ -161,7 +186,8 @@ func TestRunBlock(t *testing.T) {
 		{
 			name:  "-E: a failure in a function names its line",
 			block: "f() {\n\tfalse\n}\nf\necho after",
-			code:  1, stderr: "failed at line 2",
+			code:  1, stderr: "failed at line 2 with exit status 1",
+			bash32: "failed in the function f, called at line 4, with exit status 1",
 		},
 		{
 			name:  "standard input is empty",
@@ -251,10 +277,13 @@ func TestRunBlock(t *testing.T) {
 				args = append(slices.Clone(args), write(t, t.TempDir(), "install.md", text))
 			}
 			got := runBlock(t, dir, tt.env, tt.stdin, args...)
-			want := strings.ReplaceAll(tt.want, "$PWD", dir)
-			if got.code != tt.code || got.stdout != want || !strings.Contains(got.stderr, tt.stderr) {
+			want, stderr := strings.ReplaceAll(tt.want, "$PWD", dir), tt.stderr
+			if tt.bash32 != "" && bashMajor(t) < 4 {
+				stderr = tt.bash32
+			}
+			if got.code != tt.code || got.stdout != want || !strings.Contains(got.stderr, stderr) {
 				t.Errorf("run-block.sh %q = exit %d, %q\nstderr: %s\nwant exit %d, %q, stderr with %q",
-					tt.args, got.code, got.stdout, got.stderr, tt.code, want, tt.stderr)
+					tt.args, got.code, got.stdout, got.stderr, tt.code, want, stderr)
 			}
 		})
 	}
