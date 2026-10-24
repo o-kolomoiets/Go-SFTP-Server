@@ -389,6 +389,9 @@ func TestEphemeralIPv6(t *testing.T) {
 	if d.Host != "::1" || !strings.HasPrefix(d.KnownHosts, "[::1]:"+strconv.Itoa(d.Port)+" ") {
 		t.Errorf("details %+v", d)
 	}
+	if want := "connect: sftp -P " + strconv.Itoa(d.Port) + " test@[::1]\n"; !strings.Contains(ts.stderr.String(), want) {
+		t.Errorf("no %q in:\n%s", want, ts.stderr.String())
+	}
 	if _, err := ephemeralLogin(t, d, "test", ssh.Password(d.Password)); err != nil {
 		t.Errorf("login over IPv6: %v", err)
 	}

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -199,6 +200,27 @@ func TestPartnerInstructionsIPv6(t *testing.T) {
 	out := partnerInstructions(c, "bob", "")
 	if !strings.Contains(out, "connect: sftp -P 2022 bob@[2001:db8::1]") {
 		t.Errorf("instructions:\n%s", out)
+	}
+}
+
+// The connect hint of serve's banner names an IPv6 listen address in
+// brackets, as sftp needs; TestEphemeralIPv6 checks the banner itself where
+// the host has IPv6.
+func TestConnectHint(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		addr net.Addr
+		want string
+	}{
+		{&net.TCPAddr{IP: net.ParseIP("::1"), Port: 2022}, "[::1]"},
+		{&net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 2022}, "[2001:db8::1]"},
+		{&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2022}, "127.0.0.1"},
+	} {
+		host, port := connectHost(tt.addr)
+		if got := sftpHost(host); got != tt.want || port != 2022 {
+			t.Errorf("%s: host %q, port %d; want %q, 2022", tt.addr, got, port, tt.want)
+		}
 	}
 }
 

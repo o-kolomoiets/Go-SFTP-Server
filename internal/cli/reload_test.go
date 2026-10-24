@@ -49,7 +49,7 @@ func startRun(t *testing.T, args ...string) *testServer {
 	go func() { ts.done <- run(ctx, args, ts.stdout, ts.stderr) }()
 	t.Cleanup(func() { ts.stop(t) })
 
-	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+)`)
+	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+|\[::1\]:\d+)`)
 	deadline := time.Now().Add(10 * time.Second)
 	for ts.addr == "" {
 		if m := addrRE.FindStringSubmatch(ts.stderr.String()); m != nil {

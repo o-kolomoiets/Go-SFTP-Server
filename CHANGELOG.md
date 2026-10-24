@@ -186,6 +186,9 @@ Incompatible changes are prefixed with **BREAKING:**.
   see but not reach, such as a symlink into a directory they cannot
   search, still fails, as do `--config`, `$GOSFTPD_CONFIG` and the other
   paths of the search on such an error.
+- The `connect:` line of serve's banner puts an IPv6 listen address in
+  brackets (`sftp -P 2022 alice@[::1]`), which sftp needs to tell the host
+  from a path; it printed `alice@::1`.
 
 ## [0.4.0] - 2026-10-17
 

@@ -140,11 +140,7 @@ func partnerInstructions(c *config.Config, name, host string) string {
 	if port != 22 {
 		portFlag = fmt.Sprintf("-P %d ", port)
 	}
-	dest := host
-	if strings.Contains(host, ":") {
-		dest = "[" + host + "]" // an IPv6 address
-	}
-	fmt.Fprintf(&b, "  connect: sftp %s%s@%s\n", portFlag, name, dest)
+	fmt.Fprintf(&b, "  connect: sftp %s%s@%s\n", portFlag, name, sftpHost(host))
 	if ps := c.CertificatePrincipals(name); len(ps) > 0 {
 		fmt.Fprintf(&b, "  certificate: sign the user's key with a trusted CA, for the principal %s:\n", strings.Join(ps, " or "))
 		fmt.Fprintf(&b, "    ssh-keygen -s CA_KEY -I %s -n %s -V +52w id_ed25519.pub\n", name, shellQuote(ps[0]))

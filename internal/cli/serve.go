@@ -948,7 +948,16 @@ func printBanner(w io.Writer, b bannerInfo) {
 	if b.admin != nil {
 		fmt.Fprintf(w, "metrics: http://%s/metrics\n", b.admin.addr())
 	}
-	fmt.Fprintf(w, "connect: sftp -P %d %s@%s\n", port, user, host)
+	fmt.Fprintf(w, "connect: sftp -P %d %s@%s\n", port, user, sftpHost(host))
+}
+
+// sftpHost returns host as an sftp command line names it: an IPv6
+// address in brackets, which sftp needs to tell it from a path.
+func sftpHost(host string) string {
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // connectHost picks a host name for the connect hints.
