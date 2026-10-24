@@ -1388,9 +1388,10 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   docs/migrate-from-atmoz.md maps every atmoz example and says that
   outside the image `--users-conf` is required. It also shows `$$`
   for each `$` of an `$argon2id$` or `$2b$` hash in compose `command:` and
-  `environment:`, and `htpasswd -bnBC 10 "" PASS` (htpasswd's default
-  bcrypt cost, 5, is below gosftpd's minimum of 10) or `gosftpd user
-  hash-password`.
+  `environment:`, and `gosftpd user hash-password` or `htpasswd -nBC 10
+  ""` (htpasswd's default bcrypt cost, 5, is below gosftpd's minimum of
+  10), both of which ask for the password: given on the command line, it
+  would stay in the shell history and show in the process list.
 
 ### Verification by users
 

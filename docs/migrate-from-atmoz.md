@@ -185,8 +185,11 @@ and keeps only the hash. Better, give a hash with `:e`:
 
 ```sh
 docker run --rm -it ghcr.io/o-kolomoiets/gosftpd:v0.5.0 user hash-password   # argon2id, asked twice
-htpasswd -bnBC 10 "" 'the password' | tr -d ':\n'                         # bcrypt
+htpasswd -nBC 10 "" | tr -d ':\n'                                            # bcrypt, asked twice
 ```
+
+Both ask for the password, so that it stays out of the shell history and
+the process list; do not give it to `htpasswd` with `-b`.
 
 `htpasswd`'s default bcrypt cost, 5, is below gosftpd's minimum of 10:
 pass `-C 10` or more (up to 14). MD5-crypt (`$1$`), SHA-crypt (`$5$`,
