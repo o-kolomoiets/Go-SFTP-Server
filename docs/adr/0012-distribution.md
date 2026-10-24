@@ -711,9 +711,12 @@ jobs:
     could not fail); on Debian 12 it also asserts that `dpkg -s procps`
     shows it installed, that the legacy drop-in is present and that
     `systemctl reload gosftpd` succeeds with the status "configuration
-    reloaded"; in EL9 (`rockylinux/rockylinux:9-ubi-init`) and, optionally,
-    Arch, also built from `test/packages/` Dockerfiles. Each upgrade case
-    is a reinstall, as in the prototypes, or a build with a higher version
+    reloaded"; in EL9 (`rockylinux/rockylinux:9-ubi-init`) and Arch, also
+    built from `test/packages/` Dockerfiles. Arch is a required entry like
+    the others, not an optional one: its `archlinux:latest` is pinned by
+    digest, so a Dependabot update that breaks it turns only its own pull
+    request red (found in the final review). Each upgrade case is a
+    reinstall, as in the prototypes, or a build with a higher version
     (`apt install` of the installed version is a no-op that runs no
     script): it keeps the drop-in and the edited conffiles, and a removal
     deletes the drop-in. On the ubuntu-24.04 runner, with needrestart
