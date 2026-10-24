@@ -454,6 +454,7 @@ func TestAtmozModeSelection(t *testing.T) {
 	empty := filepath.Join(t.TempDir(), "users.conf")
 	writeAll(t, empty, "# nobody\n")
 	usersConfMissing := "Error: the users file: " + statError(t, missing) + "\n"
+	noDrive := strings.TrimPrefix(missing, filepath.VolumeName(missing))
 	if runtime.GOOS == "windows" {
 		// The path starts with a drive letter, whose ':' atmoz's test takes
 		// for that of a spec with a one-letter user name: it is not shown.
@@ -510,6 +511,14 @@ func TestAtmozModeSelection(t *testing.T) {
 		{
 			name: "--users-conf missing", args: []string{"serve", "--users-conf", missing},
 			want: usersConfMissing,
+		},
+		{
+			// What the hint for a hidden Windows path says: without its
+			// drive letter the path is read, and the error names it (by its
+			// absolute path, on the drive of the working directory); the
+			// same case as the one before elsewhere.
+			name: "--users-conf missing, without a drive letter", args: []string{"serve", "--users-conf", noDrive},
+			want: "Error: the users file: ",
 		},
 		{
 			name: "--authorized-keys", env: map[string]string{atmoz.EnvUsers: "foo:" + pw}, args: []string{"serve", "--authorized-keys", empty},
