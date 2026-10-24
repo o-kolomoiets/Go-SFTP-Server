@@ -298,3 +298,82 @@ func TestDocVersions(t *testing.T) {
 		t.Errorf("only %d versions found in the examples: the pattern no longer matches them", found)
 	}
 }
+
+// imageKey matches the image: line of a Compose service.
+var imageKey = regexp.MustCompile(`(?m)^\s*image:`)
+
+// composeKeys are the top-level keys of the Compose file format; x-
+// extensions are allowed too.
+var composeKeys = map[string]bool{
+	"version": true, "name": true, "include": true, "services": true, "networks": true,
+	"volumes": true, "configs": true, "secrets": true, "models": true,
+}
+
+// TestComposeFiles checks that every yaml block of docs/ (but the ADRs)
+// that names an image, and every file in docs/examples, is a Compose file
+// that docker compose accepts as it stands, as far as its top level goes:
+// only Compose's own keys, the services under services:. atmoz's README
+// still has the old form with the service at the top level, which Compose
+// refuses ("additional properties 'sftp' not allowed").
+func TestComposeFiles(t *testing.T) {
+	t.Parallel()
+	type file struct{ name, text string }
+	var files []file
+	err := filepath.WalkDir(filepath.Join(root, "docs"), func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.IsDir() && d.Name() == "adr":
+			return filepath.SkipDir
+		case d.IsDir():
+			return nil
+		case filepath.Base(filepath.Dir(path)) == "examples" && strings.HasSuffix(path, ".yaml"):
+			data, err := os.ReadFile(path)
+			files = append(files, file{path, string(data)})
+			return err
+		case !strings.HasSuffix(path, ".md"):
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		block, line, in := "", 0, false
+		for i, l := range strings.Split(string(data), "\n") {
+			switch {
+			case !in && strings.TrimSpace(l) == "```yaml":
+				in, block, line = true, "", i+1
+			case in && strings.TrimSpace(l) == "```":
+				in = false
+				if imageKey.MatchString(block) {
+					files = append(files, file{fmt.Sprintf("%s:%d", path, line), block})
+				}
+			case in:
+				block += l + "\n"
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) < 2 {
+		t.Fatalf("found %d compose files in docs/, want the migration guide's and docs/examples/compose.yaml", len(files))
+	}
+	for _, f := range files {
+		var keys []string
+		for _, l := range strings.Split(f.text, "\n") {
+			if l == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "#") {
+				continue
+			}
+			key, _, _ := strings.Cut(l, ":")
+			keys = append(keys, key)
+			if !composeKeys[key] && !strings.HasPrefix(key, "x-") {
+				t.Errorf("%s: the top-level key %q is not one of Compose's: put the service under services:", f.name, key)
+			}
+		}
+		if !slices.Contains(keys, "services") {
+			t.Errorf("%s: no services: at the top level", f.name)
+		}
+	}
+}

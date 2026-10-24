@@ -48,15 +48,19 @@ The spec names no directory: in the image every directory that exists
 directly under `/home/foo` at start becomes one of foo's, here `upload`.
 The uid 1001 is ignored.
 
-**Using Docker Compose:**
+**Using Docker Compose:** the atmoz README's file puts the service at the
+top level, which current Compose refuses ("additional properties 'sftp'
+not allowed"); it goes under `services:`. With `<host-dir>/upload` owned
+by 65532, as in the example before:
 
 ```yaml
-sftp:
+services:
+  sftp:
     image: ghcr.io/o-kolomoiets/gosftpd:v0.5.0
     volumes:
-        - <host-dir>/upload:/home/foo/upload
+      - <host-dir>/upload:/home/foo/upload
     ports:
-        - "2222:2022"
+      - "2222:2022"
     command: foo:pass:1001
 ```
 
