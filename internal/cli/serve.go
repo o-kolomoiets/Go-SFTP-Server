@@ -274,8 +274,27 @@ func applyEnv(c *config.Config, getenv func(string) string) (set map[string]stri
 }
 
 // checkFlagValues reports bad flag values under the flag's name rather than
-// as a configuration key.
+// as a configuration key. A flag whose own value is missing takes the next
+// argument, which may be an atmoz user spec with its password, so a value
+// with ':' is not shown (ADR 0012): none of these flags has a valid one,
+// and --listen's is shown only when it is HOST:PORT with a port number,
+// whose range is what can be wrong.
 func checkFlagValues(flags *pflag.FlagSet, o serveOptions) error {
+	for _, f := range []struct{ name, value, want string }{
+		{"on-conflict", o.onConflict, "rename, reject, overwrite or version"},
+		{"log-level", o.logLevel, "debug, info, warn or error"},
+		{"log-format", o.logFormat, "text or json"},
+	} {
+		if strings.Contains(f.value, ":") {
+			return usageError{fmt.Errorf("--%s: want %s (the value is not shown: it contains ':', as an atmoz user spec does)", f.name, f.want)}
+		}
+	}
+	if flags.Changed("listen") && strings.Contains(o.listen, ":") {
+		_, port, err := net.SplitHostPort(o.listen)
+		if _, perr := strconv.Atoi(port); err != nil || perr != nil {
+			return usageError{errors.New("--listen: want HOST:PORT or :PORT, with a port number (the value is not shown: it contains ':', as an atmoz user spec does)")}
+		}
+	}
 	if flags.Changed("on-conflict") || len(o.dirs) > 0 {
 		if _, err := vfs.ParseConflictPolicy(o.onConflict); err != nil {
 			return usageError{fmt.Errorf("--on-conflict: %w", err)}

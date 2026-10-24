@@ -44,8 +44,12 @@ Incompatible changes are prefixed with **BREAKING:**.
   file is found; `--config` and `$GOSFTPD_CONFIG` stay strict, and in the
   image a mounted `/etc/gosftpd` without `config.toml` exits 2. No message
   shows a password or a spec: usage errors give the position of an
-  argument with `:` instead of the argument. A new fuzz target,
-  `FuzzAtmozSpec`, checks that. The audit log names each mount by its
+  argument with `:`, or of any argument after a spec other than a command,
+  instead of the argument, and the flags of atmoz mode do not show a value
+  that looks like a spec (a flag whose own value is missing takes the next
+  argument), except `--listen`'s HOST:PORT with a port number. A new fuzz
+  target, `FuzzAtmozSpec`, and a test that gives a spec to every flag of
+  the root command check that. The audit log names each mount by its
   directory.
 - Man pages, one per command, and bash, zsh and fish completions:
   `make generate` writes them into `out/` (not committed) with

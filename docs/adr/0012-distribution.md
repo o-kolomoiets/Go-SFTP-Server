@@ -1275,11 +1275,24 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     the warnings about ignored sources and plain passwords, and for usage
     errors: `serve foo:pass:::upload` (a spec after `serve`) and a root
     argument that fails the spec test (` foo:pass`) are unknown commands,
-    whose cobra message repeats the argument. `noArgs` and the root
-    command's argument check therefore never echo an argument that
-    contains `:` and give its position instead: "unknown command (argument
-    1, not shown: it looks like an atmoz user spec; give specs directly
-    after the image name, without 'serve')".
+    whose cobra message repeats the argument. `noArgs` therefore never
+    echoes an argument that contains `:` and gives its position instead:
+    "unknown command (argument 1, not shown: it looks like an atmoz user
+    spec; give specs directly after the image name, without 'serve')".
+    After the first spec, the root command's argument check gives only
+    the position of an argument that is not a spec, and names it only
+    when it is a command (`foo:x serve`): it may be a word of a password
+    with a space that the shell split off (`foo:correct horse`). A flag
+    whose own value is missing takes the next argument, a spec perhaps, so
+    no flag value with `:` is shown either: pflag's error for a value it
+    cannot parse (`--read-only=foo:pass`), the checks of `--on-conflict`,
+    `--log-level` and `--log-format`, whose valid values have none, and of
+    `--listen`, which shows its value only as HOST:PORT with a port
+    number; in atmoz mode a path of `--users-conf`, `--host-key`,
+    `--state-dir` or `--audit-output` that looks like a spec and does not
+    exist exits 2, naming the flag only, instead of being created and
+    logged. The flags of the other commands and modes are not spec
+    positions and show their values.
 - **Layout as in atmoz:** user `foo` with directory `upload` sees
   `/upload`, stored in `/home/foo/upload`, so atmoz-style volumes
   (`-v ./upload:/home/foo/upload`) work unchanged. A user's directories are
@@ -1380,10 +1393,11 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   the sentinel; a third input, a raw spec, is only checked not to panic.
   Unit tests: the default `/etc/sftp/users.conf` ignored without
   `GOSFTPD_ATMOZ_IMAGE`; no `SECRET` on stderr for `serve u:SECRET` or
-  for `u:SECRET` after a space; `checkTrusted` with keys inside and outside
-  `/home/<user>/<dir>`; a session test in which two users each see
-  `/upload` on different host paths, with `rename` and `stat_redirect`
-  kept apart. e2e tests with the README examples (arguments,
+  for `u:SECRET` after a space, nor for a spec as the value of any flag of
+  the root command or of a checked flag of `serve`; `checkTrusted` with
+  keys inside and outside `/home/<user>/<dir>`; a session test in which
+  two users each see `/upload` on different host paths, with `rename` and
+  `stat_redirect` kept apart. e2e tests with the README examples (arguments,
   `SFTP_USERS`, users file, a user without directories, `:e` with bcrypt,
   keys, an existing volume directory), a user given twice and a second
   upload of the same name; and the atmoz step of the `docker` CI job.

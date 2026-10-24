@@ -92,17 +92,22 @@ SIGHUP changes nothing. See docs/migrate-from-atmoz.md.`,
 }
 
 // flagError makes a flag error a usage error. pflag repeats an unknown
-// flag whole: one with ':', such as -x:pass, may be an atmoz user spec with
-// its password, and is not shown (ADR 0012).
+// flag whole, and a value it cannot parse: one with ':', such as -x:pass or
+// --read-only=foo:pass, may be an atmoz user spec with its password, and
+// is not shown (ADR 0012). No valid value of a flag that pflag parses
+// (booleans, a duration) contains ':'.
 func flagError(_ *cobra.Command, err error) error {
 	var (
 		ne *pflag.NotExistError
 		se *pflag.InvalidSyntaxError
+		ve *pflag.InvalidValueError
 	)
 	switch {
 	case errors.As(err, &ne) && strings.Contains(ne.GetSpecifiedName()+ne.GetSpecifiedShortnames(), ":"),
 		errors.As(err, &se) && strings.Contains(se.GetSpecifiedFlag(), ":"):
 		err = errors.New("unknown flag (not shown: it contains ':', as an atmoz user spec does)")
+	case errors.As(err, &ve) && strings.Contains(ve.GetValue(), ":"):
+		err = fmt.Errorf("invalid argument for --%s (not shown: it contains ':', as an atmoz user spec does)", ve.GetFlag().Name)
 	}
 	return usageError{err}
 }
