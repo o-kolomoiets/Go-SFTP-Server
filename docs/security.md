@@ -262,6 +262,22 @@ was replaced by rename after the start, webhooks resolve names again only
 after a restart; each reload, and each webhook that fails on name
 resolution, warns about it ([hooks.md](hooks.md#sandboxes-and-containers)).
 
+### Ephemeral mode
+
+`serve --ephemeral` deletes its client key and its data at exit
+([configuration.md](configuration.md#ephemeral-mode)), and removing an
+entry is a right of the directory that holds it. So DIR, the directory
+that gosftpd created in `$TMPDIR` for the two, gets one rule more than a
+`serve`: `remove_file` and `remove_dir` on DIR, and nothing else, so that
+the process can neither read DIR nor create or rename anything in it. The
+rule is added through DIR as gosftpd holds it open, checked by its device
+and inode, so that a DIR swapped for a link cannot redirect it, and the
+removal, too, goes through DIR as gosftpd opened it. DIR holds only the
+key and `data`, which gets the rule of a mount. DIR itself stays, empty:
+removing it would need `remove_dir` on `$TMPDIR`, which would let gosftpd
+remove the other empty directories there. `$TMPDIR` must not lie under
+`/dev` or `/proc`, which never get a rule.
+
 ### What Landlock does not stop
 
 - hard links and bind mounts inside a mount, which reach what they point
@@ -305,6 +321,46 @@ must also have no permissions for others and no write for group, and an
 exec hook's files are checked again just before each run. Hooks never get
 a client's name as an argument or through a shell
 ([hooks.md](hooks.md)).
+
+In atmoz mode the users file and the key files in
+`/home/<user>/.ssh/keys/` are trusted files as well, checked the same way;
+the users file, which holds passwords, may lie inside no mount at all.
+gosftpd reads them once, at start, before Landlock is applied, and never
+again: they get no rule, so that the process cannot read them later, and a
+change takes a restart.
+
+## Atmoz mode
+
+atmoz/sftp takes plain-text passwords as arguments and in `SFTP_USERS`,
+where whoever can run `docker inspect`, or read the process's command line
+or environment, sees them. gosftpd accepts them in
+[atmoz mode](configuration.md#atmoz-mode), for a migration, and keeps them
+out of everything it writes:
+
+- each plain password from an argument or `SFTP_USERS` gives a warning at
+  start that names its source and position (`argument 2`, `SFTP_USERS
+  entry 3`) and points to `:e` with a hash of `gosftpd user
+  hash-password`, or to keys;
+- it is hashed with argon2id at start, and only the hash stays, in memory;
+- the errors and warnings about specs never show a password, a hash or a
+  spec: they name the source, the position, the user once its name is
+  valid, and the field that is wrong (atmoz itself logs every spec). A spec
+  given where gosftpd expects a command, such as after `serve`, is reported
+  by its position. The fuzz target `FuzzAtmozSpec`, on every change and
+  nightly, checks that no error or warning of the parser holds the
+  password.
+
+Atmoz mode starts only with specs as arguments or without any
+configuration file; `--config` and `$GOSFTPD_CONFIG` stay strict, and in
+the image an `/etc/gosftpd` without `config.toml` exits 2, so that a
+mistyped path never starts the old users. The default users file, the
+directories under `/home/<user>` and the host keys in `/etc/ssh` apply
+only in the container image, never on a host, where they would be a
+leftover file with plain passwords, real home directories and sshd's own
+identity. Hashes of different kinds or costs let the response time tell
+which users exist under parallel attempts, as they do with a
+configuration file: plain passwords get argon2id with its defaults, so a
+bcrypt hash next to them makes two kinds, and gosftpd warns.
 
 ## Certificates
 
@@ -355,3 +411,16 @@ security keys.
 Every login, transfer and change is logged ([audit-log.md](audit-log.md)).
 By default the log is fail-closed: if it cannot be written, gosftpd refuses
 new connections and changes instead of working unaudited.
+
+## Releases
+
+From v0.5.0 every release is built by its workflow from the tag, as a
+draft that the workflow verifies before it is published: `checksums.txt`,
+which lists every archive, package and SBOM, and the image are signed with
+keyless cosign, and their build provenance is attested, all under an
+identity that names `release.yml` and the tag
+([ADR 0012](adr/0012-distribution.md)). The job that signs runs no code
+generator and restores no Actions cache, and two builds of a tag give the
+same archives and packages. [install.md](install.md#verify-a-release)
+gives the commands to verify a release and to rebuild it; verify the
+image by its digest, and run that digest.

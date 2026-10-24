@@ -1182,8 +1182,9 @@ For persona U3: a throwaway server for tests, with the details on stdout.
   docs show the atmoz specs for testcontainers and similar tools, or
   `--ephemeral --listen 0.0.0.0:2022` with the port mapped (the JSON's
   `port` is the container's) and the key copied out with `docker cp`
-  (the image has no shell or `cat` for `docker exec`) or read through a
-  bind-mounted `$TMPDIR`. Without a configuration file the image's health
+  (the image has no shell or `cat` for `docker exec`). Through a
+  bind-mounted `$TMPDIR` the key would belong to 65532, mode 0600, which
+  the host user cannot read; the docs leave that way out. Without a configuration file the image's health
   check probes port 2022, so such a container is `healthy`. The `docker`
   CI job checks this way, with `docker cp`.
 
