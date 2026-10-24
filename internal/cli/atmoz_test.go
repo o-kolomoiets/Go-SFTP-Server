@@ -355,7 +355,7 @@ func TestAtmozFlags(t *testing.T) {
 	if _, err := atmozLogin(t, ts.addr, "foo", ssh.Password("other")); err == nil {
 		t.Error("the second definition of foo logs in")
 	}
-	mustLogin(t, ts.addr, "bar", ssh.Password(pw))
+	mustLogin(t, ts.addr, "bar", ssh.Password(pw)).Close()
 	c.Close()
 	ts.stop(t)
 	for _, want := range []string{
