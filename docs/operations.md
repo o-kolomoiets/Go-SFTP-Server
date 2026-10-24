@@ -2,12 +2,13 @@
 
 Everyday tasks for a gosftpd service: reload, stop and restart, rotate the
 logs, back up and restore, upgrade, and deal with a disk mounted on a mount
-directory. The commands assume the packaged layout of
-[install.md](install.md): the unit `gosftpd.service`, the configuration in
-`/etc/gosftpd`, the host keys in `/var/lib/gosftpd`, the audit log in
-`/var/log/gosftpd` and the data in `/srv/sftp`. Under another supervisor,
-`kill -HUP` and `kill -TERM` to the gosftpd process do what `systemctl
-reload` and `systemctl stop` do.
+directory. The commands assume the layout of the packages and of the
+archive install ([install.md](install.md)): the unit `gosftpd.service`, the
+configuration in `/etc/gosftpd`, the host keys in `/var/lib/gosftpd`, the
+audit log in `/var/log/gosftpd` and the data in `/srv/sftp`. Under another
+supervisor, `kill -HUP` and `kill -TERM` to the gosftpd process do what
+`systemctl reload` and `systemctl stop` do; in Docker, `docker kill -s HUP`
+and `docker stop`.
 
 ## Reload
 
@@ -92,6 +93,23 @@ These keys can appear in `restart_required`:
     `auth.trusted_user_ca_keys_file` are not trusted, so the certificates
     they signed are refused. A webhook keeps its running secret, and one
     that the reload added is left out.
+
+**In Docker**, check the file in the container, signal the container and
+read the result in its log; the configuration must be in a mounted
+directory, not a mounted file ([install.md](install.md#docker)):
+
+```sh
+docker exec gosftpd gosftpd config validate --check-fs
+docker kill -s HUP gosftpd
+docker logs --tail 5 gosftpd 2>&1 | grep 'configuration reload'
+```
+
+The log says `configuration reloaded` or `configuration reload failed; the
+running configuration stays`, next to the audit event `server.reload`
+(with `audit.output = "stdout"`, as in the Quickstart). In atmoz mode and
+with `serve --ephemeral` a SIGHUP is logged ("SIGHUP ignored") and changes
+nothing. Atmoz mode reads its users, keys and directories once, at start,
+so a change takes a restart (`docker restart`).
 
 ## Stop, restart and interrupted uploads
 
@@ -280,9 +298,63 @@ Coming from the Quickstart or the interim unit of v0.3, take the steps in
 [install.md](install.md#upgrade-from-the-quickstart-or-the-interim-unit)
 too.
 
-Download and check the archive as for an [install](install.md#install).
-Then put the new binary next to the old one, check the configuration with
-it, and replace the old one:
+Installing a new binary, from a package or an archive, does not change
+the running process, and neither does a reload: the new version runs once
+you restart gosftpd, at a time you choose. The restart
+waits for open connections as a [stop](#stop-restart-and-interrupted-uploads)
+does. Check the configuration with the new binary first: a version that
+refuses it exits 2 at the restart, which systemd does not retry. Then
+check the version that runs: `gosftpd_build_info{version}` with the admin
+listener, or the `version` of the newest `server.start` event:
+
+```sh
+sudo grep '"event":"server.start"' /var/log/gosftpd/audit.jsonl | tail -n 1
+```
+
+Your drop-ins in `/etc/systemd/system/gosftpd.service.d/` stay. After an
+upgrade of the operating system, the drop-in for
+[systemd before 253](install.md#systemd-before-253) may no longer fit: run
+the probe again, or reinstall the package, which runs it.
+
+### With a package
+
+Download and [verify](install.md#verify-a-release) the new package and
+install it as the first one ([install.md](install.md#packages)): `sudo apt
+install ./gosftpd_X.Y.Z_linux_amd64.deb`, `sudo dnf install
+./gosftpd_X.Y.Z_linux_amd64.rpm` or `sudo pacman -U
+./gosftpd_X.Y.Z_linux_amd64.pkg.tar.zst`. Then check the configuration
+with the new binary, and restart:
+
+```sh
+sudo -u gosftpd gosftpd config validate --check-fs
+sudo systemctl restart gosftpd
+```
+
+Until the restart the old process keeps serving, with the old binary. The
+package scripts never restart gosftpd, and on Ubuntu the deb keeps
+needrestart from doing it ([below](#needrestart-on-ubuntu)). Whether a
+restart is due shows in the process's binary: this prints
+`/usr/bin/gosftpd (deleted)` until the restart.
+
+```sh
+sudo readlink /proc/"$(systemctl show -p MainPID --value gosftpd)"/exe
+```
+
+An upgrade keeps an edited `config.toml`. When the package's own
+`config.toml` changed too, dpkg asks which to keep, and without a terminal
+it fails: pass `-o Dpkg::Options::=--force-confold` to keep yours (the
+package's goes to `config.toml.dpkg-dist`) or `--force-confnew` to take the
+package's (yours goes to `config.toml.dpkg-old`); rpm and pacman keep yours
+and write `.rpmnew` or `.pacnew`. Merge them as in
+[Leftover configuration files](#leftover-configuration-files). rpm and
+pacman also put back some owners and modes; see
+[install.md](install.md#upgrades-and-removal).
+
+### From the archive
+
+Download and check the archive as for an
+[install](install.md#install-from-the-archive). Then put the new binary next
+to the old one, check the configuration with it, and replace the old one:
 
 ```sh
 sudo install -m 0755 gosftpd /usr/bin/gosftpd.new
@@ -295,26 +367,68 @@ process fails with "Text file busy". The running process keeps the old
 binary until it is restarted; a reload does not change it.
 
 Install the unit, sysusers and tmpfiles files from the archive again, as
-in [Install](install.md#install), but not `config.toml`. Then restart:
+in [Install from the archive](install.md#install-from-the-archive), but not
+`config.toml`. Then restart:
 
 ```sh
 sudo systemctl daemon-reload
 sudo systemctl restart gosftpd
 ```
 
-Your drop-ins in `/etc/systemd/system/gosftpd.service.d/` stay; after an
-upgrade of the operating system, run the probe for
-[systemd before 253](install.md#systemd-before-253) again. The restart waits
-for open connections as a [stop](#stop-restart-and-interrupted-uploads)
-does. Then check the version that runs: `gosftpd_build_info{version}` with
-the admin listener, or the `version` of the newest `server.start` event:
+### needrestart on Ubuntu
+
+An Ubuntu server has needrestart (`ubuntu-server` recommends it). After
+every apt run that installed or upgraded a package, the daily runs of
+unattended-upgrades included, it restarts the services whose process runs
+a replaced binary. The deb ships `/etc/needrestart/conf.d/gosftpd.conf`,
+which keeps it from restarting gosftpd: after an upgrade gosftpd waits for
+your restart, as it does with rpm and Arch. To let needrestart restart it,
+delete or edit that file; it is a configuration file of the package, so an
+upgrade keeps your choice.
+
+An archive install has no such file. Once you replaced `/usr/bin/gosftpd`,
+the next apt run, which unattended-upgrades may start at any time,
+restarts gosftpd unless you have. Restart right after the upgrade, as
+above, or install the file yourself:
 
 ```sh
-sudo grep '"event":"server.start"' /var/log/gosftpd/audit.jsonl | tail -n 1
+echo '$nrconf{override_rc}{qr(^gosftpd\.service$)} = 0;' | sudo tee /etc/needrestart/conf.d/gosftpd.conf
 ```
 
-**Downgrades** are not tested. An older version refuses settings it does
-not know ("unknown key"), with exit status 2, so keep a copy of the
+### Leftover configuration files
+
+When a package manager keeps your `config.toml`, it leaves the other
+version next to it in `/etc/gosftpd`:
+
+| File | Left by | Holds |
+|---|---|---|
+| `config.toml.dpkg-dist` | dpkg, when you keep your edited file (`N`, `--force-confold`) | the package's new configuration |
+| `config.toml.dpkg-old` | dpkg, when you take the package's (`Y`, `--force-confnew`) | your previous configuration |
+| `config.toml.rpmnew` | rpm, on an upgrade, or an install over an edited file | the package's new configuration |
+| `config.toml.pacnew` | pacman, likewise | the package's new configuration |
+| `config.toml.rpmsave`, `config.toml.pacsave` | rpm and pacman, when they remove the package and your edited file | your configuration |
+
+gosftpd never reads them, and under Landlock they do no harm: their names
+begin with `config.toml`, so `/etc/gosftpd` stays a directory of
+gosftpd's own ([configuration.md](configuration.md#landlock)). Merge what
+you need into `config.toml`, check it, reload, and delete the leftover:
+
+```sh
+sudo diff -u /etc/gosftpd/config.toml /etc/gosftpd/config.toml.dpkg-dist
+sudoedit /etc/gosftpd/config.toml
+sudo runuser -u gosftpd -- gosftpd config validate --check-fs --config /etc/gosftpd/config.toml
+sudo systemctl reload gosftpd
+sudo rm /etc/gosftpd/config.toml.dpkg-dist
+```
+
+A `.rpmsave` or `.pacsave` is your configuration from before a removal:
+after a new install, move it over the packaged `config.toml` before the
+service starts ([install.md](install.md#upgrades-and-removal)).
+
+### Downgrades
+
+Downgrades are not tested. An older version refuses settings it does not
+know ("unknown key"), with exit status 2, so keep a copy of the
 configuration it accepts. v0.3 does not notify systemd and ignores SIGHUP:
 the packaged unit (`Type=notify-reload`) waits for its start until the
 start times out.

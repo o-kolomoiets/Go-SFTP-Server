@@ -346,7 +346,8 @@ release:
   a false negative, which `verify-release` (cosign v3.1.4) cannot notice,
   so docs/install.md and SECURITY.md state these minimums, and the gh
   release whose `attestation verify` has the flags of "Verification by
-  users"; the rc confirms the exact versions.
+  users": gh 2.68.0, the first with `--source-ref` (read from the help of
+  the releases; 2.67.0 lacks it). The rc confirms the exact versions.
 - **`checksums.txt.sigstore.json`** signs `checksums.txt`, which lists every
   archive, package and SBOM: one signature covers them all.
 - **The image** is signed by digest (`docker_signs` above).
@@ -1440,9 +1441,10 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   ghcr.io/o-kolomoiets/gosftpd:v0.5.0@sha256:<digest>` as the production
   form. The Quickstart keeps the tag for readability.
 - **Minimum versions** (see Signatures): cosign v3.0 or later, or v2.6
-  with `--new-bundle-format`; a gh release whose `attestation verify` has
-  `--signer-workflow`, `--source-ref` and `--custom-trusted-root`;
-  admission controllers with Sigstore bundle and OCI referrer support.
+  with `--new-bundle-format`; gh 2.68.0 or later, the first release whose
+  `attestation verify` has `--signer-workflow`, `--source-ref` and
+  `--custom-trusted-root`; admission controllers with Sigstore bundle and
+  OCI referrer support.
 - **Rebuilding** a release and comparing it with `checksums.txt` is
   described under Reproducible builds.
 - **install.md** also gets sections for the packages (with "From the
@@ -1513,8 +1515,9 @@ settle these:
   `release.yml`; that `gh release upload` finds the draft by its tag;
 - how `gh attestation verify` treats case in `--repo` and
   `--signer-workflow` (the documentation uses the exact case either way);
-- the minimum verifier versions: cosign v2.6 with `--new-bundle-format`,
-  the first gh release with the flags used, admission controllers;
+- the minimum verifier versions: cosign v2.6 with `--new-bundle-format`
+  (only its flags were read: v2.5.3 has the flag too), that gh 2.68.0
+  verifies these attestations, admission controllers;
 - whether GHCR stores cosign's OCI 1.1 referrers or cosign falls back to
   a tag, and that `cosign verify` finds the signature either way;
 - that the health check survives in the pushed multi-arch index;
