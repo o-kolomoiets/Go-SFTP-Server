@@ -5,6 +5,7 @@
 package sandbox
 
 import (
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -87,6 +88,72 @@ func TestDevTrustedFiles(t *testing.T) {
 	m.files("/proc/self/fd/63")
 	if p := compute(t, in); !slices.Contains(describe(p.Rules), "dir /proc/self/fd "+rfile) {
 		t.Errorf("without Linux: %v", describe(p.Rules))
+	}
+}
+
+// TestAtmozUnderDev: an atmoz directory that is a link into /dev gets no
+// rule, and the warning names it by its path.
+func TestAtmozUnderDev(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/proc/self", "/home/foo/upload", "/dev/shm").symlink("/home/foo/dev", "/dev/shm")
+	c := config.Default()
+	c.Atmoz = true
+	c.AddMount("atmoz1", "/home/foo/upload").Display = "upload"
+	c.AddMount("atmoz2", "/home/foo/dev").Display = "dev"
+	in := input(t, m, c)
+	in.Linux = true
+	checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro, "dir /home/foo/upload " + rw},
+		"atmoz directory /home/foo/dev: /home/foo/dev resolves to /dev/shm under /dev or /proc, which never get a Landlock rule: the mount cannot be used; make it a directory, or mount one there")
+}
+
+// TestEphemeralUnderDev: with $TMPDIR under /dev, or a link there, serve
+// --ephemeral's directory gets no rule, and under Landlock gosftpd could
+// neither remove its client key nor serve its data there: the start fails
+// and says to set TMPDIR elsewhere, also with --dir serving another
+// directory.
+func TestEphemeralUnderDev(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/proc/self", "/dev/shm/gosftpd-ephemeral-1/data", "/srv/share").symlink("/tmp/shm", "/dev/shm")
+	const why = " under /dev or /proc, which never get a Landlock rule; set TMPDIR to another directory"
+	for _, tt := range []struct{ dir, mount, want string }{
+		{"/dev/shm/gosftpd-ephemeral-1", "/dev/shm/gosftpd-ephemeral-1/data", "--ephemeral: /dev/shm/gosftpd-ephemeral-1 is" + why},
+		{"/dev/shm/gosftpd-ephemeral-1", "/srv/share", "--ephemeral: /dev/shm/gosftpd-ephemeral-1 is" + why},
+		{"/tmp/shm/gosftpd-ephemeral-1", "/tmp/shm/gosftpd-ephemeral-1/data", "--ephemeral: /tmp/shm/gosftpd-ephemeral-1 resolves to /dev/shm/gosftpd-ephemeral-1" + why},
+		{"/tmp/shm/gosftpd-ephemeral-1", "/srv/share", "--ephemeral: /tmp/shm/gosftpd-ephemeral-1 resolves to /dev/shm/gosftpd-ephemeral-1" + why},
+	} {
+		c := config.Default()
+		c.EphemeralDir = tt.dir
+		c.AddMount(filepath.Base(tt.mount), tt.mount)
+		in := input(t, m, c)
+		in.Linux = true
+		if p, err := Compute(in); err == nil || err.Error() != tt.want {
+			t.Errorf("%s, mount %s: Compute = %v, %v\nwant %s", tt.dir, tt.mount, describe(p.Rules), err, tt.want)
+		}
+	}
+}
+
+// TestEphemeralDirUnderDev: a mount of serve --ephemeral under /dev, or a
+// link there, cannot be used, as for serve --dir. The warning says to
+// serve another directory with --dir: $TMPDIR has nothing to do with a
+// --dir mount, and a directory of its own there fails the start
+// (TestEphemeralUnderDev), so it cannot help with a data directory
+// replaced by a link either.
+func TestEphemeralDirUnderDev(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/proc/self", "/tmp/gosftpd-ephemeral-1", "/dev/shm/x").
+		symlink("/srv/x", "/dev/shm/x").symlink("/tmp/gosftpd-ephemeral-1/data", "/dev/shm/x")
+	const why = " under /dev or /proc, which never get a Landlock rule: the mount cannot be used; serve another directory with --dir"
+	for _, tt := range []struct{ name, path, want string }{
+		{"x", "/dev/shm/x", "--dir x: /dev/shm/x is" + why},
+		{"x", "/srv/x", "--dir x: /srv/x resolves to /dev/shm/x" + why},
+		{"data", "/tmp/gosftpd-ephemeral-1/data", "--ephemeral data: /tmp/gosftpd-ephemeral-1/data resolves to /dev/shm/x" + why},
+	} {
+		c := config.Default()
+		c.EphemeralDir = "/tmp/gosftpd-ephemeral-1"
+		c.AddMount(tt.name, tt.path)
+		in := input(t, m, c)
+		in.Linux = true
+		checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro, "dir /tmp/gosftpd-ephemeral-1 remove_file,remove_dir"}, tt.want)
 	}
 }
 

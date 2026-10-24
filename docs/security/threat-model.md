@@ -11,7 +11,7 @@ in [../security.md](../security.md); how to deploy them is in
 |---|---|
 | AS1 | Files in the mounts: their content, names and existence |
 | AS2 | Private host keys |
-| AS3 | Credentials: `authorized_keys`, password hashes, trusted CA keys, the revocation list |
+| AS3 | Credentials: `authorized_keys`, password hashes, trusted CA keys, the revocation list; in atmoz mode the users file and passwords in plain text; the password and client key of `serve --ephemeral` |
 | AS4 | The rest of the host's filesystem |
 | AS5 | Availability: CPU, memory, file descriptors, disk |
 | AS6 | Integrity and completeness of the audit log |
@@ -26,6 +26,7 @@ in [../security.md](../security.md); how to deploy them is in
 | N3 | Authenticated user, malicious or compromised | Send any SFTP request, in any order, within its permissions |
 | N4 | Local user of the host who can write to served directories | Plant symlinks, hard links, FIFOs; replace directories |
 | N5 | Supply-chain attacker | Tamper with dependencies, CI or release artifacts |
+| N6 | Whoever can read a container's or process's configuration | Run `docker inspect`, read a process's command line or environment, read the logs |
 
 The administrator who writes the configuration and runs the server is
 trusted.
@@ -46,10 +47,17 @@ trusted.
   `-tags pprof`, `/debug/pprof` (whoever can reach it → process).
 - Configuration, host keys, `authorized_keys` files, CLI flags and
   environment (administrator → process).
+- atmoz/sftp user specs: arguments, `$SFTP_USERS`, a users file, and the
+  key files under `/home/<user>/.ssh/keys/`; in the container image also
+  what is mounted on `/etc/sftp`, `/home` and `/etc/ssh` (administrator →
+  process, ADR 0012).
+- The line of `serve --ephemeral` on stdout, which holds the password of
+  its user (process → the test that started it).
 - Hooks (`[[hooks]]`, ADR 0010): exec hooks receive client-chosen names in
   their environment and stdin (session → a program gosftpd starts);
   webhooks send audit events to a receiver (process → network).
-- The process and the operating system; CI and the release artifacts.
+- The process and the operating system; CI, the release workflows and
+  the release artifacts and image (CI → users).
 
 ## Threats and controls
 
@@ -95,8 +103,13 @@ trusted.
 | Spoofing | Making hooks act on another user's file as one's own upload (N3) | An append-only resume of a file that is not the user's, or an upload in place that changed nothing, fires no hook; the rename mark needs the user's own upload closed ok | vfs tests |
 | Information disclosure | A webhook token in the URL leaking into logs | Failures log `scheme://host` and the unwrapped cause, never the URL; response bodies are not logged | hooks test with a token URL |
 | Denial of service | Flooding hooks with events, or a hook that hangs (N3) | A bounded queue per hook (events and 64 MiB), enqueueing never blocks a request; exec timeout kills the process group; webhook attempt timeouts and at most 5 attempts; shutdown bounded | hooks tests under synctest |
+| Information disclosure | Plain-text passwords of atmoz user specs read from `docker inspect`, the process's command line or environment, or a log (N6) | A warning for each one at start, with its source and position; hashed with argon2id at start, only the hash kept; no error or warning about a spec shows its password, hash or text, and a spec where a command is expected is reported by its position; `:e` hashes and keys as the documented way out (ADR 0012) | `FuzzAtmozSpec` (CI and nightly), cli tests that no password reaches stderr |
+| Elevation of privilege | Atmoz mode started by mistake: a leftover `/etc/sftp/users.conf` or `SFTP_USERS` with plain passwords, a mistyped `--config` or configuration mount during a migration; real home directories or sshd's host keys served on a host | `--config` and `$GOSFTPD_CONFIG` stay strict; atmoz mode only with specs as arguments or without any configuration file; in the image an `/etc/gosftpd` without `config.toml` exits 2; the default users file, the `/home` discovery and the `/etc/ssh` host keys only in the image (`GOSFTPD_ATMOZ_IMAGE=1`); the packaged unit passes `--config` | cli mode selection tests, the atmoz step of the docker job, packaging test |
+| Tampering | A client changing an atmoz users or key file that the next start applies (N3) | They are trusted files: owner and mode checked, never inside a writable mount (the users file inside no mount); read once at start, before Landlock, and given no rule | atmoz and config tests |
+| Information disclosure | The credentials of `serve --ephemeral` | The password only in the line on stdout and as an argon2id hash in memory; the client key 0600 in a 0700 directory of its own; both deleted at stop; the host key never written; the one extra Landlock rule lets the process remove entries of that directory, nothing else | cli and sandbox tests under the real ruleset, interop |
 | Elevation of privilege | A confinement bug while running as root | `serve` refuses root without `--allow-root` | cli tests |
-| Supply chain (N5) | Compromised dependency or action | Minimal dependencies, `govulncheck`, CodeQL, actions pinned by commit SHA, Dependabot, OpenSSF Scorecard; checksums for releases | CI |
+| Supply chain (N5) | Compromised dependency or action | Minimal dependencies, `govulncheck`, CodeQL, actions pinned by commit SHA, Dependabot, OpenSSF Scorecard | CI |
+| Supply chain (N5) | Tampered release assets or image, or a release built from other code than its tag's | Keyless cosign signatures of `checksums.txt` (every archive, package and SBOM) and of the image by digest, and build provenance attestations, under an identity that names `release.yml` and the tag; the documented verification, by digest, run before the owner publishes and again after; a release guard, and a `v*` tag ruleset that blocks moving or deleting a tag (an owner setting); the signing job runs no code generator, restores no Actions cache and builds with a pinned BuildKit; reproducible archives and packages (ADR 0012) | the verification step of `release.yml`, `verify-release.yml`, the `reproducible` job |
 
 ## Residual risks
 
@@ -137,4 +150,15 @@ trusted.
   identity check a local user who can write the directory can still swap
   the file (see [../hooks.md](../hooks.md#exec)). Hook events can be lost
   (a full queue, shutdown, a crash); the audit log is the record.
-- Release artifacts are not signed yet (planned for v0.5).
+- Tags are not signed. Until Immutable Releases (M6), whoever has write
+  access can replace a published release's assets or move an image tag:
+  verify with the exact identity, and run the image by its digest
+  ([../install.md](../install.md#verify-a-release)). Man pages,
+  completions and `THIRD_PARTY_LICENSES` come from go-licenses and
+  cobra/doc, which run without credentials but whose output goes into the
+  signed archives and packages. Releases before v0.5.0 are not signed.
+- A plain password of an atmoz spec in the arguments or `SFTP_USERS` stays
+  readable to whoever can run `docker inspect` or read the process's
+  environment, as long as the container exists.
+- A `serve --ephemeral` that is killed, rather than stopped, leaves its
+  client key and its data in `$TMPDIR`.

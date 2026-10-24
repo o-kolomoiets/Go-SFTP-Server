@@ -42,7 +42,7 @@ func (s *Session) mountInfo(v *view) (fs.FileInfo, error) {
 	if err != nil {
 		return nil, osError(err)
 	}
-	name := v.m.name
+	name := v.name()
 	if s.flatten {
 		name = "/"
 	}

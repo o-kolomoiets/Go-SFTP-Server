@@ -261,6 +261,7 @@ jobs:
           - { pkg: ./internal/vfs, fn: FuzzResolveInRoot }
           - { pkg: ./internal/vfs, fn: FuzzConflictName }
           - { pkg: ./internal/config, fn: FuzzParseConfig }
+          - { pkg: ./internal/atmoz, fn: FuzzAtmozSpec }
           - { pkg: ./internal/auth, fn: FuzzAuthorizedKeys }
           - { pkg: ./internal/auth, fn: FuzzCertificate }
           - { pkg: ./internal/server, fn: FuzzHostKeyProof }
@@ -289,6 +290,10 @@ jobs:
 
   goreleaser-check:
     runs-on: ubuntu-24.04
+    outputs:
+      # The snapshot's version: the docker job loads v<version>-amd64 and
+      # -arm64.
+      version: ${{ steps.images.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -298,30 +303,148 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      # The images build with BuildKit pinned by digest: the builder's
+      # default, moby/buildkit:buildx-stable-1, is a floating tag. No QEMU:
+      # the Dockerfile has no RUN (ADR 0012).
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      # syft writes the SBOMs, as in release.yml.
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.55.0
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: v2.18.2
+          version: v2.19.0
           args: check
+      # Snapshot mode skips publishing, not signing (ADR 0012).
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
-          version: v2.18.2
-          args: release --snapshot --clean
+          version: v2.19.0
+          args: release --snapshot --clean --skip=sign
+      # make generate, a before hook, writes only to out/, which git
+      # ignores; a change elsewhere would mark the build as modified
+      # (vcs.modified, ADR 0012).
+      - name: The before hooks leave the tree clean
+        run: |
+          changed="$(git status --porcelain)"
+          if [ -n "$changed" ]; then echo "::error::the before hooks changed the tree"; echo "$changed"; exit 1; fi
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
-      - name: Only the Linux archives hold the systemd files (ADR 0011)
+      # go-licenses exits 0 for a module it cannot classify (make generate
+      # fails on "License: Unknown"), and the template prints psx only
+      # under BSD-3-Clause. Every module of the Linux binary needs an entry,
+      # and the Go standard library and runtime, which make generate
+      # appends with Go's own LICENSE, the last one (ADR 0012).
+      - name: THIRD_PARTY_LICENSES covers the Linux binary
         run: |
+          mods="$(go version -m dist/gosftpd_linux_amd64_v1/gosftpd | awk '$1 == "dep" { print $2 }')"
+          if [ -z "$mods" ]; then echo "::error::no dep lines in the binary's build information"; exit 1; fi
           status=0
-          for f in dist/*_linux_*.tar.gz; do
-            for p in packaging/config.toml packaging/gosftpd.sysusers packaging/gosftpd.tmpfiles \
-              packaging/systemd/gosftpd.service packaging/systemd/legacy-notify.conf; do
-              if ! tar -tzf "$f" | grep -qx "$p"; then echo "::error file=$f::$p is missing"; status=1; fi
+          for m in $mods; do
+            if ! grep -q "^${m//./[.]}[/ ]" out/THIRD_PARTY_LICENSES; then
+              echo "::error file=out/THIRD_PARTY_LICENSES::no entry for $m"; status=1
+            fi
+          done
+          last="$(grep -A 2 -x '=\{80\}' out/THIRD_PARTY_LICENSES | tail -n 2)"
+          want="$(printf 'Go standard library and runtime %s\nLicense: BSD-3-Clause' "$(go env GOVERSION)")"
+          license="$(go env GOROOT)/LICENSE"
+          if [ "$last" != "$want" ] || ! tail -c "$(wc -c < "$license")" out/THIRD_PARTY_LICENSES | cmp -s - "$license"; then
+            echo "::error file=out/THIRD_PARTY_LICENSES::the last entry is not the Go standard library and runtime with $license"; status=1
+          fi
+          exit $status
+      # Six archives, each with exactly the binary, the documents, the
+      # license file, the man pages and the completions; only the Linux
+      # ones add the systemd files (ADR 0011). Every entry belongs to root
+      # (uid 0) with mode 0644, or 0755 for the binary, and carries the
+      # commit time, so that the archive does not depend on the checkout
+      # (ADR 0012).
+      - name: The archives hold the release files, with fixed owner, mode and time
+        run: |
+          version="$(jq -r .version dist/metadata.json)"
+          mtime="$(TZ=UTC date -d "@$(git log -1 --format=%ct)" '+%F %T')"
+          common=(gosftpd LICENSE README.md CHANGELOG.md THIRD_PARTY_LICENSES man/gosftpd.1.gz
+            completions/_gosftpd completions/gosftpd.bash completions/gosftpd.fish)
+          mapfile -t man < <(cd out && ls man/*.1.gz)
+          linux=(packaging/config.toml packaging/gosftpd.sysusers packaging/gosftpd.tmpfiles
+            packaging/systemd/gosftpd.service packaging/systemd/legacy-notify.conf)
+          status=0
+          set -- dist/*.tar.gz
+          if [ $# -ne 6 ]; then echo "::error::$# archives, want 6:"; ls dist/*.tar.gz; status=1; fi
+          for os in linux darwin freebsd; do
+            for arch in amd64 arm64; do
+              f="dist/gosftpd_${version}_${os}_${arch}.tar.gz"
+              if [ ! -f "$f" ]; then echo "::error::$f is missing"; status=1; continue; fi
+              want=("${common[@]}" "${man[@]}")
+              if [ "$os" = linux ]; then want+=("${linux[@]}"); fi
+              if ! diff -u <(printf '%s\n' "${want[@]}" | sort -u) <(tar -tzf "$f" | sort); then
+                echo "::error file=$f::the entries differ from the list above (+ is in the archive)"; status=1
+              fi
+              bad="$(TZ=UTC tar --numeric-owner --full-time -tvzf "$f" | awk -v mtime="$mtime" '{
+                mode = $6 == "gosftpd" ? "-rwxr-xr-x" : "-rw-r--r--"
+                if ($1 != mode || $2 != "0/0" || $4 " " $5 != mtime) print
+              }')"
+              if [ -n "$bad" ]; then
+                echo "::error file=$f::entries not owned by 0/0 with mode 0644 (0755 for gosftpd) and time $mtime UTC"
+                echo "$bad"; status=1
+              fi
             done
           done
-          for f in dist/*_darwin_*.tar.gz; do
-            if tar -tzf "$f" | grep -q '^packaging/'; then echo "::error file=$f::has the systemd files"; status=1; fi
-          done
           exit $status
+      # The deb, rpm and Arch packages for amd64 and arm64: exactly the files
+      # of the Linux archive in the layout of docs/install.md, the
+      # documentation, man pages and completions, owned by root with their
+      # modes and the commit time; config.toml (and the deb's needrestart
+      # file) as conffiles, %config(noreplace) and backup;
+      # packaging/scripts/*.sh as their scripts; Depends: procps; the
+      # version with its pre-release (ADR 0012).
+      - name: The packages hold the release files, conffiles and scripts
+        run: |
+          rpm --version
+          test/packages/contents.sh dist
+      # One SPDX 2.3 SBOM per archive (ADR 0012): it names the archive with
+      # its checksum and lists the modules of the archive's binary, gosftpd's
+      # own included, with the versions go version -m gives, and the Go
+      # standard library. checksums.txt, which release.yml signs, lists
+      # exactly the archives, the packages and the SBOMs.
+      - name: The SBOMs describe the archives, and checksums.txt lists them
+        run: |
+          status=0
+          mapfile -t archives < <(jq -r '.[] | select(.type == "Archive") | .path' dist/artifacts.json | sort)
+          if [ "${#archives[@]}" -ne 6 ]; then echo "::error::${#archives[@]} archives in artifacts.json, want 6"; status=1; fi
+          for a in "${archives[@]}"; do
+            sbom="$a.sbom.json"
+            if [ ! -f "$sbom" ]; then echo "::error::$sbom is missing"; status=1; continue; fi
+            bin="$(jq -r --arg a "$a" '(.[] | select(.path == $a)) as $x
+              | .[] | select(.type == "Binary" and .goos == $x.goos and .goarch == $x.goarch) | .path' dist/artifacts.json)"
+            want="$(printf 'SPDX-2.3 %s sha256:%s' "${a#dist/}" "$(sha256sum "$a" | cut -d ' ' -f 1)")"
+            got="$(jq -r '[.spdxVersion, .name, (.packages[] | select(.SPDXID | startswith("SPDXRef-DocumentRoot-")) | .versionInfo)] | join(" ")' "$sbom")"
+            if [ "$got" != "$want" ]; then echo "::error file=$sbom::the document is \"$got\", want \"$want\""; status=1; fi
+            want="$({ go version -m "$bin" | awk '$1 == "mod" || $1 == "dep" { print $2, $3 }'; go version "$bin" | awk '{ print "stdlib", $2 }'; } | sort)"
+            got="$(jq -r '.packages[] | select(.SPDXID | startswith("SPDXRef-Package-go-module-")) | "\(.name) \(.versionInfo)"' "$sbom" | sort)"
+            if ! diff -u <(echo "$want") <(echo "$got"); then
+              echo "::error file=$sbom::the modules differ from those of $bin (+ is in the SBOM)"; status=1
+            fi
+          done
+          if ! diff -u <(cd dist && printf '%s\n' *.tar.gz *.deb *.rpm *.pkg.tar.zst *.sbom.json | sort) <(awk '{ print $2 }' dist/checksums.txt | sort); then
+            echo "::error file=dist/checksums.txt::it does not list exactly the archives, packages and SBOMs (+ is listed)"; status=1
+          fi
+          (cd dist && sha256sum --check --quiet checksums.txt) || status=1
+          exit $status
+      # For the packages job, which also moves the archive install to them.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/*_linux_*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - name: Release binaries stay within 12 MiB (ROADMAP §11.1, D21)
         run: |
           status=0
@@ -331,6 +454,275 @@ jobs:
             if [ "$size" -gt 12582912 ]; then echo "::error file=$f::$size bytes is over the 12 MiB budget"; status=1; fi
           done
           exit $status
+      # A snapshot builds one image per platform, tagged v<version>-amd64
+      # and -arm64, and never latest (ADR 0012). Each has the Dockerfile's
+      # configuration and labels; the binary and the directories that named
+      # volumes start from have their owner and mode, with nothing in the
+      # directories; and there is no /etc/gosftpd, /etc/sftp or /etc/ssh,
+      # which in the image are always mounts (the hint and atmoz mode rely
+      # on it).
+      - name: The images have the Dockerfile's configuration and directories
+        id: images
+        run: |
+          set -o pipefail
+          V="$(jq -r .version dist/metadata.json)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          repo=ghcr.io/o-kolomoiets/gosftpd
+          created="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
+          status=0
+          if ! diff -u <(printf '%s\n' "$repo:v$V-amd64" "$repo:v$V-arm64") \
+            <(jq -r '.[] | select(.type == "Docker Image") | .name' dist/artifacts.json | LC_ALL=C sort); then
+            echo "::error::the snapshot built other images than v$V-amd64 and v$V-arm64 (+ is built)"; status=1
+          fi
+          tree="$(printf '%s\n' '-rwxr-xr-x 0/0 usr/bin/gosftpd' 'drwxr-xr-x 0/0 srv/' \
+            'drwxr-x--- 65532/65532 srv/sftp/' 'drwxr-xr-x 0/0 var/lib/' 'drwx------ 65532/65532 var/lib/gosftpd/' \
+            'drwxr-xr-x 65532/65532 home/' 'drwx------ 65532/65532 home/nonroot/' | LC_ALL=C sort)"
+          for arch in amd64 arm64; do
+            ref="$repo:v$V-$arch"
+            want="$(jq -nS --arg arch "$arch" --arg v "$V" --arg rev "$(git rev-parse HEAD)" --arg created "$created" '{
+              Os: "linux", Architecture: $arch, User: "65532:65532", WorkingDir: "/",
+              Entrypoint: ["/usr/bin/gosftpd"], Cmd: ["serve"], ExposedPorts: ["2022/tcp", "9090/tcp"],
+              Env: ["GOSFTPD_ATMOZ_IMAGE=1"], Volumes: null, StopSignal: null,
+              Healthcheck: {Test: ["CMD", "/usr/bin/gosftpd", "healthcheck"], StartPeriod: 10000000000, StartInterval: 2000000000},
+              Labels: {"org.opencontainers.image.source": "https://github.com/o-kolomoiets/Go-SFTP-Server",
+                "org.opencontainers.image.revision": $rev, "org.opencontainers.image.version": $v,
+                "org.opencontainers.image.created": $created, "org.opencontainers.image.licenses": "Apache-2.0"}}')"
+            got="$(docker image inspect "$ref" | jq -S '.[0] | .Config as $c | {Os, Architecture, User: $c.User,
+              WorkingDir: $c.WorkingDir, Entrypoint: $c.Entrypoint, Cmd: $c.Cmd, ExposedPorts: ($c.ExposedPorts | keys),
+              Env: ($c.Env | map(select(startswith("GOSFTPD_")))), Volumes: $c.Volumes, StopSignal: $c.StopSignal,
+              Healthcheck: $c.Healthcheck, Labels: $c.Labels}')"
+            if ! diff -u <(echo "$want") <(echo "$got"); then
+              echo "::error::$ref: the configuration differs (+ is the image's)"; status=1
+            fi
+            c="$(docker create --platform "linux/$arch" "$ref")"
+            got="$(docker export "$c" | tar --numeric-owner -tvf - | awk '
+              $6 ~ /^(usr\/bin\/gosftpd|srv\/.*|var\/lib\/|var\/lib\/gosftpd\/.*|home\/.*|etc\/(gosftpd|sftp|ssh)(\/.*)?)$/ { print $1, $2, $6 }
+            ' | LC_ALL=C sort)"
+            docker rm -v "$c" > /dev/null
+            if ! diff -u <(echo "$tree") <(echo "$got"); then
+              echo "::error::$ref: the files differ (+ is in the image)"; status=1
+            fi
+          done
+          exit $status
+      # The gzip of docker save, which the docker job loads: about the
+      # compressed size of the layers in a registry, plus tar headers.
+      - name: The images stay within 15 MB compressed (ROADMAP §11.1)
+        env:
+          V: ${{ steps.images.outputs.version }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/images"
+          status=0
+          for arch in amd64 arm64; do
+            f="$RUNNER_TEMP/images/gosftpd-$arch.tar.gz"
+            docker save "ghcr.io/o-kolomoiets/gosftpd:v$V-$arch" | gzip -n > "$f"
+            size=$(stat -c %s "$f")
+            echo "v$V-$arch: $size bytes"
+            if [ "$size" -gt 15000000 ]; then echo "::error::v$V-$arch: $size bytes is over the 15 MB budget"; status=1; fi
+          done
+          exit $status
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: images
+          path: ${{ runner.temp }}/images
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      # git.prerelease_suffix (ADR 0012): without GORELEASER_CURRENT_TAG,
+      # GoReleaser takes the first tag on HEAD in git's version sort, which
+      # ranks v0.5.0-rc.1 above v0.5.0; the suffix makes a run without the
+      # variable, a release run too, on a final tagged on its rc's commit
+      # build the final. The build runs in a worktree, so that dist/ stays
+      # for the steps after it.
+      - name: Tag a final and its rc on HEAD (local tags, never pushed)
+        run: |
+          git worktree add --quiet --detach "$RUNNER_TEMP/suffix"
+          git tag v999.0.0-rc.1 && git tag v999.0.0
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.19.0
+          workdir: ${{ runner.temp }}/suffix
+          args: build --snapshot --clean --single-target --id gosftpd --skip=before
+      - name: The build took the final
+        run: |
+          tag="$(jq -r .tag "$RUNNER_TEMP/suffix/dist/metadata.json")"
+          git tag -d v999.0.0-rc.1 v999.0.0
+          if [ "$tag" != v999.0.0 ]; then echo "::error::the build took $tag, want v999.0.0"; exit 1; fi
+
+  # Two cold builds of the commit give the same files (ADR 0012):
+  # checkouts at two paths, the second cloned and built under umask 002,
+  # each with its own build and module cache and no Actions cache. With one
+  # shared build cache and -trimpath, the second build would reuse the
+  # first one's compiled packages and show only that packaging is
+  # deterministic. Signatures, SBOMs and images are out of scope.
+  reproducible:
+    runs-on: ubuntu-24.04
+    env:
+      # checksums.txt lists the six archives and the six packages.
+      ENTRIES: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: a
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.19.0
+          install-only: true
+      - name: A second checkout, cloned under umask 002 at another path
+        run: |
+          umask 002
+          git -c advice.detachedHead=false clone --quiet --no-local a "$RUNNER_TEMP/b"
+          git -C "$RUNNER_TEMP/b" remote set-url origin "$(git -C a remote get-url origin)"
+          test "$(git -C "$RUNNER_TEMP/b" rev-parse HEAD)" = "$(git -C a rev-parse HEAD)"
+          stat -c '%A %n' a/LICENSE "$RUNNER_TEMP/b/LICENSE"
+      - name: Build in the first checkout
+        working-directory: a
+        env:
+          GOCACHE: ${{ runner.temp }}/cache-a/build
+          GOMODCACHE: ${{ runner.temp }}/cache-a/mod
+        run: goreleaser release --snapshot --clean --skip=sign,sbom,docker
+      - name: Build in the second checkout, under umask 002
+        working-directory: ${{ runner.temp }}/b
+        env:
+          GOCACHE: ${{ runner.temp }}/cache-b/build
+          GOMODCACHE: ${{ runner.temp }}/cache-b/mod
+        run: |
+          umask 002
+          goreleaser release --snapshot --clean --skip=sign,sbom,docker
+      - name: Both builds gave the same binaries and checksums.txt
+        run: |
+          a=a/dist b="$RUNNER_TEMP/b/dist"
+          cat "$a/checksums.txt"
+          status=0
+          if ! diff -u "$a/checksums.txt" "$b/checksums.txt"; then
+            echo "::error::checksums.txt differs between the two builds"; status=1
+          fi
+          entries=$(wc -l < "$a/checksums.txt")
+          if [ "$entries" -ne "$ENTRIES" ]; then
+            echo "::error::checksums.txt has $entries entries, want $ENTRIES"; status=1
+          fi
+          if ! diff -u <(cd "$a" && sha256sum gosftpd*/gosftpd) <(cd "$b" && sha256sum gosftpd*/gosftpd); then
+            echo "::error::the binaries differ between the two builds"; status=1
+          fi
+          exit $status
+
+  # The image goreleaser-check built, against the commands of
+  # docs/install.md (test/docker/run.sh): the quickstart block, a reload, the
+  # hint for a missing configuration followed, the compose block, and serve
+  # --ephemeral in a container; then against the examples of the atmoz/sftp
+  # README (test/docker/atmoz.sh).
+  # On amd64 and on arm64 (real Landlock, no QEMU), as the runner's user
+  # under umask 002; every reference the run uses is tagged to the loaded
+  # image, so that nothing is pulled from GHCR (ADR 0012).
+  docker:
+    name: docker (${{ matrix.arch }})
+    needs: goreleaser-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-24.04 }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    env:
+      V: ${{ needs.goreleaser-check.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      # gosftpd must log that it applied Landlock in every container.
+      REQUIRE_LANDLOCK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: images
+          path: ${{ runner.temp }}/images
+      - name: Load the image
+        run: |
+          docker version --format 'Docker {{.Server.Version}}, {{.Server.Os}}/{{.Server.Arch}}'
+          docker load --input "$RUNNER_TEMP/images/gosftpd-$ARCH.tar.gz"
+      - name: The documented commands against the image
+        run: test/docker/run.sh "ghcr.io/o-kolomoiets/gosftpd:v$V-$ARCH" "$V"
+      # The atmoz README's examples with OpenSSH's sftp (ADR 0012): docker
+      # run -p 2222:2022 IMAGE foo:pass:::upload, an upload and a second one
+      # of the same name that overwrites it; keys in a host directory
+      # mounted on /home/foo/.ssh/keys, one removed on the host and refused
+      # after docker restart; users.conf, SFTP_USERS, :e hashes and an
+      # /etc/ssh host key; the missing configuration directory with
+      # SFTP_USERS set, which must exit 2 with no listener. Host port 2222,
+      # the loaded image only.
+      - name: The atmoz examples against the image
+        run: test/docker/atmoz.sh "ghcr.io/o-kolomoiets/gosftpd:v$V-$ARCH"
+
+  # The packages goreleaser-check built, under systemd as PID 1
+  # (test/packages/run.sh, ADR 0012): installed (for deb the deb block of
+  # docs/install.md), reloaded, upgraded by a reinstall, removed,
+  # installed over the archive install of docs/install.md, and switched
+  # to another account with its account block. On the
+  # ubuntu-24.04 and ubuntu-24.04-arm runners themselves, with needrestart
+  # as on an Ubuntu server; in containers built from test/packages/ without
+  # procps (test/packages/container.sh): Debian 12 (systemd 252, the drop-in
+  # for systemd before 253) and 13, EL9 and Arch, each also without systemd
+  # as PID 1, as in an image build, where a removal must still disable the
+  # service (test/packages/offline.sh).
+  packages:
+    name: packages (${{ matrix.target }})
+    needs: goreleaser-check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: ubuntu-24.04, os: ubuntu-24.04, format: deb }
+          - { target: ubuntu-24.04-arm, os: ubuntu-24.04-arm, format: deb }
+          - { target: debian-12, os: ubuntu-24.04, format: deb, container: true, legacy: "1" }
+          - { target: debian-13, os: ubuntu-24.04, format: deb, container: true }
+          - { target: el9, os: ubuntu-24.04, format: rpm, container: true }
+          - { target: arch, os: ubuntu-24.04, format: archlinux, container: true }
+    runs-on: ${{ matrix.os }}
+    env:
+      V: ${{ needs.goreleaser-check.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      FORMAT: ${{ matrix.format }}
+      # systemd 252 lacks Type=notify-reload: postinstall installs the
+      # drop-in.
+      EXPECT_LEGACY_DROPIN: ${{ matrix.legacy }}
+      # gosftpd must log that it applied Landlock under the unit.
+      REQUIRE_LANDLOCK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: ${{ runner.temp }}/packages
+      # cgroup v2 on the runners is assumed (ADR 0012).
+      - name: The runner's systemd and cgroups
+        run: |
+          systemctl --version | sed -n 1p
+          stat -fc %T /sys/fs/cgroup
+      # A standard Ubuntu server has needrestart, which the deb's
+      # /etc/needrestart/conf.d/gosftpd.conf keeps from restarting gosftpd.
+      - name: Install needrestart
+        if: ${{ !matrix.container }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q needrestart
+      - name: Install, upgrade and remove on the runner
+        if: ${{ !matrix.container }}
+        env:
+          NEEDRESTART: "1"
+        run: sudo --preserve-env=CI,EXPECT_LEGACY_DROPIN,NEEDRESTART,REQUIRE_LANDLOCK test/packages/run.sh "$FORMAT" "$RUNNER_TEMP/packages" "$V"
+      - name: Install, upgrade and remove in containers with and without systemd
+        if: ${{ matrix.container }}
+        run: test/packages/container.sh "$TARGET" "$FORMAT" "$RUNNER_TEMP/packages" "$V"
 
   vuln:
     runs-on: ubuntu-24.04
@@ -350,7 +742,7 @@ jobs:
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln]
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if any required job failed

@@ -1,0 +1,38 @@
+name: Tag release
+
+# Actions -> Tag release -> Run workflow, on main, with the version: checks
+# it, tags the commit the run started on and starts release.yml on the tag
+# (.github/scripts/tag-release.sh, ADR 0012). Tags are made here, not
+# signed by the owner: GITHUB_TOKEN creates them through the API.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v: 0.5.0, or 0.5.0-rc.1 for a pre-release"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-release
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the tag
+      actions: write # gh workflow run release.yml
+      checks: read # ci-ok on the commit
+    steps:
+      # Only for CHANGELOG.md and the scripts: the tag is created through
+      # the API, so no credentials stay in the checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check, tag and start release.yml
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/tag-release.sh "$VERSION"

@@ -44,6 +44,9 @@ type running struct {
 	// ruleset is the Landlock ruleset applied at start, nil without one;
 	// a reload checks the new configuration against it (ADR 0011).
 	ruleset *sandbox.Ruleset
+	// noReload, if set, says why SIGHUP is only logged: serve --ephemeral
+	// (ADR 0012).
+	noReload string
 
 	mu     sync.Mutex // serializes reloads; guards the fields below
 	c      *config.Config
@@ -71,12 +74,17 @@ type hupKey struct{}
 
 // reloadLoop reloads on every value from hup until ctx is done. A signal
 // that arrives during a reload triggers one more (hup has a buffer of one).
+// With noReload it only logs the signal.
 func (r *running) reloadLoop(ctx context.Context, hup <-chan os.Signal) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-hup:
+		}
+		if r.noReload != "" {
+			r.log.WarnContext(ctx, "SIGHUP ignored", "reason", r.noReload)
+			continue
 		}
 		// The timestamp is taken after the signal, as systemd requires.
 		if err := sdnotify.Reloading(); err != nil {

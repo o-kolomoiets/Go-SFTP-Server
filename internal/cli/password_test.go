@@ -28,7 +28,7 @@ func TestHashPassword(t *testing.T) {
 		{"\n", false, "empty password"},
 		{strings.Repeat("x", auth.MaxPasswordLen+1) + "\n", false, "longer than"},
 	} {
-		root := newRootCmd()
+		root := NewRootCommand()
 		var out, errOut bytes.Buffer
 		root.SetArgs([]string{"user", "hash-password", "--stdin"})
 		root.SetIn(strings.NewReader(tt.in))
@@ -52,7 +52,7 @@ func TestHashPassword(t *testing.T) {
 	}
 
 	// Without --stdin a terminal is required.
-	root := newRootCmd()
+	root := NewRootCommand()
 	root.SetArgs([]string{"user", "hash-password"})
 	root.SetIn(strings.NewReader("s3cret\n"))
 	root.SetOut(&bytes.Buffer{})

@@ -29,7 +29,7 @@ func (c *Config) MountSpecs() ([]vfs.MountSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", key("mounts", name), err)
 		}
-		specs = append(specs, vfs.MountSpec{Name: name, Path: m.Path, ReadOnly: m.ReadOnly, Create: m.Create, Options: opts})
+		specs = append(specs, vfs.MountSpec{Name: name, Display: m.Display, Path: m.Path, ReadOnly: m.ReadOnly, Create: m.Create, Options: opts})
 	}
 	return specs, nil
 }
@@ -198,7 +198,7 @@ func (c *Config) BuildAuthenticator(o AuthOptions) (*auth.Authenticator, KeyFile
 			}
 			au.AllowFrom = append(au.AllowFrom, p)
 		}
-		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled && !c.certificateLogin(u) {
+		if len(au.Keys) == 0 && au.Password == nil && !u.Disabled && !c.certificateLogin(u) && !c.Atmoz {
 			warns = append(warns, key("users", name)+": no usable keys, the user cannot log in")
 		}
 		users = append(users, au)

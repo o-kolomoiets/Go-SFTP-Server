@@ -24,10 +24,11 @@ var startSandbox = sandbox.Start
 // applySandbox is serve's sandbox step, once the listeners are bound and
 // before any hook can run: it clears the ambient capabilities, which exec
 // hooks would inherit (AmbientCapabilities=CAP_NET_BIND_SERVICE for port
-// 22), and applies Landlock. A *sandbox.RequiredError becomes a
+// 22), and applies Landlock; ephemeral is the directory of serve
+// --ephemeral, held open. A *sandbox.RequiredError becomes a
 // configError (exit status 2); any other error fails the start with exit
 // status 1.
-func applySandbox(ctx context.Context, c *config.Config, mounts *vfs.Table, log *slog.Logger) (sandbox.Result, error) {
+func applySandbox(ctx context.Context, c *config.Config, mounts *vfs.Table, ephemeral *sandbox.MountDir, log *slog.Logger) (sandbox.Result, error) {
 	cleared, err := sandbox.ClearAmbient()
 	if err != nil {
 		return sandbox.Result{}, err
@@ -35,7 +36,7 @@ func applySandbox(ctx context.Context, c *config.Config, mounts *vfs.Table, log 
 	if cleared != 0 {
 		log.InfoContext(ctx, "ambient capabilities cleared", "set", fmt.Sprintf("%#x", cleared))
 	}
-	res, err := startSandbox(ctx, sandbox.Options{Config: c, Mounts: heldMounts(mounts), Log: log})
+	res, err := startSandbox(ctx, sandbox.Options{Config: c, Mounts: heldMounts(mounts), Ephemeral: ephemeral, Log: log})
 	if _, ok := errors.AsType[*sandbox.RequiredError](err); ok {
 		return res, configError{err}
 	}

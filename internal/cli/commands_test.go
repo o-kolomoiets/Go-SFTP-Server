@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/o-kolomoiets/go-sftp-server/internal/atmoz"
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
 )
@@ -82,6 +84,9 @@ func isolate(t *testing.T) string {
 	t.Setenv(config.EnvListen, "")
 	t.Setenv(config.EnvLogLevel, "")
 	t.Setenv(config.EnvLogFormat, "")
+	// Atmoz mode's sources and conventions (ADR 0012).
+	t.Setenv(atmoz.EnvUsers, "")
+	t.Setenv(envImage, "")
 	return home
 }
 
@@ -253,7 +258,7 @@ func TestNoConfigFound(t *testing.T) {
 	noSystemConfig(t)
 	t.Chdir(t.TempDir())
 	for _, args := range [][]string{{"serve", "--allow-root"}, {"config", "validate"}, {"config", "show"}, {"user", "list"}} {
-		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.Contains(stderr, "gosftpd init") {
+		if code, _, stderr := execute(t, args...); code != exitUsage || !strings.HasPrefix(stderr, "Error: no configuration file found") || !strings.HasSuffix(stderr, wantHint) {
 			t.Errorf("%q: exit %d: %s", args, code, stderr)
 		}
 	}
@@ -479,6 +484,58 @@ func TestServeFlagsNeedDir(t *testing.T) {
 		if code, _, stderr := execute(t, args...); code != exitUsage {
 			t.Errorf("%q: exit %d: %s", args, code, stderr)
 		}
+	}
+}
+
+// sftpConn is an SFTP client with its connection.
+type sftpConn struct {
+	*sftp.Client
+	conn *ssh.Client
+}
+
+// Close closes the client and the connection; serve's shutdown would wait
+// for an open one.
+func (c *sftpConn) Close() {
+	_ = c.Client.Close()
+	_ = c.conn.Close()
+}
+
+// putFile uploads data to path.
+func putFile(c *sftpConn, path, data string) error {
+	f, err := c.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(f, data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// logged returns msg as the text log writes it in a quoted value, such as
+// the detail of a configuration warning: a Windows path's backslashes are
+// doubled there.
+func logged(msg string) string {
+	q := strconv.Quote(msg)
+	return q[1 : len(q)-1]
+}
+
+// mentions reports whether the log names path: in the banner as it is,
+// in a quoted value as logged writes it.
+func mentions(logs, path string) bool {
+	return strings.Contains(logs, path) || strings.Contains(logs, logged(path))
+}
+
+// waitLog waits until the log holds s.
+func waitLog(t *testing.T, logs func() string, s string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for !strings.Contains(logs(), s) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q in:\n%s", s, logs())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

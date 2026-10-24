@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 )
 
 var host kernel = noLandlock{}
@@ -33,6 +34,9 @@ func probeChild(io.Writer) int { return 1 }
 
 // previewInput: Start computes no rules here.
 func previewInput() (Input, bool) { return Input{}, false }
+
+// HeldDir needs no descriptor where Start adds no rules.
+func HeldDir(*os.File) (MountDir, error) { return MountDir{FD: -1}, nil }
 
 // ClearAmbient does nothing: ambient capabilities exist only on Linux.
 func ClearAmbient() (uint64, error) { return 0, nil }

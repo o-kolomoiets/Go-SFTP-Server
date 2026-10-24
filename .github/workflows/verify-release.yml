@@ -1,0 +1,60 @@
+name: Verify release
+
+# The verification commands of docs/install.md against a published release,
+# as a user sees it: the assets downloaded from the release and the image
+# pulled without credentials, by the digest digests.txt names (ADR 0012).
+# Publishing a release starts it; it can also be run for a tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag: v0.5.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read # gh attestation verify
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+      # An empty Docker configuration: cosign, gh and docker read the
+      # package without credentials, as anyone does.
+      - name: The documented verification of the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-anonymous
+        run: |
+          if ! [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$ ]]; then
+            echo "::error::$TAG is not a release tag"; exit 1
+          fi
+          mkdir "$DOCKER_CONFIG" "$RUNNER_TEMP/verify"
+          cd "$RUNNER_TEMP/verify"
+          V="${TAG#v}" "$GITHUB_WORKSPACE/test/docs/run-block.sh" verify
+      - name: The image, pulled anonymously by its digest, is the tag's build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-anonymous
+        run: |
+          repo=ghcr.io/o-kolomoiets/gosftpd
+          digest="$(awk -v t="$repo:$TAG" '$2 == t { print $1 }' "$RUNNER_TEMP/verify/digests.txt")"
+          if ! [[ $digest =~ ^[0-9a-f]{64}$ ]]; then echo "::error::digests.txt has no digest of $repo:$TAG"; exit 1; fi
+          docker pull "$repo@sha256:$digest"
+          got="$(docker run --rm "$repo@sha256:$digest" version --json | jq -r '.version + " " + .commit')"
+          want="$TAG $(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+          if [ "$got" != "$want" ]; then echo "::error::the image reports $got, want $want"; exit 1; fi
+          echo "$repo@sha256:$digest: $got"

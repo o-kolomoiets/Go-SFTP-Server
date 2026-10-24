@@ -5,7 +5,7 @@ change. Tested:
 
 | Client | Version | What is checked |
 |---|---|---|
-| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; `on_conflict = "version"`; `kill -9` of the client during an atomic upload; user certificates from `ssh-keygen -s` (trusted CA, `force-command=internal-sftp`, another principal refused, revoked after a reload, a KRL refused); host key rotation with `UpdateHostKeys` (the next key learned before `--finish`, the previous key forgotten after `--retire`; RSA with `HostKeyAlgorithms=rsa-sha2-256` and a one-command session); a host certificate with `@cert-authority`; refused: symlink escape, `ln`, `ln -s`, shell and exec |
+| OpenSSH `sftp`, `scp` | 9.6p1 (Ubuntu 24.04), 10.6p1 (built from source) | put, get, `put -p`, mkdir, rename, rm, rmdir, `reput`, `df -h`, `ls -l`; scp both ways; password login; `on_conflict = "version"`; `kill -9` of the client during an atomic upload; user certificates from `ssh-keygen -s` (trusted CA, `force-command=internal-sftp`, another principal refused, revoked after a reload, a KRL refused); host key rotation with `UpdateHostKeys` (the next key learned before `--finish`, the previous key forgotten after `--retire`; RSA with `HostKeyAlgorithms=rsa-sha2-256` and a one-command session); a host certificate with `@cert-authority`; `serve --ephemeral`: key and password logins with the details of its JSON line, the host key checked against its `known_hosts` line, SIGHUP ignored, the key and the data removed on SIGTERM; refused: symlink escape, `ln`, `ln -s`, shell and exec |
 | paramiko | 5.0.0 | `put(confirm=True)` over an existing file, append mode, refused overwrite of existing bytes, owners in listings, read-only and upload-only users, password login, user name change within a connection refused; the plain host key while a host certificate is served |
 | rclone | v1.75.0 | `copy` into an upload-only mount, `copy` of a changed file with full access, `about`, `sync` five times into a `version` mount; with a host certificate served, `known_hosts_file` with the plain key fails and `host_key_algorithms` fixes it |
 | lftp | 4.9.2 | put, get, listing |
@@ -17,6 +17,11 @@ The same run sends v1 and v2 headers straight to gosftpd from an address it
 does not trust (refused after the banner, `untrusted_proxy`), and runs
 `gosftpd healthcheck` from a trusted loopback address (it sends a `LOCAL`
 header) and from one that is not trusted.
+
+OpenSSH `sftp` also logs in to atmoz mode, with the user specs of the
+atmoz/sftp README: in a Go test against the server in process, and in the
+`docker` CI job against the image on amd64 and arm64
+(`test/docker/atmoz.sh`, see [migrate-from-atmoz.md](migrate-from-atmoz.md)).
 
 WinSCP, FileZilla and Cyberduck are not tested automatically yet; WinSCP has
 a manual checklist below.

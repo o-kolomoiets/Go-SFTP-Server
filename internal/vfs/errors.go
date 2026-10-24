@@ -36,6 +36,9 @@ var (
 	// ErrUnavailable: a configured mount could not be opened (see
 	// Options.Unavailable and Table.Reload).
 	ErrUnavailable = errors.New("mount unavailable")
+	// ErrNameClash: a mount's visible name equals that of another mount
+	// of the session, ignoring case (MountSpec.Display).
+	ErrNameClash = errors.New("the name differs only in case from that of mount")
 
 	// errWriteFailed: an atomic upload whose write failed is not published.
 	errWriteFailed = errors.New("a write of the upload failed; not published")

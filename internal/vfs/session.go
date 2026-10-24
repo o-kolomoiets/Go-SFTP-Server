@@ -36,6 +36,9 @@ type view struct {
 
 func (v *view) opts() *MountOptions { return &v.m.opts }
 
+// name is the mount's name as the session shows it (Mount.Display).
+func (v *view) name() string { return v.m.Display() }
+
 // fileID identifies a file across paths. The inode number alone is not
 // enough: once a file is deleted, a new file may get the same number. The
 // change time tells them apart; it moves with every change, so the session
@@ -55,8 +58,8 @@ func (id fileID) matches(fi fs.FileInfo) bool {
 type Session struct {
 	t       *Table
 	user    string
-	views   []*view // sorted by mount name
-	byName  map[string]*view
+	views   []*view          // sorted by visible name
+	byName  map[string]*view // by visible name
 	flatten bool
 	owned   []*os.Root // home roots, closed with the session
 
@@ -68,7 +71,10 @@ type Session struct {
 // hold a reference to t (Acquire) until the session is closed. Mounts that
 // cannot be opened for this user (a home directory that is missing or not a
 // real directory) are left out; the returned errors say why, for the audit
-// log. Grants for unknown mounts are reported the same way.
+// log. Grants for unknown mounts are reported the same way, and so is a
+// mount whose visible name equals that of an earlier one ignoring case
+// (ErrNameClash): clients on case-insensitive file systems could not tell
+// them apart.
 func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 	s := &Session{
 		t:       t,
@@ -78,13 +84,26 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 	}
 	var errs []error
 	granted := map[string]bool{}
+	names := map[string]string{} // visible names by their lower case
+	clash := func(name string) error {
+		if prev, ok := names[strings.ToLower(name)]; ok {
+			return &MountError{Mount: name, Err: fmt.Errorf("%w %q", ErrNameClash, prev)}
+		}
+		names[strings.ToLower(name)] = name
+		return nil
+	}
 	for _, g := range grants {
 		m := t.byName[g.Mount]
-		if err, ok := t.missing[g.Mount]; ok {
+		if mm, ok := t.missing[g.Mount]; ok {
 			// Granted, so that the user's other mounts keep their paths.
 			if !granted[g.Mount] {
 				granted[g.Mount] = true
-				errs = append(errs, &MountError{Mount: g.Mount, Err: err})
+				name := visibleName(g.Mount, mm.display)
+				if err := clash(name); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				errs = append(errs, &MountError{Mount: name, Err: mm.err})
 			}
 			continue
 		}
@@ -96,6 +115,10 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 			continue
 		}
 		granted[m.name] = true
+		if err := clash(m.Display()); err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		perm := g.Perm
 		if m.readOnly {
 			perm &= PermReadOnly
@@ -104,7 +127,7 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 		if m.home {
 			r, err := m.openHome(user)
 			if err != nil {
-				errs = append(errs, &MountError{Mount: m.name, Err: err})
+				errs = append(errs, &MountError{Mount: m.Display(), Err: err})
 				continue
 			}
 			root = r
@@ -112,9 +135,9 @@ func (t *Table) Session(user string, grants []Grant) (*Session, []error) {
 		}
 		v := &view{m: m, root: root, perm: perm}
 		s.views = append(s.views, v)
-		s.byName[m.name] = v
+		s.byName[v.name()] = v
 	}
-	slices.SortFunc(s.views, func(a, b *view) int { return strings.Compare(a.m.name, b.m.name) })
+	slices.SortFunc(s.views, func(a, b *view) int { return strings.Compare(a.name(), b.name()) })
 	// Flatten by what was granted, not by what opened: if a granted home is
 	// unavailable, /home/x must not resolve into the other mount.
 	s.flatten = t.flatten && len(granted) == 1 && len(s.views) == 1
@@ -136,7 +159,7 @@ func (t *Table) FullAccess() []Grant {
 
 // MountError explains why a mount is not available in a session.
 type MountError struct {
-	Mount string
+	Mount string // the visible name (Mount.Display)
 	Err   error
 }
 
@@ -160,11 +183,11 @@ func (s *Session) Close() error {
 // User returns the session's user name.
 func (s *Session) User() string { return s.user }
 
-// Mounts returns the names of the mounts this session can see.
+// Mounts returns the visible names of the mounts this session can see.
 func (s *Session) Mounts() []string {
 	names := make([]string, len(s.views))
 	for i, v := range s.views {
-		names[i] = v.m.name
+		names[i] = v.name()
 	}
 	return names
 }
@@ -257,7 +280,7 @@ func (s *Session) virtual(v *view, rel string) string {
 	if s.flatten {
 		return path.Clean("/" + rel)
 	}
-	return path.Clean("/" + v.m.name + "/" + rel)
+	return path.Clean("/" + v.name() + "/" + rel)
 }
 
 // Stat follows symlinks that stay inside the mount. It honours stat
@@ -523,7 +546,7 @@ func (s *Session) SetstatAt(vp string, a Attrs) (Where, error) {
 	if rel != named || h != nil {
 		return Where{}, nil
 	}
-	w := Where{Mount: v.m.name, HostPath: v.hostPath(rel)}
+	w := Where{Mount: v.name(), HostPath: v.hostPath(rel)}
 	if fi, err := v.root.Lstat(rel); err == nil {
 		w.Info = fi
 	}
@@ -582,7 +605,7 @@ func (s *Session) Move(src, dst string, posix bool) (Moved, error) {
 	uploaded := own && s.arrived(sv, srel, fi)
 	done := func(rel, conflict string) (Moved, error) {
 		s.moveCreated(sv, srel, rel, own, false)
-		where := Where{Mount: sv.m.name, HostPath: sv.hostPath(rel), Info: fi} // a rename keeps the inode
+		where := Where{Mount: sv.name(), HostPath: sv.hostPath(rel), Info: fi} // a rename keeps the inode
 		return Moved{Final: s.virtual(sv, rel), Conflict: conflict, Uploaded: uploaded, Where: where}, nil
 	}
 

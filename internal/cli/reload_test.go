@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -35,14 +34,21 @@ type testServer struct {
 
 func startServe(t *testing.T, args ...string) *testServer {
 	t.Helper()
+	return startRun(t, append([]string{"serve", "--allow-root"}, args...)...)
+}
+
+// startRun runs the command line args, which serves, and waits for the
+// listen address in its banner.
+func startRun(t *testing.T, args ...string) *testServer {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	hup := make(chan os.Signal, 1)
 	ctx = context.WithValue(ctx, hupKey{}, (<-chan os.Signal)(hup))
 	ts := &testServer{stdout: &lockedBuffer{}, stderr: &lockedBuffer{}, hup: hup, cancel: cancel, done: make(chan int, 1)}
-	go func() { ts.done <- run(ctx, append([]string{"serve", "--allow-root"}, args...), ts.stdout, ts.stderr) }()
+	go func() { ts.done <- run(ctx, args, ts.stdout, ts.stderr) }()
 	t.Cleanup(func() { ts.stop(t) })
 
-	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+)`)
+	addrRE := regexp.MustCompile(`listen:\s+(127\.0\.0\.1:\d+|\[::1\]:\d+)`)
 	deadline := time.Now().Add(10 * time.Second)
 	for ts.addr == "" {
 		if m := addrRE.FindStringSubmatch(ts.stderr.String()); m != nil {
@@ -289,8 +295,7 @@ access = { data = "full" }
 	}
 	writeFile(t, path, base+"[log]\nlevel = \"debug\"\n")
 	ts.reload(t, ts.stdout.String)
-	want := strconv.Quote(`log.level = "debug" in ` + path + ` has no effect: $GOSFTPD_LOG_LEVEL overrides it`)
-	if !strings.Contains(ts.stderr.String(), want[1:len(want)-1]) {
+	if !strings.Contains(ts.stderr.String(), logged(`log.level = "debug" in `+path+` has no effect: $GOSFTPD_LOG_LEVEL overrides it`)) {
 		t.Errorf("no warning about the overridden log.level:\n%s", ts.stderr.String())
 	}
 }

@@ -46,6 +46,7 @@ const (
 	argsEnv    = "GOSFTPD_SANDBOX_ARGS" // serve's arguments, as JSON
 	rootEnv    = "GOSFTPD_SANDBOX_ROOT" // a directory the child opens as an os.Root before serving
 	swapEnv    = "GOSFTPD_SANDBOX_SWAP" // DIR=TARGET: the child swaps DIR for a link to TARGET before the rules are added
+	homeEnv    = "GOSFTPD_SANDBOX_HOME" // the directory of atmoz mode's homes, for /home
 	// replyMark starts the child's answers on its stdout, which also
 	// carries the audit log.
 	replyMark = "@@ "
@@ -95,6 +96,9 @@ func serveChild(t *testing.T) bool {
 		t.Fatal(err)
 	}
 	startSandbox = sandbox.Start // in this process only
+	if home := os.Getenv(homeEnv); home != "" {
+		atmozHome = home
+	}
 	if swap := os.Getenv(swapEnv); swap != "" {
 		dir, target, _ := strings.Cut(swap, "=")
 		startSandbox = func(ctx context.Context, o sandbox.Options) (sandbox.Result, error) {
@@ -475,19 +479,6 @@ func (sb *sandboxed) stop(t *testing.T) int {
 // audit returns the audit log on the child's stdout.
 func (sb *sandboxed) audit() string { return sb.out.String() }
 
-// sftpConn is an SFTP client with its connection.
-type sftpConn struct {
-	*sftp.Client
-	conn *ssh.Client
-}
-
-// Close closes the client and the connection; serve's shutdown would wait
-// for an open one.
-func (c *sftpConn) Close() {
-	_ = c.Client.Close()
-	_ = c.conn.Close()
-}
-
 // sftpClient logs in as user with key.
 func sftpClient(t *testing.T, addr, user string, key ssh.Signer) *sftpConn {
 	t.Helper()
@@ -541,31 +532,6 @@ func files(t *testing.T, base string, tree map[string]string) {
 				t.Fatal(err)
 			}
 		}
-	}
-}
-
-// putFile uploads data to path.
-func putFile(c *sftpConn, path, data string) error {
-	f, err := c.Create(path)
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(f, data); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-// waitLog waits until the log holds s.
-func waitLog(t *testing.T, logs func() string, s string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Minute)
-	for !strings.Contains(logs(), s) {
-		if time.Now().After(deadline) {
-			t.Fatalf("no %q in:\n%s", s, logs())
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

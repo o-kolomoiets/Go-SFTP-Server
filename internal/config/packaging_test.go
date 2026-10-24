@@ -4,13 +4,16 @@ package config
 
 import (
 	"bufio"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -169,15 +172,23 @@ func TestPackagingAgrees(t *testing.T) {
 	c, _, unix := loadPackaged(t)
 	unit := parseUnit(t, "systemd/gosftpd.service")
 
+	// The unit never reaches atmoz mode, as docs/migrate-from-atmoz.md
+	// says: --config is strict, and ProtectHome=yes hides /home, where
+	// atmoz mode looks for directories and keys (ADR 0012).
 	if got, want := unit.one(t, "Service.ExecStart"), "/usr/bin/gosftpd serve --config /etc/gosftpd/config.toml"; got != want {
 		t.Errorf("ExecStart=%s, want %s", got, want)
 	}
-	// docs/install.md is the documentation until the man page exists (M5).
-	doc := unit.one(t, "Unit.Documentation")
-	if !strings.HasPrefix(doc, "https://github.com/o-kolomoiets/go-sftp-server/blob/main/") {
-		t.Errorf("Documentation=%s", doc)
-	} else if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(strings.TrimPrefix(doc, "https://github.com/o-kolomoiets/go-sftp-server/blob/main/")))); err != nil {
-		t.Errorf("Documentation=%s: %v", doc, err)
+	if got := unit.one(t, "Service.ProtectHome"); got != "yes" {
+		t.Errorf("ProtectHome=%s, want yes", got)
+	}
+	// The man page that the packages install (make generate writes
+	// gosftpd.1), then docs/install.md (ADR 0012).
+	const blob = "https://github.com/o-kolomoiets/go-sftp-server/blob/main/"
+	doc := unit.words("Unit.Documentation")
+	if len(doc) != 2 || doc[0] != "man:gosftpd(1)" || !strings.HasPrefix(doc[1], blob) {
+		t.Errorf("Documentation=%q, want man:gosftpd(1) and a page of this repository", doc)
+	} else if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(strings.TrimPrefix(doc[1], blob)))); err != nil {
+		t.Errorf("Documentation=%s: %v", doc[1], err)
 	}
 
 	// The audit log is in LogsDirectory=, the host keys in StateDirectory=.
@@ -282,6 +293,189 @@ func TestLegacyNotifyDropIn(t *testing.T) {
 	for k, v := range want {
 		if !slices.Equal(u[k], v) {
 			t.Errorf("%s=%q, want %q", k, u[k], v)
+		}
+	}
+}
+
+// The scripts of the deb, rpm and Arch packages (ADR 0012) run in CI only on
+// the systems of the packages job; this checks what can drift without a
+// package: postinstall's probe is the documented one, no script enables,
+// starts or restarts the service, preremove skips an upgrade by "$1" and
+// disables the service also where systemd does not run, postremove deletes
+// the drop-in by the unit file and not by "$1", every file of the package
+// they use is in .goreleaser.yaml, and the deb's needrestart file names
+// exactly gosftpd.service.
+func TestPackageScripts(t *testing.T) {
+	t.Parallel()
+
+	read := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	// scripts holds each script without its comment lines.
+	scripts := map[string]string{}
+	for _, name := range []string{"postinstall", "preremove", "postremove"} {
+		s := read("packaging/scripts/" + name + ".sh")
+		if !strings.HasPrefix(s, "#!/bin/sh\n") || !strings.Contains(s, "\nset -e\n") {
+			t.Errorf("%s.sh: want #!/bin/sh and set -e", name)
+		}
+		var code strings.Builder
+		for line := range strings.Lines(s) {
+			if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+				code.WriteString(line)
+			}
+		}
+		scripts[name] = code.String()
+	}
+
+	// The probe: the same unit and the same message as docs/install.md and
+	// the comment of legacy-notify.conf.
+	probe := regexp.MustCompile(`printf '\[Unit\][^']*' >"\$d/gosftpd-probe\.service"|grep -q '[^']*'`)
+	want := probe.FindAllString(read("docs/install.md"), -1)
+	if len(want) != 2 {
+		t.Fatalf("docs/install.md: the probe has %q", want)
+	}
+	for name, text := range map[string]string{"postinstall.sh": scripts["postinstall"], "legacy-notify.conf": read("packaging/systemd/legacy-notify.conf")} {
+		if got := probe.FindAllString(text, -1); !slices.Equal(got, want[:len(got)]) || len(got) == 0 {
+			t.Errorf("%s: the probe is %q, docs/install.md's %q", name, got, want)
+		}
+	}
+
+	// systemctl: only daemon-reload, and on a removal disable --now where
+	// systemd runs, else disable, which needs no running systemd (an image
+	// build, a chroot). "command -v systemctl" is a guard, not a call.
+	systemctl := regexp.MustCompile(`\bcommand -v systemctl\b|\bsystemctl((?:\s+-{0,2}[a-z][a-z.-]*)*)`)
+	allowed := map[string][]string{
+		"postinstall": {"daemon-reload"},
+		"preremove":   {"disable --now gosftpd.service", "disable gosftpd.service"},
+		"postremove":  {"daemon-reload"},
+	}
+	for name, s := range scripts {
+		var calls []string
+		for _, m := range systemctl.FindAllStringSubmatch(s, -1) {
+			if !strings.HasPrefix(m[0], "command") {
+				calls = append(calls, strings.TrimSpace(m[1]))
+			}
+		}
+		if !slices.Equal(calls, allowed[name]) {
+			t.Errorf("%s.sh runs systemctl %q, want only %q", name, calls, allowed[name])
+		}
+		for _, verb := range []string{"service gosftpd", "invoke-rc.d", "deb-systemd-invoke", "try-restart"} {
+			if strings.Contains(s, verb) {
+				t.Errorf("%s.sh uses %s", name, verb)
+			}
+		}
+	}
+	if !strings.Contains(scripts["preremove"], "case \"$1\" in\nupgrade | failed-upgrade | 1) exit 0 ;;\nesac\n") {
+		t.Error(`preremove.sh does not skip an upgrade: deb passes "upgrade" and rpm 1`)
+	}
+	if strings.Contains(scripts["postremove"], "$1") ||
+		!regexp.MustCompile(`(?s)\nif \[ ! -e /usr/lib/systemd/system/gosftpd\.service \]; then\n\trm -f /etc/systemd/system/gosftpd\.service\.d/legacy-notify\.conf\n.*?\nfi\n`).MatchString(scripts["postremove"]) {
+		t.Error("postremove.sh must delete the drop-in only once the unit file is gone, not by $1")
+	}
+
+	// The files of the package that the scripts use.
+	goreleaser := read(".goreleaser.yaml")
+	for _, p := range regexp.MustCompile(`/(?:etc/gosftpd|usr)/[A-Za-z0-9/._-]+`).FindAllString(strings.Join(slices.Collect(maps.Values(scripts)), "\n"), -1) {
+		if !strings.Contains(goreleaser, "dst: "+p+",") && !strings.Contains(goreleaser, "dst: "+p+" ") {
+			t.Errorf("the scripts use %s, which .goreleaser.yaml does not install", p)
+		}
+	}
+
+	// needrestart reads Perl; the regular expression is also Go's.
+	m := regexp.MustCompile(`(?m)^\$nrconf\{override_rc\}\{qr\((.+)\)\} = 0;$`).FindStringSubmatch(read("packaging/needrestart.conf"))
+	if m == nil {
+		t.Fatal("packaging/needrestart.conf does not set $nrconf{override_rc}{qr(...)} = 0")
+	}
+	re := regexp.MustCompile(m[1])
+	for unit, match := range map[string]bool{"gosftpd.service": true, "xgosftpd.service": false, "gosftpdXservice": false, "gosftpd.service.d": false} {
+		if re.MatchString(unit) != match {
+			t.Errorf("needrestart.conf: qr(%s) matches %s: %t", m[1], unit, !match)
+		}
+	}
+}
+
+// license is what go-licenses v2.0.1 passes to a report template for each
+// module and license (libraryDataFlat in its report.go).
+type license struct {
+	Name, Version, LicensePath, LicenseURL, LicenseName string
+}
+
+func (l license) LicenseText() (string, error) {
+	data, err := os.ReadFile(l.LicensePath)
+	return string(data), err
+}
+
+// The template of THIRD_PARTY_LICENSES prints each module once, with its
+// version, license and license text, never the URL that go-licenses looks
+// up online, and libcap/psx, which go-licenses lists under both of its
+// licenses, only under BSD-3-Clause (ADR 0012).
+func TestThirdPartyLicensesTemplate(t *testing.T) {
+	t.Parallel()
+
+	tpl, err := os.ReadFile(filepath.Join(packaging, "third_party_licenses.tpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := template.New("").Parse(string(tpl)) // as go-licenses parses it
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// The names differ in more than case: macOS and Windows file systems
+	// ignore case.
+	file := func(name, text string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	toml := license{"github.com/BurntSushi/toml", "v1.6.0", file("toml-COPYING", "MIT text\n"), "https://example.com/toml", "MIT"}
+	psx := file("psx-License", "BSD-3-Clause or GPL-2.0 text\n")
+	psxGPL := license{"kernel.org/pub/linux/libs/security/libcap/psx", "v1.2.77", psx, "Unknown", "GPL-2.0"}
+	psxBSD := psxGPL
+	psxBSD.LicenseName = "BSD-3-Clause"
+	sys := license{"golang.org/x/sys", "v0.49.0", file("sys-LICENSE", "BSD text without a final newline"), "https://example.com/sys", "BSD-3-Clause"}
+	other := license{"example.com/other", "v1.0.0", file("other-LICENSE", "Apache text\n"), "Unknown", "Apache-2.0"}
+
+	entry := func(l license, text string) string {
+		return "\n" + strings.Repeat("=", 80) + "\n" + l.Name + " " + l.Version + "\nLicense: " + l.LicenseName + "\n\n" + text
+	}
+	header := "gosftpd is licensed under the Apache License 2.0 (see LICENSE). Its binary\n" +
+		"includes the following Go modules and, last, the Go standard library and\n" +
+		"runtime, each under the license named with it.\n"
+	for _, tt := range []struct {
+		name string
+		libs []license
+		want string
+	}{
+		{
+			"go-licenses' order",
+			[]license{toml, psxGPL, psxBSD, sys, other},
+			header + entry(toml, "MIT text\n") + entry(psxBSD, "BSD-3-Clause or GPL-2.0 text\n") +
+				entry(sys, "BSD text without a final newline") + entry(other, "Apache text\n"),
+		},
+		{
+			"psx BSD first",
+			[]license{psxBSD, psxGPL, toml},
+			header + entry(psxBSD, "BSD-3-Clause or GPL-2.0 text\n") + entry(toml, "MIT text\n"),
+		},
+		{"none", nil, header},
+	} {
+		var out strings.Builder
+		if err := tmpl.Execute(&out, tt.libs); err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if out.String() != tt.want {
+			t.Errorf("%s:\n%s\nwant:\n%s", tt.name, out.String(), tt.want)
+		}
+		if strings.Contains(out.String(), "example.com/toml") || strings.Contains(out.String(), "Unknown") {
+			t.Errorf("%s: the output names a license URL:\n%s", tt.name, out.String())
 		}
 	}
 }

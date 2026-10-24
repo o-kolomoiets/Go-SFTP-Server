@@ -155,6 +155,10 @@ func TestHealthcheckAddress(t *testing.T) {
 	if code, _, stderr := healthcheck(t, "--config", filepath.Join(dir, "missing.toml")); code != exitFailure || !strings.Contains(stderr, "--config") {
 		t.Errorf("missing --config: exit %d: %s", code, stderr)
 	}
+	// A directory, as Docker creates for a missing host file.
+	if code, _, stderr := healthcheck(t, "--config", dir); code != exitFailure || !strings.Contains(stderr, "--config: "+dir+" is a directory") {
+		t.Errorf("--config a directory: exit %d: %s", code, stderr)
+	}
 }
 
 func TestHealthcheckURL(t *testing.T) {
@@ -192,7 +196,7 @@ func TestHealthcheckUsage(t *testing.T) {
 		want string
 	}{
 		{[]string{"--bogus"}, "unknown flag"},
-		{[]string{"extra"}, "unexpected argument"},
+		{[]string{"extra"}, `unknown command "extra" for "gosftpd healthcheck"`},
 		{[]string{"--timeout", "0s"}, "--timeout must be between"},
 		{[]string{"--timeout", "soon"}, "invalid argument"},
 		{[]string{"--url", "http://127.0.0.1:1/readyz", "--ready"}, "cannot be used with"},
@@ -207,6 +211,25 @@ func TestHealthcheckUsage(t *testing.T) {
 	}
 	if code, stdout, _ := healthcheck(t, "--help"); code != exitOK || !strings.Contains(stdout, "Docker reserves 2") {
 		t.Errorf("--help: exit %d", code)
+	}
+}
+
+// TestHealthcheckSpecNotShown: an argument with ':' may be an atmoz user
+// spec with its password, given after the command by mistake (docker run
+// IMAGE healthcheck foo:pass:::upload). healthcheck gives its position
+// only, as every other command does (noArgs, ADR 0012), and still exits
+// with 1.
+func TestHealthcheckSpecNotShown(t *testing.T) {
+	isolate(t)
+	for _, spec := range []string{"foo:" + pw + ":::upload", "foo:" + pw} {
+		code, stdout, stderr := healthcheck(t, spec)
+		want := "unknown command (argument 1, not shown: it looks like an atmoz user spec; give specs directly after the image name, without 'healthcheck')\n"
+		if code != exitFailure || stdout != "" || stderr != want {
+			t.Errorf("%q: exit %d, stdout %q, stderr %q; want exit 1 and %q", spec, code, stdout, stderr, want)
+		}
+		if strings.Contains(stderr, pw) {
+			t.Errorf("%q: stderr shows the password: %q", spec, stderr)
+		}
 	}
 }
 

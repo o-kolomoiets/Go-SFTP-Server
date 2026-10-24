@@ -22,7 +22,33 @@ Unknown keys are an error, and keys are case-sensitive (`Path` is not
 4. `/etc/gosftpd/config.toml` (not on Windows);
 5. `<user config dir>/gosftpd/config.toml` (`~/.config/gosftpd/` on Linux).
 
-With `--dir`, no file is read: see [Zero-config](#zero-config).
+A file that `--config` or `$GOSFTPD_CONFIG` names must exist and must not
+be a directory. The search takes the first path that exists and stops at
+an error other than "not found"; a directory is one, with a hint, since
+Docker creates one where the host file of a bind mount is missing. There
+is one exception: when the working directory cannot be searched, as with
+`sudo -u gosftpd` run from `/root` or in a container started with
+`--user`, `./gosftpd.toml` counts as not found and the search goes on; if
+it finds nothing, the error says that `./gosftpd.toml` was not checked. A `./gosftpd.toml` that can be seen but
+not reached, such as a symlink into a directory the user cannot search,
+stays an error: the search never quietly takes another file, least of all
+for the commands that write it (`user add --write`, `user disable`,
+`hostkey`).
+
+When no file is found, `serve` and `config validate` exit with status 2
+and a hint: create one with `gosftpd init`, whose `./gosftpd.toml` the
+search finds, or serve a directory with `--dir`, and with Docker the
+commands of [install.md](install.md#docker). Only then does `serve` look
+for the users of atmoz/sftp: given `--users-conf`, `$SFTP_USERS` or, in
+the container image, `/etc/sftp/users.conf`, it serves them in
+[atmoz mode](#atmoz-mode) instead. In the image, an `/etc/gosftpd` without
+`config.toml` is a mount whose host path is wrong, and exits 2 even then.
+With a configuration file, `--dir` or `--ephemeral`, `$SFTP_USERS` and the
+image's users file are ignored, with a warning that does not show what
+they hold.
+
+With `--dir`, no file is read: see [Zero-config](#zero-config); nor with
+`--ephemeral`: see [Ephemeral mode](#ephemeral-mode).
 
 Precedence, highest first: command-line flags that were given explicitly, the
 environment (`GOSFTPD_LISTEN` with comma-separated addresses,
@@ -332,6 +358,12 @@ time still take equally long, but parallel attempts can tell users of the
 cheaper hashes apart, and every failed attempt takes as long as the
 costliest hash; `config validate` warns about this. Re-hash imported
 passwords with `gosftpd user hash-password` when you can.
+
+Without a file, two modes log users in with passwords:
+[ephemeral mode](#ephemeral-mode) gives its user `test` a random password
+next to a key, and [atmoz mode](#atmoz-mode) turns password logins on for
+the users whose spec has one, a plain password or a hash. A plain password
+is hashed with argon2id at start; only the hash stays, in memory.
 
 ### Certificates
 
@@ -958,6 +990,140 @@ line has none.
 
 `gosftpd serve` refuses to run as root (exit code 2) unless `--allow-root`
 is given: run it as a dedicated user.
+
+## Ephemeral mode
+
+`gosftpd serve --ephemeral` runs a throwaway server for tests, without a
+file. It creates a directory of its own in `$TMPDIR` (DIR below) and serves
+`DIR/data`, or the one directory that `--dir` names, as `/` to one user,
+`test`, with full access. `test` logs in with a random password or with a
+new ed25519 key, written as `DIR/id_ed25519` (mode 0600, in a directory of
+mode 0700); the host key exists only in memory. Once it serves, gosftpd
+prints the connection details as one JSON line on stdout, and nothing else
+goes there:
+
+```json
+{"host":"127.0.0.1","port":40123,"user":"test","password":"…","private_key_path":"/tmp/gosftpd-ephemeral-123/id_ed25519","dir":"/tmp/gosftpd-ephemeral-123/data","host_key_fingerprint":"SHA256:…","known_hosts":"[127.0.0.1]:40123 ssh-ed25519 AAAA…","pid":4242,"version":"v0.5.0"}
+```
+
+`host` and `port` are the listener's, with `127.0.0.1` for an unspecified
+address; `dir` is the directory served; `known_hosts` is a line for
+`UserKnownHostsFile`; `pid` is the process to stop. Later versions may add
+fields, but never remove or rename one. A start that fails prints no line.
+
+- It listens on `127.0.0.1:0`, a free port, unless `--listen`, given once,
+  names another address. `$GOSFTPD_LISTEN` and `$GOSFTPD_CONFIG` are
+  ignored, with a warning.
+- `--read-only`, `--on-conflict` and the log flags work as for `serve`.
+  Logs and the audit log go to stderr, or the audit log to the file that
+  `--audit-output` names; `--audit-output stdout` is refused. `--config`,
+  `--users-conf`, `--authorized-keys`, `--user`, `--host-key` and
+  `--state-dir` cannot be used with it.
+- A SIGHUP is logged and ignored: a new configuration would change the
+  password and both keys.
+- On SIGINT or SIGTERM gosftpd stops as `serve` does, then deletes the key
+  and `DIR/data`, never a directory that `--dir` names. Under Landlock DIR
+  itself stays, empty ([security.md](security.md#ephemeral-mode)); without
+  it, DIR goes too. A process that is killed leaves everything in
+  `$TMPDIR`.
+- Like `serve`, it refuses to run as root without `--allow-root`, which a
+  CI container that runs as root needs.
+
+### In GitHub Actions
+
+A job can start the server in one step and use it in the next ones. The
+step waits for the line, masks the password in the log with
+`::add-mask::` before it goes anywhere, and passes the details on in
+`$GITHUB_ENV`:
+
+```yaml
+    steps:
+      - name: Start an SFTP server
+        run: |
+          V=0.5.0
+          base=https://github.com/o-kolomoiets/Go-SFTP-Server/releases/download/v$V
+          curl -fsSL -O "$base/gosftpd_${V}_linux_amd64.tar.gz" -O "$base/checksums.txt"
+          sha256sum --check --ignore-missing checksums.txt
+          tar -xzf "gosftpd_${V}_linux_amd64.tar.gz" -C "$RUNNER_TEMP" gosftpd
+          "$RUNNER_TEMP/gosftpd" serve --ephemeral >"$RUNNER_TEMP/sftp.json" 2>"$RUNNER_TEMP/sftp.log" &
+          for _ in $(seq 100); do
+            jq -e .port "$RUNNER_TEMP/sftp.json" >/dev/null 2>&1 && break
+            sleep 0.1
+          done
+          if ! jq -e .port "$RUNNER_TEMP/sftp.json" >/dev/null 2>&1; then cat "$RUNNER_TEMP/sftp.log"; exit 1; fi
+          password=$(jq -r .password "$RUNNER_TEMP/sftp.json")
+          echo "::add-mask::$password"
+          echo "SFTP_PASSWORD=$password" >>"$GITHUB_ENV"
+          jq -r '"SFTP_HOST=\(.host)", "SFTP_PORT=\(.port)", "SFTP_USER=\(.user)", "SFTP_KEY=\(.private_key_path)", "SFTP_PID=\(.pid)"' \
+            "$RUNNER_TEMP/sftp.json" >>"$GITHUB_ENV"
+          jq -r .known_hosts "$RUNNER_TEMP/sftp.json" >"$RUNNER_TEMP/known_hosts"
+      - name: Tests
+        run: |
+          # A library takes $SFTP_HOST, $SFTP_PORT, $SFTP_USER and $SFTP_PASSWORD; OpenSSH takes the key:
+          echo "put README.md" | sftp -b - -i "$SFTP_KEY" -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -P "$SFTP_PORT" "$SFTP_USER@$SFTP_HOST"
+      - name: Stop the SFTP server
+        if: always() && env.SFTP_PID != ''
+        run: |
+          kill "$SFTP_PID"
+          while kill -0 "$SFTP_PID" 2>/dev/null; do sleep 0.1; done
+```
+
+The server runs until the last step stops it, which deletes the key and
+the data; the runner kills it at the end of the job otherwise. Its log is
+in `$RUNNER_TEMP/sftp.log`.
+
+### In a container
+
+In a container, `127.0.0.1:0` cannot be reached from outside, and
+`private_key_path` is a path in the container. Listen on `0.0.0.0:2022`,
+map the port, and copy the key out with `docker cp`: the image has no shell
+or `cat` for `docker exec`.
+
+```sh
+docker run -d --name sftp-test -p 127.0.0.1:2022:2022 ghcr.io/o-kolomoiets/gosftpd:v0.5.0 \
+  serve --ephemeral --listen 0.0.0.0:2022
+until docker logs sftp-test 2>/dev/null | grep -q .; do sleep 0.1; done
+docker logs sftp-test 2>/dev/null >sftp.json   # stdout only: the line
+docker cp "sftp-test:$(jq -r .private_key_path sftp.json)" ./id_ed25519
+jq -r .known_hosts sftp.json >known_hosts
+sftp -i ./id_ed25519 -o UserKnownHostsFile=./known_hosts -P 2022 test@127.0.0.1
+docker stop sftp-test && docker rm sftp-test
+```
+
+The line names the container's port and `127.0.0.1`, which hold on the
+host as long as the same port is mapped on the host's `127.0.0.1`, as
+here. Without a configuration file the image's health check probes port
+2022, so the container turns `healthy`. Libraries such as Testcontainers
+that start atmoz/sftp with a user spec can start gosftpd's image with the
+same spec instead, on container port 2022
+([migrate-from-atmoz.md](migrate-from-atmoz.md)).
+
+## Atmoz mode
+
+`gosftpd` serves the users of atmoz/sftp's user specs,
+`user:pass[:e][:uid[:gid[:dir1[,dir2]...]]]`, as the atmoz/sftp image
+does, without a file. The specs come as arguments to `gosftpd` itself
+(`gosftpd foo:pass:::upload`, which is what `docker run IMAGE
+foo:pass:::upload` runs), in `$SFTP_USERS`, or in a users file with one
+spec per line (`--users-conf FILE`; in the container image
+`/etc/sftp/users.conf` when it exists). Specs as arguments start atmoz
+mode, and a configuration file that the search finds or `$GOSFTPD_CONFIG`
+names is then ignored, with a warning; the other sources only when `serve`
+finds no file ([Where the file comes from](#where-the-file-comes-from)).
+
+User `foo` with directory `upload` sees `/upload`, stored in
+`/home/foo/upload`, under a read-only `/`, and logs in with the files in
+`/home/foo/.ssh/keys/` or with the spec's password. A plain password is
+hashed with argon2id at start, and gosftpd warns that it is visible to
+whoever can read the process's arguments or environment (`docker
+inspect`); with `:e` the spec holds an argon2id or bcrypt hash instead, as
+`gosftpd user hash-password` makes it. Uploads overwrite an existing file
+unless `--on-conflict` says otherwise. The users, their keys and their
+directories are read once, at start: a SIGHUP is logged and ignored, and a
+change takes a restart. No message shows a password, a hash or a spec. The
+examples of atmoz's README, the flags and what differs from atmoz are in
+[migrate-from-atmoz.md](migrate-from-atmoz.md).
 
 ## Commands
 
