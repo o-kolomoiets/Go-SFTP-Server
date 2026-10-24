@@ -718,15 +718,16 @@ func (p *planner) elsewhere() string {
 // remove_dir, through the descriptor it holds. The directory holds
 // nothing else, and itself stays: removing it would need remove_dir on
 // its parent, $TMPDIR, which would let gosftpd remove other empty
-// directories there (ADR 0012).
+// directories there (ADR 0012). A directory under /dev or /proc, where
+// no rule can be placed, fails the start: gosftpd could neither remove
+// the key nor serve the data there.
 func (p *planner) ephemeralRule() error {
 	if p.c.EphemeralDir == "" {
 		return nil
 	}
 	dir := filepath.Clean(p.c.EphemeralDir)
 	if p.special(dir) {
-		p.notes = append(p.notes, &note{text: keyEphemeral + ": " + dir + " is under /dev or /proc, which never get a Landlock rule: the client key and the data stay there at exit; set TMPDIR to another directory"})
-		return nil
+		return errors.New(keyEphemeral + ": " + dir + " is under /dev or /proc, which never get a Landlock rule; set TMPDIR to another directory")
 	}
 	r, err := p.resolve(dir)
 	switch {
@@ -737,8 +738,7 @@ func (p *planner) ephemeralRule() error {
 	case isRoot(r.path):
 		return &RootError{Key: keyEphemeral}
 	case p.special(r.path):
-		p.notes = append(p.notes, &note{text: keyEphemeral + ": " + dir + " resolves to " + r.path + " under /dev or /proc, which never get a Landlock rule: the client key and the data stay there at exit; set TMPDIR to another directory"})
-		return nil
+		return errors.New(keyEphemeral + ": " + dir + " resolves to " + r.path + " under /dev or /proc, which never get a Landlock rule; set TMPDIR to another directory")
 	}
 	rule := Rule{Path: r.path, Open: r.path, Rights: RemoveFile | RemoveDir, Dir: true, Dev: r.info.Dev, Ino: r.info.Ino, For: []string{keyEphemeral}}
 	if held := p.in.Ephemeral; held != nil {

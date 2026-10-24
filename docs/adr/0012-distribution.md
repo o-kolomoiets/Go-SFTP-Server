@@ -1174,7 +1174,13 @@ For persona U3: a throwaway server for tests, with the details on stdout.
   gosftpd created and which holds only `data/` and the key. `DIR` itself
   then stays, empty: removing it would need remove-dir on `$TMPDIR`, which
   would let gosftpd remove other empty directories there. Without Landlock
-  `DIR` is removed too. A killed process leaves everything in `$TMPDIR`.
+  `DIR` is removed too. Nothing under `/dev` or `/proc` gets a rule: with
+  `$TMPDIR` there (`/dev/shm`, a common RAM disk) or a link there,
+  gosftpd under Landlock could neither remove the key nor serve
+  `DIR/data`, so the start fails as a failed sandbox step does (exit 1, no
+  line, `DIR` removed) and says to set `TMPDIR` to another directory;
+  without Landlock it serves there. A killed process leaves everything in
+  `$TMPDIR`.
   An e2e test on Linux checks that the key and `data/` are gone after
   SIGTERM; docs/security.md lists the rule.
 - **Root.** The refusal to run as root stays; its hint names

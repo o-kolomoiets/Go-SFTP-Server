@@ -90,3 +90,37 @@ func TestLandlockEphemeral(t *testing.T) {
 		t.Errorf("client key: %v", err)
 	}
 }
+
+// TestLandlockEphemeralUnderDev: with $TMPDIR under /dev (/dev/shm, a
+// common RAM disk), or a link there, serve --ephemeral's directory gets no
+// Landlock rule, and under Landlock it could neither serve its data nor
+// remove its client key: the start fails without the line, says to set
+// TMPDIR to another directory and removes the directory.
+func TestLandlockEphemeralUnderDev(t *testing.T) {
+	t.Parallel()
+	if serveChild(t) {
+		return
+	}
+	shm, err := os.MkdirTemp("/dev/shm", "gosftpd-test-") //nolint:usetesting // t.TempDir is under $TMPDIR, this one must be under /dev
+	if err != nil {
+		missing(t, "no /dev/shm: "+err.Error())
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(shm) })
+	link := filepath.Join(t.TempDir(), "shm")
+	if err := os.Symlink(shm, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tmp := range []string{shm, link} {
+		sb := startSandboxed(t, sandboxOpts{args: []string{"--ephemeral"}, env: []string{"TMPDIR=" + tmp}, failing: true})
+		if logs := sb.logs(); sb.code != exitFailure || !strings.Contains(logs, "Error: landlock: failed: --ephemeral: "+tmp+"/gosftpd-ephemeral-") ||
+			!strings.Contains(logs, "under /dev or /proc, which never get a Landlock rule; set TMPDIR to another directory") {
+			t.Errorf("TMPDIR=%s: exit %d:\n%s", tmp, sb.code, logs)
+		}
+		if strings.Contains(sb.out.String(), `{"host":`) {
+			t.Errorf("TMPDIR=%s: the line was printed:\n%s", tmp, sb.out.String())
+		}
+		if got := entries(t, shm); len(got) != 0 {
+			t.Errorf("TMPDIR=%s: %s holds %v", tmp, shm, got)
+		}
+	}
+}

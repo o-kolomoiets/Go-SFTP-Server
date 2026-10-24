@@ -5,6 +5,7 @@
 package sandbox
 
 import (
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -105,35 +106,30 @@ func TestAtmozUnderDev(t *testing.T) {
 		"atmoz directory /home/foo/dev: /home/foo/dev resolves to /dev/shm under /dev or /proc, which never get a Landlock rule: the mount cannot be used; make it a directory, or mount one there")
 }
 
-// TestEphemeralUnderDev: with $TMPDIR under /dev, serve --ephemeral's
-// directory and its data get no rule, and the warnings say what to do.
+// TestEphemeralUnderDev: with $TMPDIR under /dev, or a link there, serve
+// --ephemeral's directory gets no rule, and under Landlock gosftpd could
+// neither remove its client key nor serve its data there: the start fails
+// and says to set TMPDIR elsewhere, also with --dir serving another
+// directory.
 func TestEphemeralUnderDev(t *testing.T) {
 	t.Parallel()
-	m := newMemFS(t).dirs("/proc/self", "/dev/shm/gosftpd-ephemeral-1/data", "/srv/share")
-	c := config.Default()
-	c.EphemeralDir = "/dev/shm/gosftpd-ephemeral-1"
-	c.AddMount("data", "/dev/shm/gosftpd-ephemeral-1/data")
-	in := input(t, m, c)
-	in.Linux = true
-	checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro},
-		"--ephemeral data: /dev/shm/gosftpd-ephemeral-1/data is under /dev or /proc, which never get a Landlock rule: the mount cannot be used; set TMPDIR to another directory, or serve another one with --dir",
-		"--ephemeral: /dev/shm/gosftpd-ephemeral-1 is under /dev or /proc, which never get a Landlock rule: the client key and the data stay there at exit; set TMPDIR to another directory")
-
-	c = config.Default()
-	c.EphemeralDir = "/dev/shm/gosftpd-ephemeral-1"
-	c.AddMount("share", "/srv/share")
-	in = input(t, m, c)
-	in.Linux = true
-	checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro, "dir /srv/share " + rw},
-		"--ephemeral: /dev/shm/gosftpd-ephemeral-1 is under /dev or /proc")
-
-	// $TMPDIR a link to /dev/shm.
-	m.symlink("/tmp/shm", "/dev/shm")
-	c.EphemeralDir = "/tmp/shm/gosftpd-ephemeral-1"
-	in = input(t, m, c)
-	in.Linux = true
-	checkPlan(t, compute(t, in), []string{"dir /proc/self " + ro, "dir /srv/share " + rw},
-		"--ephemeral: /tmp/shm/gosftpd-ephemeral-1 resolves to /dev/shm/gosftpd-ephemeral-1 under /dev or /proc, which never get a Landlock rule: the client key and the data stay there at exit; set TMPDIR to another directory")
+	m := newMemFS(t).dirs("/proc/self", "/dev/shm/gosftpd-ephemeral-1/data", "/srv/share").symlink("/tmp/shm", "/dev/shm")
+	const why = " under /dev or /proc, which never get a Landlock rule; set TMPDIR to another directory"
+	for _, tt := range []struct{ dir, mount, want string }{
+		{"/dev/shm/gosftpd-ephemeral-1", "/dev/shm/gosftpd-ephemeral-1/data", "--ephemeral: /dev/shm/gosftpd-ephemeral-1 is" + why},
+		{"/dev/shm/gosftpd-ephemeral-1", "/srv/share", "--ephemeral: /dev/shm/gosftpd-ephemeral-1 is" + why},
+		{"/tmp/shm/gosftpd-ephemeral-1", "/tmp/shm/gosftpd-ephemeral-1/data", "--ephemeral: /tmp/shm/gosftpd-ephemeral-1 resolves to /dev/shm/gosftpd-ephemeral-1" + why},
+		{"/tmp/shm/gosftpd-ephemeral-1", "/srv/share", "--ephemeral: /tmp/shm/gosftpd-ephemeral-1 resolves to /dev/shm/gosftpd-ephemeral-1" + why},
+	} {
+		c := config.Default()
+		c.EphemeralDir = tt.dir
+		c.AddMount(filepath.Base(tt.mount), tt.mount)
+		in := input(t, m, c)
+		in.Linux = true
+		if p, err := Compute(in); err == nil || err.Error() != tt.want {
+			t.Errorf("%s, mount %s: Compute = %v, %v\nwant %s", tt.dir, tt.mount, describe(p.Rules), err, tt.want)
+		}
+	}
 }
 
 // TestResolverWarnings: a name-resolution file replaced after start is
