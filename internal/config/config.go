@@ -88,7 +88,8 @@ type InlinedFile struct {
 	Path string
 	What string // for messages, such as "the atmoz users file"
 	// Secret marks a file with passwords or hashes, which no mount may
-	// cover, a read-only one included.
+	// cover, a read-only one included, and which CheckFS warns about when
+	// all users can read it.
 	Secret bool
 }
 

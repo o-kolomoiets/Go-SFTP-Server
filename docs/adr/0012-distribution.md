@@ -1354,7 +1354,10 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   a password as an argument): a warning names the source and position and
   points to `:e` with an argon2id hash or to keys. When plain and hashed
   passwords are mixed, the warning `config validate` gives for hashes of
-  different classes is logged too.
+  different classes is logged too. A users file that all users can read
+  is warned about, as a configuration file is (`CheckFS`), with a fix
+  that keeps it readable to gosftpd: `chown root:65532` and `chmod 0640`
+  (the group gosftpd runs as).
 - **Port 2022:** the container listens on 2022, so atmoz's `-p 22:22`
   becomes `-p 22:2022` and `-p 2222:22` becomes `-p 2222:2022`. The DoD
   says "the user spec `foo:pass:::upload` works unchanged".

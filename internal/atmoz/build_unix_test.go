@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -72,4 +73,24 @@ func TestBuildUnopenable(t *testing.T) {
 	}
 	// CheckFS leaves the unavailable mount out and passes the other.
 	validate(t, c)
+}
+
+// TestBuildUsersFileReadable: the users file holds passwords or their
+// hashes, so one that all users can read is warned about, as a
+// configuration file is, with a fix that keeps it readable to gosftpd's
+// group; the mode the migration guide gives, 0640, passes.
+func TestBuildUsersFileReadable(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "users.conf")
+	write(t, file, "foo:"+secret+":::up\n")
+	want := "the atmoz users file " + file + ": readable by all users, and it holds passwords or their hashes; let only gosftpd's group read it: chown root:" + strconv.Itoa(os.Getegid()) + " and chmod 0640 the file"
+	for mode, warned := range map[os.FileMode]bool{0o644: true, 0o640: false, 0o600: false} {
+		if err := os.Chmod(file, mode); err != nil {
+			t.Fatal(err)
+		}
+		m := build(t, Options{UsersFile: file, Home: t.TempDir()})
+		if warns := validate(t, m.Config); hasWarning(warns, want) != warned || hasWarning(warns, "readable") != warned {
+			t.Errorf("mode %04o: warnings %q", mode, warns)
+		}
+	}
 }

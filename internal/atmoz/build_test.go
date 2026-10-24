@@ -140,6 +140,9 @@ func TestBuildUsersFile(t *testing.T) {
 	home := t.TempDir()
 	file := filepath.Join(t.TempDir(), "users.conf")
 	write(t, file, "# atmoz users\n\nfoo:123:1001:100\r\n  # indented comment\nbar:abc:1002:100\nbaz:xyz:1003:100\n\t\n")
+	if err := os.Chmod(file, 0o640); err != nil { // not readable by all: no warning
+		t.Fatal(err)
+	}
 	m := build(t, Options{UsersFile: file, Args: []string{"foo:" + secret + ":::x", "qux:" + secret}, Env: "bar:" + secret + "\nquux:" + secret + "  baz:" + secret, Home: home, Discover: true})
 	c := m.Config
 	if got := slices.Sorted(maps.Keys(c.Users)); !slices.Equal(got, []string{"bar", "baz", "foo", "quux", "qux"}) {

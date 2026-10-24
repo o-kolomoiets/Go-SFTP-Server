@@ -60,6 +60,17 @@ func (c *Config) checkFS(reload bool, live []LiveMount) (warnings, unavailable [
 			p.warnf(f, "readable by all users; consider chmod o-r")
 		}
 	}
+	// The atmoz users file holds passwords: it gets the same warning, with
+	// a fix that keeps it readable to gosftpd, which in the image does not
+	// own it.
+	for _, f := range c.Inlined {
+		if !f.Secret {
+			continue
+		}
+		if fi, err := os.Stat(f.Path); err == nil && worldReadable(fi) {
+			p.warnf(f.What+" "+f.Path, "readable by all users, and it holds passwords or their hashes; let only gosftpd's group read it: chown root:%d and chmod 0640 the file (for a bind mount, the host file)", os.Getegid())
+		}
+	}
 	unavailable = c.checkMounts(p, reload)
 	if !reload {
 		c.checkHostKeys(p)
