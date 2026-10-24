@@ -18,6 +18,11 @@ does not trust (refused after the banner, `untrusted_proxy`), and runs
 `gosftpd healthcheck` from a trusted loopback address (it sends a `LOCAL`
 header) and from one that is not trusted.
 
+OpenSSH `sftp` also logs in to atmoz mode, with the user specs of the
+atmoz/sftp README: in a Go test against the server in process, and in the
+`docker` CI job against the image on amd64 and arm64
+(`test/docker/atmoz.sh`, see [migrate-from-atmoz.md](migrate-from-atmoz.md)).
+
 WinSCP, FileZilla and Cyberduck are not tested automatically yet; WinSCP has
 a manual checklist below.
 
