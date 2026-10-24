@@ -2,11 +2,11 @@
 
 - **Status:** accepted, 2026-10-23; amends ROADMAP §4.5 (tool versions),
   §5 M5 (items, Definition of Done, the estimate: 9–12 pd), §6.7 (the
-  root-level spec form), §9.1, §9.3, §9.4, §9.5, §9.6 (the local
-  snapshot), §10 (the Docker Quickstart mounts a directory), the post-1.0
-  backlog and decision D13, ADR 0011 (the unit's `Documentation=`; the
-  packages remove the legacy drop-in only once the unit is gone) and
-  docs/release-checklist.md
+  root-level spec form), §8.4 (the CI gates), §9.1, §9.3, §9.4, §9.5, §9.6
+  (the local snapshot), §10 (the Docker Quickstart mounts a directory),
+  the post-1.0 backlog and decision D13, ADR 0011 (the unit's
+  `Documentation=`; the packages remove the legacy drop-in only once the
+  unit is gone) and docs/release-checklist.md
 - **Context:** ROADMAP M5 asks for a full `.goreleaser.yaml`, a distroless
   image in GHCR, deb, rpm, apk and Arch packages, keyless cosign
   signatures, SBOMs, attestations, signed git tags, `THIRD_PARTY_LICENSES`,

@@ -1269,7 +1269,12 @@ Upstream does not fuzz the server side of `pkg/sftp`: OSS-Fuzz and CIFuzz run on
 | Vulnerabilities | `golang/govulncheck-action` v1; weekly on `main`; `govulncheck -mode=binary` for the release binary | PR + cron | yes |
 | CodeQL (default setup), `actions/dependency-review-action` v5 | CodeQL: the ruleset rule "Require code scanning results"; dependency review: job `deps-review` | PR | yes |
 | Minimum coverage thresholds | security packages, a step in job `test` | PR, from M3 | yes |
-| `goreleaser release --snapshot --skip=publish,sign,sbom` | | PR, from M2 | yes |
+| `goreleaser release --snapshot --clean --skip=sign`: the archives, packages, SBOMs and both images, checked | job `goreleaser-check` (GoReleaser v2.19.0, syft, BuildKit pinned by digest) | PR, from M2; packages, SBOMs and images from M5 | yes |
+| Reproducible builds | two cold snapshot builds compared, job `reproducible` (ADR 0012) | PR, from M5 | yes |
+| Packages | deb, rpm and Arch installed, reloaded, upgraded and removed under systemd, job `packages` (`test/packages/`) | PR, from M5 | yes |
+| Container image | the documented Docker commands and the atmoz/sftp examples against the image, job `docker` (`test/docker/`) | PR, from M5 | yes |
+| systemd unit | the packaged unit under the runner's systemd, job `systemd` (`test/systemd/run.sh`) | PR, from M4 | yes |
+| ssh-audit | `modern` without a fail, `compat` with only the documented ones, job `ssh-audit` | PR, from M3 | yes |
 | Fuzz smoke | 60 s per target, job `fuzz-smoke` | PR, from M3 | yes |
 | Fuzz | 10 minutes per target | nightly | issue |
 | Scorecard | `ossf/scorecard-action` v2.4.4 | weekly | no |
