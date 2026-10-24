@@ -2,7 +2,8 @@
 
 // Package docs tests test/docs/run-block.sh, which runs the command blocks
 // of docs/install.md in CI, and the blocks and anchors the workflows and
-// the code rely on (ADR 0012).
+// the code rely on (ADR 0012); and, in guides_test.go, documented commands
+// that no CI job runs as written.
 package docs
 
 import (

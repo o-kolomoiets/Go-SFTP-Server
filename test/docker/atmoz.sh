@@ -138,11 +138,13 @@ sftp_key() {
 		-o "UserKnownHostsFile=$WORK/known_hosts" -o StrictHostKeyChecking=yes -b "$3" "$1@127.0.0.1" </dev/null >"$WORK/sftp.out" 2>&1
 }
 
-# own UID FILE...: chown as the migration guide does.
+# own OWNER FILE...: chown as the migration guide does; OWNER is UID:GID,
+# or UID for UID:UID.
 own() {
-	local uid=$1
+	local owner=$1
 	shift
-	"${SUDO[@]}" chown "$uid:$uid" "$@"
+	[[ $owner == *:* ]] || owner=$owner:$owner
+	"${SUDO[@]}" chown "$owner" "$@"
 }
 
 mkdir -p "$WORK/local"
@@ -227,9 +229,10 @@ fi
 no_secrets "keys"
 
 # --- Store users in config: users.conf and a named volume on /home --------
+# The file holds passwords: readable by the image's group, not by others.
 printf 'foo:123:1001:100\nbar:abc:1002:100\nbaz:xyz:1003:100\n' >"$WORK/users.conf"
-chmod 0644 "$WORK/users.conf"
-own 0 "$WORK/users.conf"
+chmod 0640 "$WORK/users.conf"
+own 0:65532 "$WORK/users.conf"
 start -v "$WORK/users.conf:/etc/sftp/users.conf:ro" -v "$VOLUME:/home" "$IMAGE"
 if sftp_pw foo 123 "$(batch 'ls')" && sftp_pw baz xyz "$(batch 'ls')" &&
 	sftp_pw bar abc "$(batch "-put $WORK/local/a.txt /a.txt" '-mkdir /dir')" &&
