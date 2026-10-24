@@ -143,6 +143,18 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
       docker rm -f gosftpd && sudo rm -r gosftpd data state
       ```
 
+    - once per milestone, with its first rc (for M5 `v0.5.0-rc.1`), the
+      two checks that ADR 0012's Definition of Done gives to the rc:
+      - the Quickstart by hand on a clean Ubuntu 24.04 VM, as a user
+        other than root under umask 002, copied from install.md as users
+        copy it: the container turns `healthy`, `sftp` logs in, and after
+        `docker rm -f gosftpd` and the `docker run` line again, the host
+        key fingerprint in `docker logs gosftpd` is the first one;
+      - the rebuild of
+        [install.md's Rebuild a release](install.md#rebuild-a-release),
+        in the directory with the `checksums.txt` that the verification
+        above checked: each of the 12 archives and packages prints `OK`.
+
 12. `go list -m github.com/o-kolomoiets/go-sftp-server@vX.Y.Z` finds the
     version through the Go module proxy.
 13. In `README.md`, replace every mention of the previous release and of the
