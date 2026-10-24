@@ -104,7 +104,9 @@ func mustLogin(t *testing.T, addr, user string, auth ssh.AuthMethod) *sftpConn {
 	return c
 }
 
-// names lists dir on the server.
+// names lists dir on the server, sorted: the server lists a directory in
+// the order the file system reads it, which on ext4 follows the hash of
+// the names with the file system's own seed, and sftp sorts it for display.
 func names(t *testing.T, c *sftpConn, dir string) []string {
 	t.Helper()
 	fis, err := c.ReadDir(dir)
@@ -115,6 +117,7 @@ func names(t *testing.T, c *sftpConn, dir string) []string {
 	for _, fi := range fis {
 		out = append(out, fi.Name())
 	}
+	slices.Sort(out)
 	return out
 }
 
