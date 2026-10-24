@@ -12,6 +12,8 @@
 #   the package depends on), and a user added with --write and a reload
 #   while /etc/gosftpd also holds a file of the administrator's, which
 #   needs the package's users.d.
+# - What an upgrade does to config.toml and users.d after the administrator
+#   gave them another group and mode, unedited and edited, per format.
 # - An upgrade, as a reinstall: installing the installed version again is
 #   a no-op that runs no script. The edited configuration, the user's file,
 #   the drop-in and the running process stay, its binary shown as deleted;
@@ -268,6 +270,42 @@ check "the status is \"configuration reloaded\"" status_is "configuration reload
 rm /etc/gosftpd/NOTES
 out=$(validate /) || fail "config validate --check-fs as gosftpd: $out"
 equal "config validate with the user" "$(tail -n 1 <<<"$out")" "$CONFIG: OK (1 mounts, 1 users)"
+
+phase "upgrade: another group and mode on the configuration"
+# What ADR 0012 and docs/install.md state: deb keeps a changed owner, group
+# and mode; rpm puts root:root 0750 back on users.d at every upgrade or
+# reinstall, and rpm and pacman put root:root 0640 back on an unedited
+# config.toml; postinstall then gives them the group gosftpd. An edited
+# config.toml keeps its owner, group and mode.
+USERS_D=/etc/gosftpd/users.d
+cp -p "$CONFIG" "$WORK/config.toml"
+groupadd -r sftpadmins
+admin_group() {
+	chgrp sftpadmins "$CONFIG" "$USERS_D"
+	chmod 2770 "$USERS_D"
+}
+case $FORMAT in
+deb) config_kept="root:sftpadmins 640" users_d_kept="root:sftpadmins 2770" ;;
+rpm) config_kept="root:gosftpd 640" users_d_kept="root:gosftpd 750" ;;
+archlinux) config_kept="root:gosftpd 640" users_d_kept="root:sftpadmins 2770" ;;
+esac
+admin_group
+pkg_reinstall || die "the reinstall failed"
+equal "an upgrade, $CONFIG unedited" "$(owner_mode "$CONFIG")" "$config_kept"
+equal "an upgrade, $USERS_D" "$(owner_mode "$USERS_D")" "$users_d_kept"
+echo "$EDIT" >>"$CONFIG"
+admin_group
+pkg_reinstall || die "the reinstall failed"
+equal "an upgrade, $CONFIG edited" "$(owner_mode "$CONFIG")" "root:sftpadmins 640"
+equal "an upgrade, $USERS_D" "$(owner_mode "$USERS_D")" "$users_d_kept"
+# The package's configuration and owners again ("00": GNU chmod keeps the
+# setgid bit of a directory otherwise).
+cat "$WORK/config.toml" >"$CONFIG"
+chgrp gosftpd "$CONFIG" "$USERS_D"
+chmod 00750 "$USERS_D"
+groupdel sftpadmins
+equal "$CONFIG" "$(owner_mode "$CONFIG")" "root:gosftpd 640"
+equal "$USERS_D" "$(owner_mode "$USERS_D")" "root:gosftpd 750"
 
 phase "upgrade: the same package again"
 echo "$EDIT" >>"$CONFIG"

@@ -699,7 +699,11 @@ jobs:
     `systemd-analyze` ahead in the scripts' `PATH` makes postinstall
     install the drop-in; the next upgrade must keep it (rpm runs the old
     `%postun` after the new `%post`), and the one after, on the real
-    systemd, remove it. A removal also deletes `/usr/share/gosftpd` and
+    systemd, remove it. Before the upgrades above, two reinstalls with
+    `config.toml` and `users.d` given another group (`users.d` also mode
+    2770), first with the packaged `config.toml` and then with an edited
+    one, must leave what "Owners after an upgrade" below gives for the
+    format. A removal also deletes `/usr/share/gosftpd` and
     `/usr/share/doc/gosftpd`, and keeps the user, the host key, the data
     and the audit log; deb keeps the configuration until `apt purge`.
     `test/packages/container.sh` then starts a second container of the
@@ -936,7 +940,7 @@ nfpms:
   every format, and pacman keeps a changed `users.d` ("warning: directory
   permissions differ"). Seen with dpkg 1.21 and 1.22 (Debian 12, Ubuntu
   24.04), rpm 4.16 (EL9) and pacman 7.1 (Arch), on upgrades, reinstalls
-  and downgrades. So another
+  and downgrades; the packages job checks it on a reinstall. So another
   group on these files does not survive every upgrade, and another
   account runs gosftpd through the group `gosftpd`: a drop-in that
   changes only `User=` keeps the unit's `Group=gosftpd`, one that also
