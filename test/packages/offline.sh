@@ -6,6 +6,8 @@
 # service, as it does under systemd: the operator's enablement must not
 # survive it, or a later install in that image, or on a host made from it,
 # would start at boot without anyone enabling it. An upgrade keeps it.
+# The removal also deletes the empty users.d, in every format (in run.sh it
+# holds a file and stays).
 #
 # Usage: test/packages/offline.sh FORMAT DIR V
 # FORMAT, DIR and V are test/packages/run.sh's; DIR needs only the package.
@@ -104,6 +106,7 @@ check "the service is still enabled" test -L "$WANTS"
 phase "the removal disables it"
 pkg_remove || die "the removal failed"
 check "the removal disabled the service" absent "$WANTS"
+check "the removal deleted the empty users.d" absent /etc/gosftpd/users.d
 pkg_install || die "the package did not install again"
 equal "is-enabled after a new install" "$(enabled)" disabled
 pkg_remove || die "the second removal failed"

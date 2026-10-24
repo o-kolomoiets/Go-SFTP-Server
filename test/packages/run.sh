@@ -400,6 +400,8 @@ deb)
 	apt-get purge -y -q gosftpd </dev/null || die "apt purge failed"
 	check "apt purge deletes $CONFIG" absent "$CONFIG"
 	check "and $NEEDRESTART_CONF" absent "$NEEDRESTART_CONF"
+	# dpkg warns that the directory is not empty and keeps it.
+	check "apt purge keeps users.d/partner.toml" test -f /etc/gosftpd/users.d/partner.toml
 	;;
 rpm)
 	check "$CONFIG is gone" absent "$CONFIG"

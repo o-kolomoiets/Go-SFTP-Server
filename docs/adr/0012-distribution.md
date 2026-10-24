@@ -705,13 +705,14 @@ jobs:
     one, must leave what "Owners after an upgrade" below gives for the
     format. A removal also deletes `/usr/share/gosftpd` and
     `/usr/share/doc/gosftpd`, and keeps the user, the host key, the data
-    and the audit log; deb keeps the configuration until `apt purge`.
-    `test/packages/container.sh` then starts a second container of the
-    same image whose PID 1 is not systemd, as in an image build:
-    `test/packages/offline.sh` installs the package there, runs `systemctl
-    enable gosftpd`, upgrades (still enabled), removes (no
-    `multi-user.target.wants` link, not even one whose target is gone) and
-    installs again (`is-enabled` says `disabled`).
+    and the audit log; deb keeps `config.toml` until `apt purge`, and
+    `users.d` with a user's file in it stays in every format, also after
+    `apt purge`. `test/packages/container.sh` then starts a second
+    container of the same image whose PID 1 is not systemd, as in an image
+    build: `test/packages/offline.sh` installs the package there, runs
+    `systemctl enable gosftpd`, upgrades (still enabled), removes (no
+    `multi-user.target.wants` link, not even one whose target is gone, and
+    no empty `users.d`) and installs again (`is-enabled` says `disabled`).
   - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real
     Landlock, no QEMU), as a non-root user under umask 002, from the image
     `goreleaser-check` saved, tagged after `docker load` with every
@@ -1000,12 +1001,19 @@ nfpms:
   was gone too).
 - **What a removal keeps differs by format.** The data, the host keys and
   the audit log (`/srv/sftp`, `/var/lib/gosftpd`, `/var/log/gosftpd`)
-  belong to no package and stay everywhere. deb: `apt remove` keeps
-  `config.toml` and `users.d` until `apt purge`. rpm and Arch: a removal
-  renames an edited `config.toml` to `config.toml.rpmsave` or
+  belong to no package and stay everywhere. In every format `users.d`
+  stays while it holds files, also after `apt purge` (dpkg warns that the
+  directory is not empty), and goes with the removal when it is empty,
+  also with `apt remove` (found in the implementation review: the first
+  text had deb keep `users.d` until `apt purge`). It holds the users'
+  password hashes and keys, so a complete removal deletes it by hand.
+  deb: `apt remove` keeps `config.toml` until `apt purge`. rpm and Arch: a
+  removal renames an edited `config.toml` to `config.toml.rpmsave` or
   `config.toml.pacsave` (rpm and pacman print a warning) and deletes an
-  unedited one; `users.d` stays while it holds files, and Arch removes it
-  when empty. After a removal and a new install the packaged default is
+  unedited one, and `/etc/gosftpd` itself once nothing is left in it.
+  Seen with dpkg 1.21 and 1.22, rpm 4.16 and pacman 7.1, with an empty
+  `users.d` and with a user's file in it, and an unedited and an edited
+  `config.toml`. After a removal and a new install the packaged default is
   back, so the saved file is moved back before the service starts. An
   upgrade or downgrade done as one transaction (`rpm -U`, `dnf`, `pacman
   -U`) keeps the edited file. docs/install.md states this per format and
