@@ -129,8 +129,9 @@ manifest digest for `dockers_v2` (upstream #7180, fixed in v2.18.3), so
 `docker_signs` `${artifact}@${digest}` and `digests.txt` would name an
 object that cannot be pulled. The fallback is v2.18.3 (2026-10-09,
 `1942d44355492f44cd3774c57bd3c27fe544dfe9`). Dependabot does not update
-the `version:` input, `cosign-release:`, `syft-version:` or the BuildKit
-image in `driver-opts`; the release checklist names them. nfpm v2.48.0 is
+the `version:` input, `cosign-release:`, `syft-version:`, the BuildKit
+image in `driver-opts` or the SBOM scanner in `dockers_v2`'s `flags`; the
+release checklist names them. nfpm v2.48.0 is
 built into v2.19.0. The file, shortened
 where a comment says so (the full `nfpms` block is under Packages):
 
@@ -214,6 +215,10 @@ dockers_v2:
     images: [ghcr.io/o-kolomoiets/gosftpd]
     tags: ["v{{ .Version }}"]   # latest: set by release.yml after verification
     platforms: [linux/amd64, linux/arm64]
+    sbom: false                 # the SBOM attestation comes from the pinned scanner (Signatures, SBOM and provenance)
+    flags:
+      # docker/buildkit-syft-scanner 1.12.0, what stable-1 named on 2026-10-24
+      - "{{ if not .IsSnapshot }}--attest=type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9{{ end }}"
     labels:
       org.opencontainers.image.source: https://github.com/o-kolomoiets/Go-SFTP-Server
       org.opencontainers.image.revision: "{{ .FullCommit }}"
@@ -367,8 +372,24 @@ release:
   v0.24.3 (`66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c`) with `syft-version:
   v1.55.0` (the action's default is v1.54.0, and its `v0` tag is stale);
   one SPDX JSON per archive (`sboms: [{artifacts: archive}]`, default
-  arguments). `dockers_v2` keeps `sbom: true`, so buildx adds an SBOM
-  attestation to each image.
+  arguments).
+- **The image's SBOM** is an SPDX attestation per platform in the pushed
+  index, written by BuildKit's syft scanner pinned by tag and digest,
+  `docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b55…` (it bundles syft
+  v1.51.0). GoReleaser's default `sbom: true` passes `--attest=type=sbom`
+  without a generator, and BuildKit v0.33.1 then runs its default,
+  `docker/buildkit-syft-scanner:stable-1`, a floating tag, inside the
+  release build. The scanner mounts the image read-only and BuildKit keeps
+  only SPDX statements from it, but what it writes is in the index that
+  cosign signs and `actions/attest` attests. So `dockers_v2` sets `sbom:
+  false` (buildx takes the first `--attest=type=sbom` and ignores a
+  second) and passes `--attest=type=sbom,generator=…` in `flags`, rendered
+  only outside a snapshot: a snapshot loads its images with `--load`, and
+  buildx refuses attestations for an engine without the containerd image
+  store ("docker exporter does not currently support exporting manifest
+  lists"). CI's snapshot images have no SBOM attestation, as with `sbom:
+  true`. A non-snapshot release to a local registry ran the pinned scanner
+  for both platforms (reproduced).
 - **Attestations:** `actions/attest` v4.2.2
   (`1e69f48acb82d1966a394da916b4c1698aa569d6`, also the `v4` tag) in **two
   steps**, `subject-checksums: dist/checksums.txt` and `subject-checksums:
@@ -584,7 +605,9 @@ jobs:
   does not verify by default; that container builds the image, receives
   the GHCR push token and reports the digest that is signed. `driver-opts`
   pins the image by index digest (v0.33.1, what `buildx-stable-1` named on
-  2026-10-23), in `goreleaser-check` too.
+  2026-10-23), in `goreleaser-check` too. The SBOM scanner that BuildKit
+  runs in the release build is pinned the same way (Signatures, SBOM and
+  provenance).
 - **Verification before Publish.** The last step but one runs the
   verification block of docs/install.md (Verification by users) in
   `dist/`, against local files: `cosign verify-blob` of `checksums.txt`
@@ -1482,7 +1505,8 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   checks the draft's assets and the green verification step before
   publishing, adds the M5 smoke steps of ROADMAP §9.6, waits for
   `verify-release`, and lists the version strings Dependabot does not
-  update (GoReleaser, cosign, syft, the BuildKit image). It covers a tag
+  update (GoReleaser, cosign, syft, the BuildKit image, the SBOM scanner
+  image). It covers a tag
   whose release did not start (Owner actions), an abandoned draft (Images
   are public before the release is) and a release-format tag created by
   mistake, which outranks every later version and only the owner can
@@ -1541,7 +1565,8 @@ settle these:
 - that Scorecard counts the attest bundle named `.intoto.jsonl`, and that
   `gh attestation verify --bundle` reads a file with that suffix;
 - that buildx with the pinned BuildKit image builds the `dockers_v2`
-  snapshot and pushes both platforms on the runners (once it does, the
+  snapshot and pushes both platforms on the runners, with the pinned SBOM
+  scanner's attestations (once it does, the
   engine's own `docker` driver, which needs no image, is the
   alternative), and that the runners' cgroups are v2;
 - that Dependabot updates a `gcr.io` digest;
