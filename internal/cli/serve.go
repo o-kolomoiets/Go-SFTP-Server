@@ -122,7 +122,7 @@ func serveFlags(f *pflag.FlagSet, o *serveOptions, atmoz bool) {
 	f.StringVar(&o.onConflict, "on-conflict", "rename", "when an upload targets an existing file: rename, reject, overwrite or version (atmoz mode: overwrite)")
 	f.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
 	f.StringVar(&o.logFormat, "log-format", "text", "text or json")
-	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path (with --ephemeral: stderr or a file path)")
+	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path (with --ephemeral, stdout is refused and the default goes to stderr)")
 	f.BoolVar(&o.allowRoot, "allow-root", false, "run even as root (not recommended: run as a dedicated user)")
 	f.BoolVar(&o.ephemeral, "ephemeral", false, "serve a temporary directory to user test, for tests; the connection details go to stdout as one JSON line")
 	f.StringVar(&o.usersConf, "users-conf", "", "atmoz mode: a users file of atmoz/sftp user specs, one per line (in the image /etc/sftp/users.conf by default)")
@@ -460,6 +460,13 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 				err = errors.Join(err, rerr)
 			}
 		}()
+		// A write to a stdout or stderr whose reader has gone raises
+		// SIGPIPE, whose default action would kill the process before
+		// that clean-up; caught, it makes the write fail with EPIPE.
+		// Caught, not ignored, which a child such as the Landlock probe
+		// would inherit; never stopped, as the clean-up and the error
+		// come last.
+		signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 		modeWarns = append(modeWarns, eph.warnings...)
 	case modeAtmoz:
 		if c, atm, err = newAtmoz(flags, o, getenv); err != nil {

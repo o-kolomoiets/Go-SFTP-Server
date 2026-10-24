@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -426,6 +427,10 @@ func TestEphemeralDir(t *testing.T) {
 	if got := entries(t, share); !slices.Equal(got, []string{"kept.txt", "new.txt"}) {
 		t.Errorf("--dir holds %v after the stop", got)
 	}
+	if logs := ts.stderr.String(); !strings.Contains(logs, `msg="removed the client key and the directory; --dir is kept" dir=`+filepath.Join(tmp, made[0])+" data="+share) ||
+		strings.Contains(logs, "and the data") {
+		t.Errorf("the stop log:\n%s", logs)
+	}
 	if got := entries(t, tmp); len(got) != 0 {
 		t.Errorf("%s holds %v after the stop", tmp, got)
 	}
@@ -540,14 +545,15 @@ func TestEphemeralStdoutFails(t *testing.T) {
 	}
 }
 
-// newTestEphemeral makes what serve --ephemeral makes at start.
-func newTestEphemeral(t *testing.T) *ephemeral {
+// newTestEphemeral makes what serve --ephemeral makes at start, with the
+// data in dirs (--dir) if given.
+func newTestEphemeral(t *testing.T, dirs ...string) *ephemeral {
 	t.Helper()
 	cmd := newServeCmd()
 	if err := cmd.ParseFlags([]string{"--ephemeral"}); err != nil {
 		t.Fatal(err)
 	}
-	_, e, err := newEphemeral(cmd.Flags(), serveOptions{ephemeral: true, onConflict: "rename", logLevel: "info", logFormat: "text"}, func(string) string { return "" })
+	_, e, err := newEphemeral(cmd.Flags(), serveOptions{ephemeral: true, dirs: dirs, onConflict: "rename", logLevel: "info", logFormat: "text"}, func(string) string { return "" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +561,8 @@ func newTestEphemeral(t *testing.T) *ephemeral {
 }
 
 // TestEphemeralRemove: under Landlock the directory stays, empty; a key
-// that is already gone is no error.
+// that is already gone is no error. A --dir directory is kept, and the
+// log says so.
 func TestEphemeralRemove(t *testing.T) {
 	isolate(t)
 	tmp := ephemeralTemp(t)
@@ -576,6 +583,25 @@ func TestEphemeralRemove(t *testing.T) {
 	}
 	if got := entries(t, tmp); len(got) != 1 {
 		t.Errorf("%s holds %v", tmp, got)
+	}
+
+	share := t.TempDir()
+	writeFile(t, filepath.Join(share, "kept.txt"), "kept")
+	e = newTestEphemeral(t, share)
+	var log lockedBuffer
+	e.log = slog.New(slog.NewTextHandler(&log, nil))
+	e.landlocked = true
+	if err := e.remove(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := entries(t, e.dir); len(got) != 0 {
+		t.Errorf("%s holds %v", e.dir, got)
+	}
+	if got := entries(t, share); !slices.Equal(got, []string{"kept.txt"}) {
+		t.Errorf("--dir holds %v", got)
+	}
+	if want := `msg="removed the client key; --dir is kept; under Landlock the empty directory stays" dir=` + e.dir + " data=" + share; !strings.Contains(log.String(), want) {
+		t.Errorf("log:\n%s\nwant %s", log.String(), want)
 	}
 }
 
@@ -649,5 +675,23 @@ func TestServeListenCounted(t *testing.T) {
 	code, out, _ := execute(t, "serve", "--help")
 	if code != exitOK || !strings.Contains(out, `--listen string `) || !strings.Contains(out, `(default ":2022")`) || !strings.Contains(out, "--ephemeral ") {
 		t.Errorf("exit %d:\n%s", code, out)
+	}
+}
+
+// TestServeAuditOutputHelp: the help of --audit-output says where the
+// default goes with --ephemeral, and offers no keyword "stderr", which
+// would be taken as a file name.
+func TestServeAuditOutputHelp(t *testing.T) {
+	t.Parallel()
+	code, out, _ := execute(t, "serve", "--help")
+	var line string
+	for l := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(l, "--audit-output ") {
+			line = l
+		}
+	}
+	if code != exitOK || !strings.Contains(line, "audit log destination: stdout or a file path (with --ephemeral, stdout is refused and the default goes to stderr)") ||
+		strings.Contains(line, "stderr or") {
+		t.Errorf("exit %d: %q", code, line)
 	}
 }
