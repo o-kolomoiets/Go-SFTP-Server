@@ -630,8 +630,8 @@ jobs:
 - **`ci.yml`:**
   - `goreleaser-check` moves to v2.19.0, installs syft as above, pins
     BuildKit as above and runs `release --snapshot --clean --skip=sign`:
-    snapshot mode skips publishing but not signing (`signs` and
-    `docker_signs` run unless skipped), and `sboms` needs syft. It keeps
+    snapshot mode skips publishing, `docker_signs` included (a publisher),
+    but not `signs`, which `--skip=sign` covers; `sboms` needs syft. It keeps
     the version check and the 12 MiB budget and adds: the archive check
     for `*_freebsd_*`; `test/packages/contents.sh` for the six packages:
     the exact file list (`dpkg-deb`, `rpm -qp`, `tar --zstd`) with owner
