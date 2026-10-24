@@ -73,7 +73,7 @@
   on that tag (**Run workflow** with the tag selected, or `gh workflow run
   release.yml --ref vX.Y.Z`); `tag.yml`'s checks are then the owner's
   responsibility. GoReleaser builds the tag the run was dispatched on,
-  also when it shares its commit with an rc (`GORELEASER_CURRENT_TAG`,
+  also when other tags share its commit (`GORELEASER_CURRENT_TAG`,
   Workflows). `release.yml` has no `push: tags` trigger (see
   Alternatives).
 - **Why a workflow dispatch.** Events caused by `GITHUB_TOKEN` start no
@@ -110,7 +110,8 @@
   the run unless the tag is the highest release tag and has no published
   release; otherwise a re-run or a dispatch for a published release would
   push and sign a rebuilt image (images are not reproducible) under its
-  tag, and a run on an older tag would move `latest` backwards. A re-run
+  tag, and a run on an older tag would move `latest` backwards. Runs never
+  overlap, and the guard runs again before `latest` moves. A re-run
   while the release is still a draft replaces the draft and its image,
   which is what a re-run is for. The first run is `v0.5.0-rc.1`: a
   pre-release never moves `latest`. A draft that is deleted instead of
@@ -128,8 +129,9 @@ manifest digest for `dockers_v2` (upstream #7180, fixed in v2.18.3), so
 `docker_signs` `${artifact}@${digest}` and `digests.txt` would name an
 object that cannot be pulled. The fallback is v2.18.3 (2026-10-09,
 `1942d44355492f44cd3774c57bd3c27fe544dfe9`). Dependabot does not update
-the `version:` input, `cosign-release:`, `syft-version:` or the BuildKit
-image in `driver-opts`; the release checklist names them. nfpm v2.48.0 is
+the `version:` input, `cosign-release:`, `syft-version:`, the BuildKit
+image in `driver-opts` or the SBOM scanner in `dockers_v2`'s `flags`; the
+release checklist names them. nfpm v2.48.0 is
 built into v2.19.0. The file, shortened
 where a comment says so (the full `nfpms` block is under Packages):
 
@@ -213,6 +215,10 @@ dockers_v2:
     images: [ghcr.io/o-kolomoiets/gosftpd]
     tags: ["v{{ .Version }}"]   # latest: set by release.yml after verification
     platforms: [linux/amd64, linux/arm64]
+    sbom: false                 # the SBOM attestation comes from the pinned scanner (Signatures, SBOM and provenance)
+    flags:
+      # docker/buildkit-syft-scanner 1.12.0, what stable-1 named on 2026-10-24
+      - "{{ if not .IsSnapshot }}--attest=type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9{{ end }}"
     labels:
       org.opencontainers.image.source: https://github.com/o-kolomoiets/Go-SFTP-Server
       org.opencontainers.image.revision: "{{ .FullCommit }}"
@@ -226,8 +232,8 @@ docker_signs:
 
 docker_digest: { name_template: digests.txt }
 
-# Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit.
-# release.yml names its tag with GORELEASER_CURRENT_TAG (Workflows).
+# Every run without GORELEASER_CURRENT_TAG, with which release.yml names
+# its tag (Workflows): v0.5.0 before v0.5.0-rc.1 on one commit.
 git: { prerelease_suffix: "-" }
 
 release:
@@ -271,19 +277,27 @@ release:
   `dist/digests.txt`; with one index source and no annotations buildx
   v0.38.1 copies the index unchanged, so `latest` names the digest that was
   signed and attested. `tag.yml` accepts only a version higher than every
-  release tag, and the guard runs only the highest one (Workflows), so
-  `latest` never moves backwards. In a snapshot `.Tag` and `.Prerelease`
-  come from the last reachable tag (after v0.5.0-rc.1: `v0.5.0-rc.1` and
-  `rc.1`) and `dockers_v2` appends the architecture, so CI refers to its
-  images as `v<.Version>-amd64` and `-arm64`.
+  release tag, the guard runs only the highest one, and runs of
+  `release.yml` never overlap (Workflows); the step itself runs the guard
+  first, so `latest` never moves backwards. A tag made while a stable run
+  is in progress (by `tag.yml`, whose run waits, or by hand) fails that
+  step, and `latest` is left to the newer tag's run; the draft is complete
+  and verified by then. If the newer tag is a pre-release, `latest` stays
+  on the previous release until the owner points it at the verified
+  digest with the same command, or the next stable release does. In a
+  snapshot `.Tag` and `.Prerelease` come from the last reachable tag
+  (after v0.5.0-rc.1: `v0.5.0-rc.1` and `rc.1`) and `dockers_v2` appends
+  the architecture, so CI refers to its images as `v<.Version>-amd64` and
+  `-arm64`.
 - `docker_signs` sets its own `args`: the default is `sign
   --key=cosign.key ...`.
 - **`git.prerelease_suffix: "-"`.** Without a tag named in
   `GORELEASER_CURRENT_TAG`, GoReleaser takes the first tag of `git tag
   --points-at HEAD --sort -version:refname`, and git's version sort ranks
-  `v0.5.0-rc.1` above `v0.5.0`. The suffix makes a local or snapshot run
-  on a commit that carries both pick `v0.5.0`; the release job does not
-  rely on it (Workflows).
+  `v0.5.0-rc.1` above `v0.5.0`. The suffix makes any run without the
+  variable on a commit that carries both pick `v0.5.0`, a release run as
+  well as a local or snapshot one; the release job names its tag anyway,
+  since another tag on the commit could still rank first (Workflows).
 - `preflight.fail_on_error` (since v2.18) stops the run before building
   only when the tag's release is already immutable; it does not check that
   the token can publish (`CanRelease` only reads the repository and the
@@ -358,8 +372,24 @@ release:
   v0.24.3 (`66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c`) with `syft-version:
   v1.55.0` (the action's default is v1.54.0, and its `v0` tag is stale);
   one SPDX JSON per archive (`sboms: [{artifacts: archive}]`, default
-  arguments). `dockers_v2` keeps `sbom: true`, so buildx adds an SBOM
-  attestation to each image.
+  arguments).
+- **The image's SBOM** is an SPDX attestation per platform in the pushed
+  index, written by BuildKit's syft scanner pinned by tag and digest,
+  `docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b55…` (it bundles syft
+  v1.51.0). GoReleaser's default `sbom: true` passes `--attest=type=sbom`
+  without a generator, and BuildKit v0.33.1 then runs its default,
+  `docker/buildkit-syft-scanner:stable-1`, a floating tag, inside the
+  release build. The scanner mounts the image read-only and BuildKit keeps
+  only SPDX statements from it, but what it writes is in the index that
+  cosign signs and `actions/attest` attests. So `dockers_v2` sets `sbom:
+  false` (buildx takes the first `--attest=type=sbom` and ignores a
+  second) and passes `--attest=type=sbom,generator=…` in `flags`, rendered
+  only outside a snapshot: a snapshot loads its images with `--load`, and
+  buildx refuses attestations for an engine without the containerd image
+  store ("docker exporter does not currently support exporting manifest
+  lists"). CI's snapshot images have no SBOM attestation, as with `sbom:
+  true`. A non-snapshot release to a local registry ran the pinned scanner
+  for both platforms (reproduced).
 - **Attestations:** `actions/attest` v4.2.2
   (`1e69f48acb82d1966a394da916b4c1698aa569d6`, also the `v4` tag) in **two
   steps**, `subject-checksums: dist/checksums.txt` and `subject-checksums:
@@ -402,7 +432,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release                 # one run at a time, whatever the tag; none cancelled
 jobs:
   generate:                      # the guard, then third-party tool code, without credentials
     runs-on: ubuntu-24.04
@@ -462,8 +492,9 @@ jobs:
         working-directory: dist
         env: { GH_TOKEN: "${{ github.token }}" }
       - if: ${{ !contains(github.ref_name, '-') }}
-        run: ...                 # docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest, the verified digest;
-                                 # then imagetools inspect: latest must name that digest
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: ...                 # the guard again; docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest,
+                                 # the verified digest; then imagetools inspect: latest must name that digest
 ```
 
 - **No QEMU.** The Dockerfile has no `RUN`, so the arm64 image builds on
@@ -504,9 +535,17 @@ jobs:
   script both source, so that `tag.yml` accepts only a version the guard
   then runs. The release job repeats the guard because
   re-running only that job (Re-run failed jobs, Re-run this job) reuses
-  `generate`'s earlier success. The guard checks `GITHUB_REF_NAME`, and
-  GoReleaser is given that name (`release` below): on its own it would
-  not build it.
+  `generate`'s earlier success, and runs it once more in the step that
+  moves `latest`. The guard alone does not keep `latest` from moving
+  backwards: runs for two tags, each the highest when its guard ran,
+  would overlap, and the older one could reach its last step after the
+  newer one. So `release.yml` has one concurrency group, `release`,
+  without `cancel-in-progress`: a run dispatched while another is in
+  progress waits, and its guard runs after the other has finished.
+  GitHub keeps one pending run per group, so a third dispatch cancels the
+  waiting one, which the owner dispatches again if its tag is still the
+  highest. The guard checks `GITHUB_REF_NAME`, and GoReleaser is given
+  that name (`release` below): on its own it would not build it.
 - **`generate`** (`contents: read` only, no `id-token`; setup-go `cache:
   false`) runs the guard, then `go mod tidy -diff && make generate`, and
   uploads only `out/man/`, `out/completions/` and
@@ -542,28 +581,32 @@ jobs:
   ignored), writes the notes and runs `goreleaser release --clean
   --skip=before` (`before` is a release skip key in v2.19.0) with
   `GORELEASER_CURRENT_TAG=$GITHUB_REF_NAME`. On its own GoReleaser v2.19.0
-  ignores `GITHUB_REF` and takes the first tag of `git tag --points-at
-  HEAD --sort -version:refname`, the highest tag on HEAD by git's version
-  sort, which ranks `v0.5.0-rc.1` above `v0.5.0` (reproduced). When the
-  final is tagged on its rc's commit, the usual way to promote an rc and
-  what `tag.yml` does when `main` has not moved, the run for `v0.5.0` would
-  build, push and sign `v0.5.0-rc.1` after the guard had passed. With the
-  variable it builds exactly the tag the guard checked, and its own
-  validation still requires that tag on HEAD (`git describe --exact-match
-  --tags --match`). The next step fails unless `jq -r .tag
+  ignores `GITHUB_REF` and takes the first tag of `git -c
+  versionsort.suffix=- tag --points-at HEAD --sort -version:refname`, the
+  highest tag on HEAD by git's version sort (the suffix comes from
+  `git.prerelease_suffix`, so a final on its rc's commit, the usual way to
+  promote an rc, already ranks above the rc, in a release run too). That
+  can be a tag the guard does not count: with a stray `v0.9.0-dev` on the
+  commit, the run for `v0.5.0` would build, push and sign `v0.9.0-dev`
+  after the guard had passed (reproduced). With the variable it builds
+  exactly the tag the guard checked, and its own validation still
+  requires that tag on HEAD (`git describe --exact-match --tags
+  --match`). The next step fails unless `jq -r .tag
   dist/metadata.json` equals `$GITHUB_REF_NAME`; it runs after the image
   has been pushed and signed, so it catches a regression before the
   attestations, the verification and `latest`, and does not replace the
   variable. After the attest steps the job uploads `.intoto.jsonl` and
-  `digests.txt`; after the verification step it moves `latest` for a
-  stable version, and checks with `docker buildx imagetools inspect`
-  that `latest` names the verified digest.
+  `digests.txt`; after the verification step it runs the guard again and
+  moves `latest` for a stable version, and checks with `docker buildx
+  imagetools inspect` that `latest` names the verified digest.
 - **BuildKit is pinned.** setup-buildx-action's default `docker-container`
   driver runs `moby/buildkit:buildx-stable-1`, a floating tag that buildx
   does not verify by default; that container builds the image, receives
   the GHCR push token and reports the digest that is signed. `driver-opts`
   pins the image by index digest (v0.33.1, what `buildx-stable-1` named on
-  2026-10-23), in `goreleaser-check` too.
+  2026-10-23), in `goreleaser-check` too. The SBOM scanner that BuildKit
+  runs in the release build is pinned the same way (Signatures, SBOM and
+  provenance).
 - **Verification before Publish.** The last step but one runs the
   verification block of docs/install.md (Verification by users) in
   `dist/`, against local files: `cosign verify-blob` of `checksums.txt`
@@ -1461,7 +1504,8 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   checks the draft's assets and the green verification step before
   publishing, adds the M5 smoke steps of ROADMAP §9.6, waits for
   `verify-release`, and lists the version strings Dependabot does not
-  update (GoReleaser, cosign, syft, the BuildKit image). It covers a tag
+  update (GoReleaser, cosign, syft, the BuildKit image, the SBOM scanner
+  image). It covers a tag
   whose release did not start (Owner actions), an abandoned draft (Images
   are public before the release is) and a release-format tag created by
   mistake, which outranks every later version and only the owner can
@@ -1520,7 +1564,8 @@ settle these:
 - that Scorecard counts the attest bundle named `.intoto.jsonl`, and that
   `gh attestation verify --bundle` reads a file with that suffix;
 - that buildx with the pinned BuildKit image builds the `dockers_v2`
-  snapshot and pushes both platforms on the runners (once it does, the
+  snapshot and pushes both platforms on the runners, with the pinned SBOM
+  scanner's attestations (once it does, the
   engine's own `docker` driver, which needs no image, is the
   alternative), and that the runners' cgroups are v2;
 - that Dependabot updates a `gcr.io` digest;
@@ -1663,8 +1708,9 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
 - **Signed tags only** (`git tag -s`): needs a local git with a key
   registered on GitHub for every release; the owner chose the workflow. A
   signed tag pushed by hand is still released by a dispatch of
-  `release.yml`, which builds that tag even on its rc's commit
-  (`GORELEASER_CURRENT_TAG`), so this can change without a change here.
+  `release.yml`, which builds that tag whatever else is tagged on its
+  commit (`GORELEASER_CURRENT_TAG`), so this can change without a change
+  here.
 - **release-please:** its tags are made with `GITHUB_TOKEN` too, it would
   need GoReleaser in the same workflow, and it adds a bot's pull requests.
 - **GoReleaser v2.18.2:** wrong image digest (#7180). v2.18.3 is the

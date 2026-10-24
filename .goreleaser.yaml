@@ -168,6 +168,14 @@ nfpms:
 # the version tag: release.yml points latest at a stable version once its
 # verification step has passed. A snapshot builds one image per platform
 # and appends the architecture: v<version>-amd64 and -arm64.
+#
+# The pushed index carries an SBOM attestation per platform, from BuildKit's
+# syft scanner pinned by digest: sbom: true would pass --attest=type=sbom
+# without a generator, and BuildKit would run its default scanner, the
+# floating docker/buildkit-syft-scanner:stable-1, inside the signed build;
+# and buildx takes the first --attest=type=sbom, so it would ignore the
+# flag below. Not in a snapshot: buildx refuses attestations with --load
+# into an engine without the containerd image store (ADR 0012).
 dockers_v2:
   - id: image
     ids: [gosftpd]
@@ -176,6 +184,11 @@ dockers_v2:
     images: [ghcr.io/o-kolomoiets/gosftpd]
     tags: ["v{{ .Version }}"]
     platforms: [linux/amd64, linux/arm64]
+    sbom: false
+    flags:
+      # docker/buildkit-syft-scanner 1.12.0, what stable-1 named on
+      # 2026-10-24; Dependabot does not update it.
+      - "{{ if not .IsSnapshot }}--attest=type=sbom,generator=docker.io/docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9{{ end }}"
     labels:
       org.opencontainers.image.source: https://github.com/o-kolomoiets/Go-SFTP-Server
       org.opencontainers.image.revision: "{{ .FullCommit }}"
@@ -194,8 +207,9 @@ docker_signs:
 # tag, the digest users verify and run (docs/install.md). Not in a snapshot.
 docker_digest: { name_template: digests.txt }
 
-# Local and snapshot runs: v0.5.0 before v0.5.0-rc.1 on one commit (git's
-# version sort ranks the rc higher).
+# Every run that does not name its tag in GORELEASER_CURRENT_TAG, as
+# release.yml does: v0.5.0 before v0.5.0-rc.1 on one commit (git's version
+# sort ranks the rc higher).
 git: { prerelease_suffix: "-" }
 
 # A draft, which the owner publishes once it is complete and checked

@@ -202,6 +202,13 @@ func TestReleaseOutRefuses(t *testing.T) {
 		{name: "a man page not compressed", change: add("man/gosftpd-serve.1"), stderr: "man/gosftpd-serve.1: an unexpected file"},
 		{name: "a man page in a subdirectory", change: add("man/man1/gosftpd.1.gz"), stderr: "man/man1: an unexpected directory"},
 		{name: "another completion", change: add("completions/gosftpd.ps1"), stderr: "completions/gosftpd.ps1: an unexpected file"},
+		// A name of the list with something after it, or in another
+		// directory: the list's anchors.
+		{name: "a completion with a suffix", change: add("completions/gosftpd.bash.orig"), stderr: "completions/gosftpd.bash.orig: an unexpected file"},
+		{name: "a man page with a suffix", change: add("man/gosftpd.1.gz.1.gz"), stderr: "man/gosftpd.1.gz.1.gz: an unexpected file"},
+		{name: "the license file with a suffix", change: add("THIRD_PARTY_LICENSES.txt"), stderr: "THIRD_PARTY_LICENSES.txt: an unexpected file"},
+		{name: "the license file among the completions", change: add("completions/THIRD_PARTY_LICENSES"), stderr: "completions/THIRD_PARTY_LICENSES: an unexpected file"},
+		{name: "the license file among the man pages", change: add("man/THIRD_PARTY_LICENSES"), stderr: "man/THIRD_PARTY_LICENSES: an unexpected file"},
 		{name: "an empty directory", change: emptyDir("docker"), stderr: "docker: an unexpected directory"},
 		{name: "a man page that is a symbolic link", change: link("../THIRD_PARTY_LICENSES", "man/gosftpd-init.1.gz"), stderr: "man/gosftpd-init.1.gz: a symbolic link"},
 		{name: "the license file as a symbolic link", change: replaceWithLink("THIRD_PARTY_LICENSES"), stderr: "THIRD_PARTY_LICENSES: a symbolic link"},
