@@ -918,12 +918,35 @@ nfpms:
   builds): `systemd-sysusers gosftpd.conf`; `systemd-tmpfiles --create
   gosftpd.conf`; when the group `gosftpd` exists, `chgrp gosftpd` on
   `/etc/gosftpd/config.toml` and `/etc/gosftpd/users.d` if their group is
-  still root (an administrator's choice of group is kept); the offline
+  root (another group is left alone, but not every upgrade keeps it: see
+  "Owners after an upgrade" below); the offline
   `Type=notify-reload` probe of ADR 0011 (`systemd-analyze verify
   --man=no`), which installs `/usr/share/gosftpd/legacy-notify.conf` as
   `/etc/systemd/system/gosftpd.service.d/legacy-notify.conf` where the type
   is unknown and removes it elsewhere (also after systemd was upgraded);
   `systemctl daemon-reload || true` when `/run/systemd/system` exists.
+- **Owners after an upgrade differ by format** (found in the
+  implementation review). deb keeps a changed owner, group and mode of
+  `config.toml` and `users.d`, also when it installs a newer packaged
+  `config.toml` over an unedited one. rpm lays `users.d` down as
+  root:root 0750 again at every upgrade, reinstall or downgrade, and rpm
+  and pacman do the same with a `config.toml` that was not edited (0640);
+  postinstall then gives them the group, so they end up root:gosftpd 0750
+  and 0640. An edited `config.toml` keeps its owner, group and mode in
+  every format, and pacman keeps a changed `users.d` ("warning: directory
+  permissions differ"). Seen with dpkg 1.21 and 1.22 (Debian 12, Ubuntu
+  24.04), rpm 4.16 (EL9) and pacman 7.1 (Arch), on upgrades, reinstalls
+  and downgrades. So another
+  group on these files does not survive every upgrade, and another
+  account runs gosftpd through the group `gosftpd`: a drop-in that
+  changes only `User=` keeps the unit's `Group=gosftpd`, one that also
+  sets `Group=` adds `SupplementaryGroups=gosftpd`, or the account joins
+  the group `gosftpd`. On EL9 each of the three still reloaded after `dnf
+  reinstall`; a drop-in with another account's `User=` and `Group=` and
+  the files given to that group failed the reload, and the next start
+  exited 2. A preinstall script that saved the group and mode for
+  postinstall to restore would make every format keep them; the packages
+  have none. docs/install.md says this.
 - **The scripts never enable, start or restart the service.** The operator
   enables it (the DoD runs `systemctl enable --now gosftpd`) and restarts
   it after an upgrade (docs/operations.md): a restart ends every session,

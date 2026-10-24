@@ -17,8 +17,12 @@ if command -v systemd-tmpfiles >/dev/null 2>&1; then
 fi
 
 # The package installs these as root:root (the group does not exist when
-# it is unpacked). A group other than root is the administrator's choice
-# and stays.
+# it is unpacked), and upgrades may do so again: deb keeps a changed owner,
+# group and mode, but rpm puts root:root 0750 back on users.d at every
+# upgrade or reinstall, and rpm and pacman put root:root 0640 back on a
+# config.toml that was not edited. A group other than root is left alone,
+# so it stays only where the package manager keeps it; another account
+# reads the configuration through the group gosftpd (ADR 0012).
 if getent group gosftpd >/dev/null 2>&1; then
 	for f in /etc/gosftpd/config.toml /etc/gosftpd/users.d; do
 		if [ -e "$f" ] && [ "$(stat -c %g "$f")" = 0 ]; then
