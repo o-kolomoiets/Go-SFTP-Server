@@ -68,10 +68,11 @@ type input struct {
 // is skipped with a warning, as atmoz skips it: the first definition wins.
 // Every user gets one plain mount per directory, at Home/<user>/<dir>,
 // shown under the directory's name, and the keys of the files in
-// Home/<user>/.ssh/keys/; the directories are created now, and one that
-// cannot be is unavailable to its user (Config.Unavailable). The users
-// file and the key files are read now, once, and must pass the permission
-// check of trusted files. Without any spec it returns ErrNoUsers.
+// Home/<user>/.ssh/keys/; the directories are created and opened now, and
+// one that cannot be is unavailable to its user (Config.Unavailable). The
+// users file and the key files are read now, once, and must pass the
+// permission check of trusted files. Without any spec it returns
+// ErrNoUsers.
 func Build(o Options) (*Mode, error) {
 	var inputs []input
 	if o.UsersFile != "" {
@@ -134,6 +135,10 @@ func Build(o Options) (*Mode, error) {
 				c.Unavailable = append(c.Unavailable, name)
 				mode.Warnings = append(mode.Warnings, fmt.Sprintf("%s: directory %s cannot be created (%v), so it is unavailable to %s; give it a volume of its own (-v HOST_DIR:%s), or let %s create it in %s (chown)",
 					w, d, err, s.User, path, runningUser(), home))
+			} else if err := openDir(path); err != nil {
+				c.Unavailable = append(c.Unavailable, name)
+				mode.Warnings = append(mode.Warnings, fmt.Sprintf("%s: directory %s cannot be opened (%v), so it is unavailable to %s; let %s open it: chown it, for a volume its directory on the host (-v HOST_DIR:%s), or run gosftpd as its owner (docker run --user)",
+					w, d, err, s.User, runningUser(), path))
 			}
 		}
 		if len(dirs) == 0 {
@@ -295,6 +300,18 @@ func makeDir(home, path string) error {
 		return err
 	}
 	return nil
+}
+
+// openDir opens the directory path as vfs opens a mount's directory at
+// start, where a failure stops the start: one that exists but that the
+// user gosftpd runs as cannot open, such as the host directory of a
+// volume that belongs to another user, mode 0700.
+func openDir(path string) error {
+	r, err := os.OpenRoot(path)
+	if err != nil {
+		return err
+	}
+	return r.Close()
 }
 
 // runningUser names the user gosftpd runs as, for a fix.

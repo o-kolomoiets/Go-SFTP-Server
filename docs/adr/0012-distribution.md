@@ -1306,14 +1306,16 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     that names the user and the directory. Two directories of one user
     whose names are equal ignoring case (`Upload` on the disk, `upload` in
     the spec) are an error that names both; across users they are fine.
-  - **A directory that cannot be created:** opening a mount at start is
-    otherwise fatal, so the builder creates each directory first and
-    passes one that fails as unavailable for its user
+  - **A directory that cannot be created or opened:** opening a mount at
+    start is otherwise fatal, so the builder creates and opens each
+    directory first and passes one that fails as unavailable for its user
     (`Options.Unavailable`), logged with the user, the directory and the
     fix; the others work. Docker creates the parent of a volume mount
     point (`/home/foo`) as root 0755, so a second spec directory without a
     volume of its own cannot be created by 65532: the fix is a volume for
-    it, or `chown 65532` of `/home/foo`.
+    it, or `chown 65532` of `/home/foo`. A volume whose host directory
+    65532 cannot open (another user's, mode 0700) needs a `chown 65532`
+    of that directory, or `--user` with its owner.
 - **Visible names.** `vfs.MountSpec.Display` and `config.Mount.Display`
   (`toml:"-"`, not a configuration key), passed through config/build.go,
   carry the directory's name. Where it is set, a session uses it instead

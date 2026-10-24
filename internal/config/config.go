@@ -68,9 +68,10 @@ type Config struct {
 	// the atmoz loader warns about them in its own terms.
 	Atmoz bool `toml:"-"`
 	// Unavailable names mounts that cannot be served now: in atmoz mode a
-	// directory that could not be created. CheckFS and the Landlock rules
-	// leave them out; serve passes them to vfs as unavailable, so that
-	// their users find them unavailable and the other mounts work.
+	// directory that could not be created or opened. CheckFS and the
+	// Landlock rules leave them out; serve passes them to vfs as
+	// unavailable, so that their users find them unavailable and the
+	// other mounts work.
 	Unavailable []string `toml:"-"`
 	// Inlined are files that were read once, at start, into the
 	// configuration: in atmoz mode the users file and the key files of

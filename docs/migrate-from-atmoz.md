@@ -170,7 +170,9 @@ mount name (`lost+found`, `_data`, a dot name) is skipped with a warning,
 directories a spec names; one it cannot create, such as a second
 directory without a volume under a `/home/foo` that Docker created for the
 first one, owned by root, is unavailable to its user, with a warning; give
-it a volume of its own, or `chown 65532` the parent on the host.
+it a volume of its own, or `chown 65532` the parent on the host. So is a
+directory it cannot open, such as a volume whose host directory belongs
+to another user with mode 0700: `chown 65532` that directory.
 
 ## Passwords
 

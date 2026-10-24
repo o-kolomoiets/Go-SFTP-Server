@@ -400,6 +400,43 @@ func TestAtmozUnavailableDirectory(t *testing.T) {
 	}
 }
 
+// TestAtmozUnopenableDirectory: a directory that exists but cannot be
+// opened, such as a volume's host directory of another user with mode
+// 0700, is unavailable to its user too, instead of stopping the start
+// with the internal name of its mount; the user's other directory works.
+func TestAtmozUnopenableDirectory(t *testing.T) {
+	home := atmozEnv(t, false)
+	up := filepath.Join(home, "foo", "upload")
+	if err := os.MkdirAll(up, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(up, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(up, 0o755) })
+	if r, err := os.OpenRoot(up); err == nil {
+		r.Close()
+		t.Skip("a directory with mode 0000 opens: the test runs with CAP_DAC_OVERRIDE, or on Windows")
+	}
+	ts := startRun(t, "--allow-root", "--listen", "127.0.0.1:0", "foo:"+pw+":::upload,other")
+	c := mustLogin(t, ts.addr, "foo", ssh.Password(pw))
+	if got := names(t, c, "/"); !slices.Equal(got, []string{"other"}) {
+		t.Errorf("/ lists %v", got)
+	}
+	c.Close()
+	if code := ts.stop(t); code != exitOK {
+		t.Errorf("exit %d", code)
+	}
+	logs := ts.stderr.String()
+	if want := "argument 1 (user foo): directory upload cannot be opened (open " + up + ": permission denied), so it is unavailable to foo"; !strings.Contains(logs, want) {
+		t.Errorf("no %q in the log:\n%s", want, logs)
+	}
+	if strings.Contains(logs, "atmoz1") {
+		t.Errorf("the internal mount name shows:\n%s", logs)
+	}
+	noSecret(t, ts)
+}
+
 // TestAtmozModeSelection: --config and $GOSFTPD_CONFIG stay strict, in the
 // image an /etc/gosftpd without config.toml never leads to atmoz mode,
 // --users-conf goes only without a configuration file, --dir and
