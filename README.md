@@ -41,7 +41,7 @@ to `./inbox`, under any user name, on port 2022 of every interface (add
 gosftpd creates an ed25519 host key and prints its fingerprint and a
 `known_hosts` line, so you can check what your client is told. No Go
 toolchain? Take a [release archive](#install): one binary of 10 to 11 MB for
-Linux or macOS.
+Linux or macOS. From v0.5.0 there are packages and a Docker image too.
 
 <p align="center">
   <img src="docs/assets/demo.gif" width="760" alt="Terminal recording in two panes. Server pane: gosftpd serve --dir ./inbox --audit-output audit.jsonl prints two Landlock warnings that it covers authorized_keys and audit.jsonl only as single files, landlock: ABI v5 applied, its version, a newly generated ed25519 host key saved with mode 0600, its SHA256 fingerprint, a known_hosts line, the mount / -> /home/alex/inbox with on_conflict=rename, listen 0.0.0.0:2022 and a connect hint. Client pane: sftp uploads report.pdf twice; ls -l lists report (1).pdf next to report.pdf, both owned by alex; cd .. and pwd still show /; ls /etc says not found. Finally jq prints the audit event from audit.jsonl: fs.upload by alex, path /report.pdf, final_path /report (1).pdf, conflict renamed, 48000 bytes.">
@@ -409,7 +409,7 @@ A security tool should show its work. This is what runs in CI today:
   Go in v0.4.0. Tests also fail if a config key, an audit event or a metric
   is missing from the docs.
 - **Decisions written down.** A [threat model](docs/security/threat-model.md),
-  a [hardening guide](docs/security/hardening.md) and 11
+  a [hardening guide](docs/security/hardening.md) and 12
   [design records](docs/adr/).
 
 Found a vulnerability? Please report it privately, as described in
@@ -448,8 +448,9 @@ Quirks and settings per client are in [docs/interop.md](docs/interop.md).
 
 ## Install
 
-**Release archive.** Linux and macOS, amd64 and arm64; one binary of 10 to
-11 MB, nothing else to install (static on Linux).
+**Release archive.** Linux and macOS, amd64 and arm64, and from v0.5.0
+also FreeBSD (cross-built, not tested); one binary of 10 to 11 MB, nothing
+else to install (static on Linux).
 
 ```sh
 curl -fsSLO https://github.com/o-kolomoiets/go-sftp-server/releases/download/v0.4.0/gosftpd_0.4.0_linux_amd64.tar.gz
@@ -459,8 +460,9 @@ tar xzf gosftpd_0.4.0_linux_amd64.tar.gz gosftpd
 sudo install gosftpd /usr/local/bin/ && gosftpd version
 ```
 
-Replace `linux_amd64` with `linux_arm64`, `darwin_amd64` or `darwin_arm64` as
-needed. On macOS, check with `grep darwin_arm64 checksums.txt | shasum -a 256 -c -`.
+Replace `linux_amd64` with `linux_arm64`, `darwin_amd64` or `darwin_arm64`
+(from v0.5.0 also `freebsd_amd64` or `freebsd_arm64`) as needed. On macOS,
+check with `grep darwin_arm64 checksums.txt | shasum -a 256 -c -`.
 
 **With Go 1.26.5 or newer:**
 
@@ -468,9 +470,43 @@ needed. On macOS, check with `grep darwin_arm64 checksums.txt | shasum -a 256 -c
 go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest
 ```
 
-Not there yet: Windows and FreeBSD binaries, a Docker image, deb/rpm
-packages, and signed releases (the checksums are SHA-256 and unsigned).
-The Linux archives carry a systemd unit with its user and directories;
+**Packages, from v0.5.0:** deb for Debian and Ubuntu, rpm for EL9, and
+one for Arch Linux, each for amd64 and arm64. They install gosftpd as a
+systemd service with its user and directories, the man pages and the
+completions, and never start or restart it on their own
+([docs/install.md](docs/install.md#packages)).
+
+**Docker, from v0.5.0:** `ghcr.io/o-kolomoiets/gosftpd` for linux/amd64
+and linux/arm64, about 5 MB compressed. In an empty directory, with your
+public key in `~/.ssh/id_ed25519.pub`:
+
+```sh
+V=0.5.0
+mkdir -p gosftpd data state
+docker run --rm "ghcr.io/o-kolomoiets/gosftpd:v$V" config example > gosftpd/config.toml
+sed -i "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml
+sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml
+sudo chown 65532:65532 data state
+docker run -d --name gosftpd --stop-timeout 40 -p 2022:2022 \
+  -v ./gosftpd:/etc/gosftpd:ro -v ./data:/srv/sftp -v ./state:/var/lib/gosftpd \
+  "ghcr.io/o-kolomoiets/gosftpd:v$V"
+```
+
+Then `sftp -P 2022 alice@localhost`. Compose, named volumes and reloads
+are in [docs/install.md](docs/install.md#docker). Coming from atmoz/sftp?
+The image runs its user specs, on port 2022 instead of 22, as in `docker
+run -p 22:2022 -d ghcr.io/o-kolomoiets/gosftpd:v0.5.0 foo:pass:::upload`;
+the [migration guide](docs/migrate-from-atmoz.md) says what differs.
+
+**Signed releases, from v0.5.0:** `checksums.txt`, which covers every
+archive, package and SBOM, and the image are signed with keyless cosign and
+have build provenance attestations;
+[verify them](docs/install.md#verify-a-release) before you install. The
+checksums of v0.4.0 are SHA-256 and unsigned.
+
+Not there yet: Windows binaries, Alpine (apk) packages and a package
+repository. The Linux archives carry a systemd unit with its user and
+directories;
 [docs/install.md](https://github.com/o-kolomoiets/go-sftp-server/blob/v0.4.0/docs/install.md)
 installs it as a service, with the binary in `/usr/bin`. Any other process
 supervisor works too: on SIGTERM gosftpd gives running transfers 30 seconds
@@ -480,8 +516,8 @@ configuration without dropping connections.
 ## Released and on its way
 
 `go install …@latest` and the release archives give you **v0.4.0** (released
-2026-10-17); `main` has nothing user-visible beyond it yet. What v0.4.0
-adds to v0.3.0:
+2026-10-17); `main` holds the next release, v0.5, already (below). What
+v0.4.0 adds to v0.3.0:
 
 | | v0.3.0 | v0.4.0 (latest release) |
 |---|:---:|:---:|
@@ -516,8 +552,11 @@ refused because it would serve your own `authorized_keys`. Before you
 upgrade, read [Upgrades](docs/operations.md#upgrades) and the
 [changelog](CHANGELOG.md#040---2026-10-17).
 
-On its way is v0.5: a Docker image, deb/rpm/apk packages, signed releases
-with an SBOM, man pages and FreeBSD binaries (see the [roadmap](#roadmap)).
+On its way, and on `main` already, is v0.5: the Docker image, deb, rpm and
+Arch packages, signed releases with provenance and SBOMs, man pages and
+completions, FreeBSD archives, `serve --ephemeral`, a throwaway server for
+tests, and atmoz mode, which serves the user specs of atmoz/sftp such as
+`foo:pass:::upload` (see the [roadmap](#roadmap)).
 
 ## What gosftpd is not
 
@@ -534,7 +573,8 @@ These pages describe `main`. For the v0.4.0 release, read them
 [at the v0.4.0 tag](https://github.com/o-kolomoiets/go-sftp-server/tree/v0.4.0/docs).
 
 - [Quickstart](docs/quickstart.md): from nothing to a first upload, and running it as a service
-- [Install as a Linux service](docs/install.md): the systemd unit, its user and directories
+- [Installation](docs/install.md): packages, the archive as a systemd service, Docker and Compose, verifying and rebuilding a release
+- [Migrate from atmoz/sftp](docs/migrate-from-atmoz.md): its user specs, volumes and keys with gosftpd's image
 - [Configuration](docs/configuration.md): every key, with its default
 - [Security model](docs/security.md), [threat model](docs/security/threat-model.md) and [hardening guide](docs/security/hardening.md)
 - [Audit log](docs/audit-log.md): events, fields and the schema promise
@@ -550,7 +590,7 @@ These pages describe `main`. For the v0.4.0 release, read them
 |---|---|---|
 | v0.3.0 | **released** 2026-10-09 | Connection limits and bans, password login, versions, atomic uploads, size limits, fuzzing, ssh-audit in CI |
 | v0.4.0 | **released** 2026-10-17 | Reload, user commands, certificates, host key rotation, metrics, hooks (exec, signed webhooks), PROXY protocol, a systemd unit, Landlock |
-| v0.5 | next | Docker image, deb/rpm/apk packages, signed releases with SBOM, man pages, FreeBSD binaries |
+| v0.5 | next, on `main` | Docker image, deb, rpm and Arch packages, signed releases with provenance and SBOMs, man pages, FreeBSD archives, `serve --ephemeral`, atmoz/sftp user specs |
 | v1.0 | planned | Compatibility freeze, benchmarks against OpenSSH, OpenSSF Best Practices badge |
 
 The full plan is in [ROADMAP.md](ROADMAP.md), and progress in [TASKS.md](TASKS.md).
