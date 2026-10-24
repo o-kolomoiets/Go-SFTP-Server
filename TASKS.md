@@ -31,7 +31,7 @@ The plan, rationale and acceptance criteria are in [ROADMAP.md](ROADMAP.md). Thi
 | M0-08 | Honest README in English | ✅ | |
 | M0-09 | CI `ci.yml`: lint, test (Linux amd64/arm64, macOS, Windows × Go 1.26/1.27), min-go, govulncheck, `ci-ok` | ✅ | |
 | M0-10 | `.golangci.yml` (§9.2) | ✅ | `config verify` and `run` are clean |
-| M0-11 | `tools/go.mod` (govulncheck, staticcheck, gotestsum, actionlint), `Makefile` | ✅ | go-licenses will be added in M5 |
+| M0-11 | `tools/go.mod` (govulncheck, staticcheck, gotestsum, actionlint), `Makefile` | ✅ | go-licenses added in M5-04 |
 | M0-12 | `.github/dependabot.yml` (gomod `/` and `/tools`, github-actions) | ✅ | |
 | M0-13 | `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, issue and PR templates, `CODEOWNERS` | ✅ | |
 | M0-14 | `docs/adr/0001-foundation.md`, `docs/adr/0002-non-goals.md`, `docs/DEPENDENCIES.md` | ✅ | |

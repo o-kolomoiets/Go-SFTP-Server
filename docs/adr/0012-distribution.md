@@ -1672,7 +1672,8 @@ settle these:
   seccomp profiles of engines before Docker 29;
 - the zsh completion paths in each distribution's `fpath`, and lintian on
   a maintainer without an email address;
-- govulncheck on tools/go.mod once go-licenses is added.
+- that govulncheck on tools/go.mod, which holds go-licenses since M5-04,
+  stays clean on the runners (the `vuln` job scans it).
 
 ### Not in this ADR
 
