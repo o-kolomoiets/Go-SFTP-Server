@@ -200,6 +200,11 @@ func newAtmoz(flags *pflag.FlagSet, o serveOptions, getenv func(string) string) 
 // took when its own value was missing. Its message names the flag only, as
 // the path may hold a password (ADR 0012); a state directory or an audit
 // log would otherwise be created under that name, and logged.
+//
+// On Windows an absolute path starts with a drive letter and ':', which
+// atmoz's test cannot tell from a spec of a one-letter user name whose
+// password starts with a slash or a backslash: it is not shown either,
+// and the message says why and how to see it.
 func checkSpecPaths(flags *pflag.FlagSet, o serveOptions) error {
 	for _, f := range []struct {
 		name  string
@@ -214,12 +219,23 @@ func checkSpecPaths(flags *pflag.FlagSet, o serveOptions) error {
 			continue
 		}
 		for _, p := range f.paths {
-			if atmoz.LooksLikeSpec(p) && !exists(p) {
-				return usageError{fmt.Errorf("--%s: the path does not exist (not shown: it looks like an atmoz user spec; give --%s its own value, before the specs)", f.name, f.name)}
+			if !atmoz.LooksLikeSpec(p) || exists(p) {
+				continue
 			}
+			if driveLetterPath(p) {
+				return usageError{fmt.Errorf("--%s: the path does not exist (not shown: its drive letter makes it look like an atmoz user spec, which may hold a password; give the path without the drive letter to see it)", f.name)}
+			}
+			return usageError{fmt.Errorf("--%s: the path does not exist (not shown: it looks like an atmoz user spec; give --%s its own value, before the specs)", f.name, f.name)}
 		}
 	}
 	return nil
+}
+
+// driveLetterPath reports whether p is an absolute path that starts with a
+// drive letter, such as C:\data (only on Windows).
+func driveLetterPath(p string) bool {
+	v := filepath.VolumeName(p)
+	return len(v) == 2 && v[1] == ':' && filepath.IsAbs(p)
 }
 
 // atmozHostKeyFiles sets the host keys of atmoz mode: --host-key, else a

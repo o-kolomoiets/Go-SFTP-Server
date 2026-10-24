@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -452,6 +453,12 @@ func TestAtmozModeSelection(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.toml")
 	empty := filepath.Join(t.TempDir(), "users.conf")
 	writeAll(t, empty, "# nobody\n")
+	usersConfMissing := "Error: the users file: " + statError(t, missing) + "\n"
+	if runtime.GOOS == "windows" {
+		// The path starts with a drive letter, whose ':' atmoz's test takes
+		// for that of a spec with a one-letter user name: it is not shown.
+		usersConfMissing = "Error: --users-conf" + driveLetterHidden
+	}
 	for _, tt := range []struct {
 		name  string
 		image bool
@@ -474,11 +481,11 @@ func TestAtmozModeSelection(t *testing.T) {
 		},
 		{
 			name: "empty /etc/gosftpd", image: true, env: map[string]string{atmoz.EnvUsers: "foo:" + pw}, setup: mkImageConfigDir, args: []string{"serve"},
-			want: "/etc/gosftpd is mounted but holds no config.toml",
+			want: filepath.FromSlash("/etc/gosftpd") + " is mounted but holds no config.toml",
 		},
 		{
 			name: "empty /etc/gosftpd, specs", image: true, setup: mkImageConfigDir, args: []string{"foo:" + pw},
-			want: "/etc/gosftpd is mounted but holds no config.toml",
+			want: filepath.FromSlash("/etc/gosftpd") + " is mounted but holds no config.toml",
 		},
 		{
 			name: "users file outside the image", setup: writeImageUsers, args: []string{"serve"},
@@ -502,7 +509,7 @@ func TestAtmozModeSelection(t *testing.T) {
 		},
 		{
 			name: "--users-conf missing", args: []string{"serve", "--users-conf", missing},
-			want: "Error: the users file: " + statError(t, missing) + "\n",
+			want: usersConfMissing,
 		},
 		{
 			name: "--authorized-keys", env: map[string]string{atmoz.EnvUsers: "foo:" + pw}, args: []string{"serve", "--authorized-keys", empty},
@@ -581,6 +588,10 @@ func TestAtmozUsersFileOnlyInImage(t *testing.T) {
 		t.Errorf("serve --dir outside the image names the default users file:\n%s", logs)
 	}
 }
+
+// driveLetterHidden ends the error of a path flag whose value, on
+// Windows, starts with a drive letter and names nothing.
+const driveLetterHidden = ": the path does not exist (not shown: its drive letter makes it look like an atmoz user spec, which may hold a password; give the path without the drive letter to see it)\n"
 
 // statError is the message of os.Stat for path, which differs between
 // platforms.
@@ -671,6 +682,12 @@ func TestAtmozUsageErrors(t *testing.T) {
 	atmozEnv(t, false)
 	spec := "u:" + pw + ":::upload"
 	const notShown = " (the value is not shown: it contains ':', as an atmoz user spec does)\n"
+	// A spec of a one-letter user name whose password starts with a
+	// backslash is an absolute path on Windows.
+	drive, driveHidden := `c:\`+pw, ": the path does not exist (not shown: it looks like an atmoz user spec; give --state-dir its own value, before the specs)\n"
+	if runtime.GOOS == "windows" {
+		driveHidden = driveLetterHidden
+	}
 	for _, tt := range []struct {
 		args []string
 		want string
@@ -692,6 +709,7 @@ func TestAtmozUsageErrors(t *testing.T) {
 		{[]string{"--read-only=" + spec, "bar:x"}, "Error: invalid argument for --read-only (not shown: it contains ':', as an atmoz user spec does)\n"},
 		{[]string{"--allow-root", "--listen", "127.0.0.1:0", "--users-conf", spec, "bar:x"}, "Error: --users-conf: the path does not exist (not shown: it looks like an atmoz user spec; give --users-conf its own value, before the specs)\n"},
 		{[]string{"--allow-root", "--listen", "127.0.0.1:0", "--state-dir", spec, "bar:x"}, "Error: --state-dir: the path does not exist (not shown: it looks like an atmoz user spec; give --state-dir its own value, before the specs)\n"},
+		{[]string{"--allow-root", "--listen", "127.0.0.1:0", "--state-dir", drive, "bar:x"}, "Error: --state-dir" + driveHidden},
 		{[]string{"-" + spec}, "Error: unknown flag (not shown: it contains ':', as an atmoz user spec does)\n"},
 		{[]string{"--" + spec}, "Error: unknown flag (not shown: it contains ':', as an atmoz user spec does)\n"},
 		{[]string{"serve", "-" + spec}, "Error: unknown flag (not shown: it contains ':', as an atmoz user spec does)\n"},
