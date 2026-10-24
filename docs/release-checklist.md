@@ -60,8 +60,9 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    SBOM scanner by the digest of their multi-platform index, which `docker
    buildx imagetools inspect IMAGE:VERSION` prints (`moby/buildkit`,
    `docker/buildkit-syft-scanner`). A test (`TestChecklistPins` in
-   `test/release`) fails when a file pins one that this table does not
-   name.
+   `test/release`) fails when a workflow or `.goreleaser.yaml` pins
+   GoReleaser, cosign, syft or an image by digest that this table does not
+   name; it does not see the other versions the workflows set by hand.
 
 ## Tag and build
 
