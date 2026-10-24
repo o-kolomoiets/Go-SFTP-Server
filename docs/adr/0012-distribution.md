@@ -1597,9 +1597,12 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   update (GoReleaser, cosign, syft, the BuildKit image, the SBOM scanner
   image). It covers a tag
   whose release did not start (Owner actions), an abandoned draft (Images
-  are public before the release is) and a release-format tag created by
+  are public before the release is), a release-format tag created by
   mistake, which outranks every later version and only the owner can
-  remove, by bypassing the tag ruleset.
+  remove, by bypassing the tag ruleset, and a stable run whose `latest`
+  step met a newer tag: its verified draft is published, not re-run, and
+  `latest` is pointed by hand when the newer tag is a pre-release (found
+  in the final review).
 
 ### Owner actions
 

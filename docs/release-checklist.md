@@ -83,6 +83,9 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    run leaves a draft and the image tag `vX.Y.Z` at most: fix the cause
    and re-run it (**Re-run failed jobs**), which replaces the draft and
    its image, or give the version up ([An abandoned draft](#an-abandoned-draft)).
+   A stable run that is red only at that last step, because a newer tag
+   appeared while it ran, cannot be re-run: publish its draft
+   ([Only the latest step failed](#only-the-latest-step-failed)).
 
 ## Publish
 
@@ -176,6 +179,37 @@ created by hand, is released the same way; Tag release's checks are then
 yours: the version is higher than every release tag (the release guard
 stops the run otherwise), CHANGELOG.md has its notes, and `ci-ok` passed on
 the tag's commit.
+
+### Only the latest step failed
+
+A stable Release run whose only red step is **latest names the verified
+image**, with "vX.Y.Z is not the highest release tag of
+o-kolomoiets/Go-SFTP-Server: vA.B.C is", met a tag made while it ran: by
+Tag release, whose Release run then waited for this one, or by hand. Its
+draft and image are complete: "The documented verification" passed, and
+only `latest` did not move. Do not re-run it: the release guard fails
+every re-run of this tag, in both jobs, before anything is built. Check
+the draft and publish it (steps 8 to 10). Where `latest` ends up depends
+on the newer tag:
+
+- **A stable version:** its own Release run moves `latest` to its image
+  once its verification passes. Nothing to do.
+- **A pre-release:** `latest` stays on the previous stable release, since
+  a pre-release never moves it. Once Verify release has passed, point it
+  at this release's verified image, by the digest in its `digests.txt`,
+  logged in to `ghcr.io` with a token that may write packages:
+
+  ```sh
+  V=X.Y.Z   # this release
+  DIGEST=$(gh release download "v$V" -R o-kolomoiets/Go-SFTP-Server -p digests.txt -O - |
+    awk -v t="ghcr.io/o-kolomoiets/gosftpd:v$V" '$2 == t { print $1 }')
+  docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest "ghcr.io/o-kolomoiets/gosftpd@sha256:$DIGEST"
+  ```
+
+  The next stable release moves it from there.
+- **A tag made by mistake**, such as `v5.0.0`: remove it first
+  ([A tag made by mistake](#a-tag-made-by-mistake)), then point `latest`
+  as for a pre-release.
 
 ### An abandoned draft
 
