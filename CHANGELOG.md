@@ -110,9 +110,10 @@ Incompatible changes are prefixed with **BREAKING:**.
 - Documentation of the packages and the image. docs/install.md, now
   "Installation", gives the packages for Debian and Ubuntu, EL9 and Arch,
   the move from the archive install to a package with the one step each
-  format needs, and what an upgrade and a removal keep of the
-  configuration, `users.d`, their owners and modes per format; Docker with
-  a configuration directory, named volumes or your own uid, a reload with
+  format needs, what an upgrade and a removal keep of the configuration,
+  `users.d`, their owners and modes per format, and the service under
+  another account; Docker with a configuration directory, named volumes
+  or your own uid, Compose by digest after each of them, a reload with
   `docker kill -s HUP` and an upgrade; the verification of a release, the
   image by its digest, also without the attestations API; and the rebuild
   of a release from its tag. docs/operations.md adds upgrades with a
@@ -128,7 +129,9 @@ Incompatible changes are prefixed with **BREAKING:**.
   docs/quickstart.md show the Docker Quickstart, which a test keeps equal
   to the block CI runs, and link docs/migrate-from-atmoz.md. The release
   checklist follows the new release flow, with the smoke tests of the
-  packages and the image, an abandoned draft and a tag made by mistake.
+  packages and the image, the one-time checks of a milestone's first rc,
+  an abandoned draft, a tag made by mistake and a stable run whose last
+  step met a newer tag.
 
 ### Changed
 
