@@ -12,8 +12,12 @@ on:
 permissions:
   contents: read
 
+# One run at a time, whatever the tag, and none cancelled while it runs: a
+# run dispatched during another waits, and its guard then sees the other
+# run's tag. Runs for two tags would otherwise overlap, and the older one
+# could move latest last.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
 
 jobs:
   # The guard, then the man pages, completions and THIRD_PARTY_LICENSES from
@@ -162,10 +166,15 @@ jobs:
         run: V="${GITHUB_REF_NAME#v}" ../test/docs/run-block.sh verify
       # Only a stable version, and only the digest just verified: with one
       # source and no annotations, imagetools create copies the index as it
-      # is, so latest names the signed and attested digest.
+      # is, so latest names the signed and attested digest. The guard again
+      # first: a tag made while this run was in progress makes this one no
+      # longer the highest, and latest is left to that tag's run.
       - name: latest names the verified image
         if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          .github/scripts/release-guard.sh
           repo=ghcr.io/o-kolomoiets/gosftpd
           digest="$(awk -v t="$repo:$GITHUB_REF_NAME" '$2 == t { print $1 }' dist/digests.txt)"
           if ! [[ $digest =~ ^[0-9a-f]{64}$ ]]; then echo "::error::digests.txt has no digest of $repo:$GITHUB_REF_NAME"; exit 1; fi

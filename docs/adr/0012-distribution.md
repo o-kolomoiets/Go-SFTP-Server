@@ -110,7 +110,8 @@
   the run unless the tag is the highest release tag and has no published
   release; otherwise a re-run or a dispatch for a published release would
   push and sign a rebuilt image (images are not reproducible) under its
-  tag, and a run on an older tag would move `latest` backwards. A re-run
+  tag, and a run on an older tag would move `latest` backwards. Runs never
+  overlap, and the guard runs again before `latest` moves. A re-run
   while the release is still a draft replaces the draft and its image,
   which is what a re-run is for. The first run is `v0.5.0-rc.1`: a
   pre-release never moves `latest`. A draft that is deleted instead of
@@ -271,8 +272,15 @@ release:
   `dist/digests.txt`; with one index source and no annotations buildx
   v0.38.1 copies the index unchanged, so `latest` names the digest that was
   signed and attested. `tag.yml` accepts only a version higher than every
-  release tag, and the guard runs only the highest one (Workflows), so
-  `latest` never moves backwards. In a snapshot `.Tag` and `.Prerelease`
+  release tag, the guard runs only the highest one, and runs of
+  `release.yml` never overlap (Workflows); the step itself runs the guard
+  first, so `latest` never moves backwards. A tag made while a stable run
+  is in progress (by `tag.yml`, whose run waits, or by hand) fails that
+  step, and `latest` is left to the newer tag's run; the draft is complete
+  and verified by then. If the newer tag is a pre-release, `latest` stays
+  on the previous release until the owner points it at the verified
+  digest with the same command, or the next stable release does. In a
+  snapshot `.Tag` and `.Prerelease`
   come from the last reachable tag (after v0.5.0-rc.1: `v0.5.0-rc.1` and
   `rc.1`) and `dockers_v2` appends the architecture, so CI refers to its
   images as `v<.Version>-amd64` and `-arm64`.
@@ -403,7 +411,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release                 # one run at a time, whatever the tag; none cancelled
 jobs:
   generate:                      # the guard, then third-party tool code, without credentials
     runs-on: ubuntu-24.04
@@ -463,8 +471,9 @@ jobs:
         working-directory: dist
         env: { GH_TOKEN: "${{ github.token }}" }
       - if: ${{ !contains(github.ref_name, '-') }}
-        run: ...                 # docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest, the verified digest;
-                                 # then imagetools inspect: latest must name that digest
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: ...                 # the guard again; docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest,
+                                 # the verified digest; then imagetools inspect: latest must name that digest
 ```
 
 - **No QEMU.** The Dockerfile has no `RUN`, so the arm64 image builds on
@@ -505,7 +514,16 @@ jobs:
   script both source, so that `tag.yml` accepts only a version the guard
   then runs. The release job repeats the guard because
   re-running only that job (Re-run failed jobs, Re-run this job) reuses
-  `generate`'s earlier success. The guard checks `GITHUB_REF_NAME`, and
+  `generate`'s earlier success, and runs it once more in the step that
+  moves `latest`. The guard alone does not keep `latest` from moving
+  backwards: runs for two tags, each the highest when its guard ran,
+  would overlap, and the older one could reach its last step after the
+  newer one. So `release.yml` has one concurrency group, `release`,
+  without `cancel-in-progress`: a run dispatched while another is in
+  progress waits, and its guard runs after the other has finished.
+  GitHub keeps one pending run per group, so a third dispatch cancels the
+  waiting one, which the owner dispatches again if its tag is still the
+  highest. The guard checks `GITHUB_REF_NAME`, and
   GoReleaser is given that name (`release` below): on its own it would
   not build it.
 - **`generate`** (`contents: read` only, no `id-token`; setup-go `cache:
@@ -558,9 +576,9 @@ jobs:
   has been pushed and signed, so it catches a regression before the
   attestations, the verification and `latest`, and does not replace the
   variable. After the attest steps the job uploads `.intoto.jsonl` and
-  `digests.txt`; after the verification step it moves `latest` for a
-  stable version, and checks with `docker buildx imagetools inspect`
-  that `latest` names the verified digest.
+  `digests.txt`; after the verification step it runs the guard again and
+  moves `latest` for a stable version, and checks with `docker buildx
+  imagetools inspect` that `latest` names the verified digest.
 - **BuildKit is pinned.** setup-buildx-action's default `docker-container`
   driver runs `moby/buildkit:buildx-stable-1`, a floating tag that buildx
   does not verify by default; that container builds the image, receives

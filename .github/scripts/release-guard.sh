@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The release guard (ADR 0012), which release.yml runs first in both of its
-# jobs. It stops the run unless:
+# jobs, and again before it moves latest. It stops the run unless:
 # - GITHUB_REF is a release tag, refs/tags/vX.Y.Z with an optional -alpha,
 #   -beta or -rc and .N (a dispatch on a branch fails);
 # - that tag is the highest release tag of GITHUB_REPOSITORY;
@@ -10,7 +10,8 @@
 # Otherwise a re-run, or a dispatch for a published release, would push and
 # sign a rebuilt image under its tag, and a run on an older tag would move
 # latest backwards. The release job repeats the guard because re-running
-# only that job reuses the generate job's earlier success.
+# only that job reuses the generate job's earlier success, and runs it once
+# more before latest moves, for a tag made while the run was in progress.
 # Needs gh with GH_TOKEN (contents: read), and GITHUB_REF, GITHUB_REF_NAME
 # and GITHUB_REPOSITORY as GitHub Actions sets them.
 set -euo pipefail
