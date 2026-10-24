@@ -5,6 +5,7 @@ package docs
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -48,4 +49,49 @@ func markedBlock(t *testing.T, text, name string) string {
 		t.Fatalf("docs/install.md: the block %s has no fenced code", name)
 	}
 	return inner[start : end+len("```")]
+}
+
+// sedInPlace matches sed -i, the in-place option, without a suffix
+// attached to it.
+var sedInPlace = regexp.MustCompile(`\bsed\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*i(?:''|"")?(?:\s|$)`)
+
+// TestQuickstartSed checks that the quickstart block, which README.md and
+// docs/quickstart.md copy for macOS readers too, runs sed -i only with a
+// backup suffix attached (-i.orig): GNU sed takes that, and the BSD sed of
+// macOS requires a suffix, taking the next argument as one otherwise, so
+// that the script becomes the file name and the placeholder stays.
+func TestQuickstartSed(t *testing.T) {
+	t.Parallel()
+	install, err := os.ReadFile(filepath.Join(root, "docs", "install.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := markedBlock(t, string(install), "quickstart")
+	if !strings.Contains(block, "sed ") {
+		t.Fatal("the quickstart block has no sed: update this test")
+	}
+	for line := range strings.Lines(block) {
+		if sedInPlace.MatchString(line) {
+			t.Errorf("the quickstart block runs sed -i without a suffix, which the BSD sed of macOS refuses: %s", strings.TrimSpace(line))
+		}
+	}
+}
+
+// TestSedInPlace checks the pattern of TestQuickstartSed.
+func TestSedInPlace(t *testing.T) {
+	t.Parallel()
+	for line, want := range map[string]bool{
+		`sed -i "s|a|b|" f`:                    true,
+		`sudo sed -i 's/x/y/' f`:               true,
+		`sed -n -i 's/x/y/' f`:                 true,
+		`sed -Ei 's/x/y/' f`:                   true,
+		`sed -i.orig "s|a|b|" f && rm f.orig`:  false,
+		`sed -i'' 's/x/y/' f`:                  true,
+		`sed "s|a|b|" f > f.new && mv f.new f`: false,
+		`sed -n '1p' f`:                        false,
+	} {
+		if got := sedInPlace.MatchString(line); got != want {
+			t.Errorf("sedInPlace.MatchString(%q) = %v, want %v", line, got, want)
+		}
+	}
 }

@@ -106,7 +106,7 @@ empty directory, with your public key in `~/.ssh/id_ed25519.pub`:
 V=0.5.0
 mkdir -p gosftpd data state
 docker run --rm "ghcr.io/o-kolomoiets/gosftpd:v$V" config example > gosftpd/config.toml
-sed -i "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml
+sed -i.orig "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml && rm gosftpd/config.toml.orig
 sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml
 sudo chown 65532:65532 data state
 docker run -d --name gosftpd --stop-timeout 40 -p 2022:2022 \

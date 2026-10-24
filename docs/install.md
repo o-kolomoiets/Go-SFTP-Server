@@ -541,7 +541,7 @@ With your public key in `~/.ssh/id_ed25519.pub`:
 V=0.5.0
 mkdir -p gosftpd data state
 docker run --rm "ghcr.io/o-kolomoiets/gosftpd:v$V" config example > gosftpd/config.toml
-sed -i "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml
+sed -i.orig "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml && rm gosftpd/config.toml.orig
 sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml
 sudo chown 65532:65532 data state
 docker run -d --name gosftpd --stop-timeout 40 -p 2022:2022 \
@@ -556,7 +556,11 @@ the `data` directory, with your key in place of the placeholder; the audit
 log goes to stdout. gosftpd refuses a configuration that belongs to
 someone other than root or the user it runs as, or that others can write:
 hence the `chown root:65532` and the mode 0640. Bind mounts keep the owner
-of the host directory, so `data` and `state` must belong to 65532.
+of the host directory, so `data` and `state` must belong to 65532. CI runs
+the block with Docker Engine on Linux; Docker Desktop (macOS, Windows)
+shares host directories in its own way and is not tested. `sed -i.orig`,
+with the `rm` of the copy it keeps, works with GNU sed and with the BSD
+sed of macOS, which needs the suffix.
 `--stop-timeout 40` lets `docker stop` wait for the 30 s that running
 transfers get (`server.shutdown_timeout`), not the default 10 s.
 
