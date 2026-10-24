@@ -2,13 +2,16 @@
 
 From nothing to a first upload in a few minutes. You need an SSH key pair
 (`ssh-keygen -t ed25519` if you have none) and an SFTP client; OpenSSH `sftp`
-is used below.
+is used below. With Docker, skip to [With Docker](#with-docker); coming
+from atmoz/sftp, see [Migrate from atmoz/sftp](migrate-from-atmoz.md).
 
 ## Install
 
-Download the archive for your system from the
+Download the archive for your system (Linux, macOS or FreeBSD, amd64 or
+arm64) from the
 [releases](https://github.com/o-kolomoiets/go-sftp-server/releases), check it
-against `checksums.txt` and put `gosftpd` in your `PATH`:
+against `checksums.txt` ([verify](install.md#verify-a-release) that file's
+signature first) and put `gosftpd` in your `PATH`:
 
 ```sh
 sha256sum --check --ignore-missing checksums.txt
@@ -17,7 +20,8 @@ sudo install gosftpd /usr/local/bin/
 gosftpd version
 ```
 
-Or build it with Go 1.26.5 or newer:
+On macOS, check the archive with `grep darwin_arm64 checksums.txt | shasum
+-a 256 -c -`. Or build it with Go 1.26.5 or newer:
 
 ```sh
 go install github.com/o-kolomoiets/go-sftp-server/cmd/gosftpd@latest
@@ -92,14 +96,38 @@ upload over an existing name becomes a copy. See
 permissions and every other key, and [audit-log.md](audit-log.md) for the
 JSON audit log on stdout.
 
+## With Docker
+
+The image `ghcr.io/o-kolomoiets/gosftpd` needs no Go and no archive. In an
+empty directory, with your public key in `~/.ssh/id_ed25519.pub`:
+
+```sh
+V=0.5.0
+mkdir -p gosftpd data state
+docker run --rm "ghcr.io/o-kolomoiets/gosftpd:v$V" config example > gosftpd/config.toml
+sed -i "s|<paste your public key[^>]*>|$(cat ~/.ssh/id_ed25519.pub)|" gosftpd/config.toml
+sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml
+sudo chown 65532:65532 data state
+docker run -d --name gosftpd --stop-timeout 40 -p 2022:2022 \
+  -v ./gosftpd:/etc/gosftpd:ro -v ./data:/srv/sftp -v ./state:/var/lib/gosftpd \
+  "ghcr.io/o-kolomoiets/gosftpd:v$V"
+```
+
+Then `sftp -P 2022 alice@localhost`; `docker logs gosftpd` shows the host
+key's fingerprint and the audit log. The configuration lives in
+`gosftpd/`, a mounted directory: edit it and `docker kill -s HUP gosftpd`
+applies it. The uploads land in `data/` and the host key in `state/`, so
+a new container keeps both. [install.md](install.md#docker) explains each
+line, the variants without `sudo`, Compose, reloads and upgrades.
+
 ## Running it as a service
 
 Run gosftpd as an unprivileged user that owns the served directories, never as
-root. On Linux with systemd, [install.md](install.md) installs it as a
-service with the unit, user and directories from the release archive (from
-v0.4): the binary then goes to `/usr/bin` instead, and a copy left in
-`/usr/local/bin` should be removed. Packages and a Docker image follow in
-v0.5. Any other supervisor works too: gosftpd stops cleanly on SIGTERM
-(running transfers get `shutdown_timeout`, 30 s by default) and applies its
-configuration again on SIGHUP without dropping connections (see
+root. On Linux with systemd, the deb, rpm and Arch packages install it as a
+service with its user and directories ([install.md](install.md#packages)),
+and so does the release archive by hand: the binary then goes to `/usr/bin`
+instead, and a copy left in `/usr/local/bin` should be removed. Any other
+supervisor works too: gosftpd stops cleanly on SIGTERM (running transfers
+get `shutdown_timeout`, 30 s by default) and applies its configuration
+again on SIGHUP without dropping connections (see
 [Reload](configuration.md#reload)).

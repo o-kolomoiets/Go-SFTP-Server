@@ -25,7 +25,8 @@ described in [configuration.md](../configuration.md).
       `pprof` is off.
 - [ ] Hooks, if any: webhooks use `https` and receivers verify signatures;
       exec hook scripts quote every name ([hooks.md](../hooks.md)).
-- [ ] You follow releases and security advisories of the repository.
+- [ ] You follow releases and security advisories of the repository, and
+      verify each release before you install it.
 
 ## Run as a dedicated user
 
@@ -203,6 +204,10 @@ exchange (`kex-strict-s-v00@openssh.com`) protects against Terrapin
 
 - Watch the repository's releases and security advisories, and update when
   a release fixes a vulnerability that is reachable in your setup.
+- Verify a release before you install it, from v0.5.0: the cosign
+  signature of `checksums.txt`, the provenance attestations, and the image
+  by its digest, which is what you then run
+  ([install.md](../install.md#verify-a-release)).
 - CI runs `govulncheck` on every change; run it against your binary too
   (`govulncheck -mode=binary "$(command -v gosftpd)"`). On a release
   binary, which is stripped, it always reports GO-2026-5932

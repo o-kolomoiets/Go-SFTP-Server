@@ -104,9 +104,31 @@ Incompatible changes are prefixed with **BREAKING:**.
   attestations cover the files and the image, and the release carries the
   provenance bundle (`gosftpd_X.Y.Z.intoto.jsonl`) and `digests.txt`, the
   image's digest. docs/install.md gives the commands that verify a
-  release (cosign v3.0 or later); the release workflow runs them before
-  the release is published, and a workflow runs them against every
-  published release (ADR 0012).
+  release (cosign v3.0 or later, gh 2.68.0 or later); the release workflow
+  runs them before the release is published, and a workflow runs them
+  against every published release (ADR 0012).
+- Documentation of the packages and the image. docs/install.md, now
+  "Installation", gives the packages for Debian and Ubuntu, EL9 and Arch,
+  the move from the archive install to a package with the one step each
+  format needs, and what an upgrade and a removal keep of the
+  configuration, `users.d`, their owners and modes per format; Docker with
+  a configuration directory, named volumes or your own uid, a reload with
+  `docker kill -s HUP` and an upgrade; the verification of a release, the
+  image by its digest, also without the attestations API; and the rebuild
+  of a release from its tag. docs/operations.md adds upgrades with a
+  package, needrestart on Ubuntu, also for an archive install that
+  unattended-upgrades would otherwise restart, merging the `.dpkg-dist`,
+  `.dpkg-old`, `.rpmnew`, `.pacnew`, `.rpmsave` and `.pacsave` files, and
+  a reload in Docker. docs/configuration.md describes the search for the
+  configuration file with the atmoz fallback, ephemeral mode with a GitHub
+  Actions step that masks the password and its use in a container, and
+  atmoz mode; docs/security.md and the threat model the Landlock rule of
+  ephemeral mode, the plain-text passwords of atmoz mode and the signed
+  releases; SECURITY.md how to verify a release. The README and
+  docs/quickstart.md show the Docker Quickstart, which a test keeps equal
+  to the block CI runs, and link docs/migrate-from-atmoz.md. The release
+  checklist follows the new release flow, with the smoke tests of the
+  packages and the image, an abandoned draft and a tag made by mistake.
 
 ### Changed
 
