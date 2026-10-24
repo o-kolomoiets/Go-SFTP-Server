@@ -35,8 +35,9 @@ updates:
         update-types: [minor, patch]
 
   # The base image's digest in packaging/docker/Dockerfile and the digests
-  # every FROM under test/ is pinned by (ADR 0012).
+  # every FROM of test/packages/*.Dockerfile is pinned by (ADR 0012).
+  # test/docker/ holds scripts, no Dockerfile.
   - package-ecosystem: docker
-    directories: [/packaging/docker, /test/packages, /test/docker]
+    directories: [/packaging/docker, /test/packages]
     schedule:
       interval: weekly

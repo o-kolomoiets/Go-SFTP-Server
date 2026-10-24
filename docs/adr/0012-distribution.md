@@ -803,15 +803,17 @@ jobs:
     Landlock in this step too.
   - The three new jobs join `ci-ok`'s needs; stream C adds one fuzz-smoke
     entry (`FuzzAtmozSpec`).
-- **Dependabot** gets `package-ecosystem: docker` with `directories:
-  [/packaging/docker, /test/packages, /test/docker]`: the base image digest
-  and the test images' digests. Every `FROM` under `test/` is pinned by
-  digest (`debian:12@sha256:…`, `debian:13@sha256:…`, the EL9 and Arch
-  images): Scorecard v5.6.0's Pinned-Dependencies matches `*Dockerfile*`
-  anywhere in the repository but vendor directories and counts each `FROM`
-  without `@sha256:` as an unpinned image, the criterion this ADR uses
-  against slsa-github-generator. The score is already below 10 because of
-  the `pip install` lines in ci.yml; this adds no new miss.
+- **Dependabot** gets `package-ecosystem: docker` with
+  `directories: [/packaging/docker, /test/packages]`: the base image
+  digest and the digests of the test images. `test/docker/` holds scripts
+  and no Dockerfile, so it is not listed (found in the final review).
+  Every `FROM` under `test/` is pinned by digest (`debian:12@sha256:…`,
+  `debian:13@sha256:…`, the EL9 and Arch images): Scorecard v5.6.0's
+  Pinned-Dependencies matches `*Dockerfile*` anywhere in the repository
+  but vendor directories and counts each `FROM` without `@sha256:` as an
+  unpinned image, the criterion this ADR uses against
+  slsa-github-generator. The score is already below 10 because of the
+  `pip install` lines in ci.yml; this adds no new miss.
 
 ### Container image
 
@@ -1695,7 +1697,7 @@ The work splits into the TASKS rows M5-02 to M5-13 and four streams:
   `release-out.sh` (the generate artifact) and `release-notes.sh` (tested
   in `test/release/`, the gh ones against a fake gh backed by a git
   repository); `.github/dependabot.yml`;
-  `test/packages/`, `test/docker/` (every `FROM` pinned by digest);
+  `test/packages/` (every `FROM` pinned by digest), `test/docker/`;
   `test/docs/run-block.sh` and the marked blocks of docs/install.md.
 - **C, ephemeral and atmoz:** `internal/atmoz` (parser, mount builder and
   fuzz target), `internal/cli/ephemeral.go` and `atmoz.go`, flags and mode

@@ -1313,7 +1313,7 @@ Metrics: MB/s (median of 5 runs), server CPU seconds from cgroup `cpu.stat`, pea
 | `verify-release.yml` | `release: published`, `workflow_dispatch` (from M5) | Runs the verification commands of `docs/install.md` against the published release (§9.5) |
 | `scorecard.yml` | weekly cron | `ossf/scorecard-action` v2.4.4 |
 | CodeQL | default setup in Settings | no workflow file |
-| `.github/dependabot.yml` | weekly | `gomod` (`directories: ["/", "/tools"]`, minor and patch grouped), `github-actions`, `docker` (`directories: ["/packaging/docker", "/test/packages", "/test/docker"]`: the base image digest and the digests every test `FROM` is pinned by, ADR 0012) |
+| `.github/dependabot.yml` | weekly | `gomod` (`directories: ["/", "/tools"]`, minor and patch grouped), `github-actions`, `docker` (`directories: ["/packaging/docker", "/test/packages"]`: the base image digest and the digests every test `FROM` is pinned by, ADR 0012) |
 
 General rules: `permissions: contents: read` at the top level; permissions are widened only at the job level. From M3, third-party actions are pinned by commit SHA with a version comment (before that, by tag). `pull_request_target` with a checkout of PR code is not used. `actionlint` v1.7.12 does not know the `ubuntu-26.04` label, so it has to be added to `.github/actionlint.yaml`.
 
