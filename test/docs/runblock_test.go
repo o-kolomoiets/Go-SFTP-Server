@@ -31,7 +31,11 @@ type result struct {
 
 // runBlock runs test/docs/run-block.sh with args in dir, with the
 // environment env added to this process's (V removed first) and stdin as
-// its standard input.
+// its standard input. PWD is dir, as a shell sets it for the commands it
+// runs: bash takes $PWD for the working directory's name only when it
+// names that directory, else the physical path, which on macOS is
+// /private/var/folders/... for a temporary directory in /var/folders/...,
+// as /var is a symbolic link.
 func runBlock(t *testing.T, dir string, env []string, stdin string, args ...string) result {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -43,7 +47,8 @@ func runBlock(t *testing.T, dir string, env []string, stdin string, args ...stri
 	}
 	cmd := exec.CommandContext(t.Context(), "bash", append([]string{script}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "V=") }), env...)
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "V=") || strings.HasPrefix(kv, "PWD=") })
+	cmd.Env = append(append(cmd.Env, "PWD="+dir), env...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
