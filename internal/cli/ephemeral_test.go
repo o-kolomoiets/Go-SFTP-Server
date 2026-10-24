@@ -651,3 +651,21 @@ func TestServeListenCounted(t *testing.T) {
 		t.Errorf("exit %d:\n%s", code, out)
 	}
 }
+
+// TestServeAuditOutputHelp: the help of --audit-output says where the
+// default goes with --ephemeral, and offers no keyword "stderr", which
+// would be taken as a file name.
+func TestServeAuditOutputHelp(t *testing.T) {
+	t.Parallel()
+	code, out, _ := execute(t, "serve", "--help")
+	var line string
+	for l := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(l, "--audit-output ") {
+			line = l
+		}
+	}
+	if code != exitOK || !strings.Contains(line, "audit log destination: stdout or a file path (with --ephemeral, stdout is refused and the default goes to stderr)") ||
+		strings.Contains(line, "stderr or") {
+		t.Errorf("exit %d: %q", code, line)
+	}
+}
