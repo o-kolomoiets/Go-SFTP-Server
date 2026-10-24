@@ -1,0 +1,16 @@
+# In the directory of the Quickstart (docs/install.md): ./gosftpd holds
+# config.toml; ./data and ./state, owned by 65532, keep the uploads and
+# the host key.
+services:
+  gosftpd:
+    image: ghcr.io/o-kolomoiets/gosftpd:v0.5.0@sha256:<digest>
+    ports: ["2022:2022"]
+    volumes:
+      - ./gosftpd:/etc/gosftpd:ro
+      - ./data:/srv/sftp
+      - ./state:/var/lib/gosftpd
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 40s
+    # init: true   # with exec hooks (docs/hooks.md)

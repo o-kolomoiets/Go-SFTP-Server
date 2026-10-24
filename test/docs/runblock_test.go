@@ -71,22 +71,24 @@ func write(t *testing.T, dir, name, text string) string {
 	return path
 }
 
-// fakeGH writes a gh into a new directory that appends its arguments to
-// gh.log in dir, and returns PATH with that directory first.
-func fakeGH(t *testing.T, dir string) string {
+// fakeCommand writes a command name into a new directory that appends its
+// arguments to name.log in dir, and returns PATH with that directory
+// first.
+func fakeCommand(t *testing.T, dir, name string) string {
 	t.Helper()
 	bin := t.TempDir()
-	log := filepath.Join(dir, "gh.log")
+	log := filepath.Join(dir, name+".log")
 	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
-	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return "PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")
 }
 
-func ghLog(t *testing.T, dir string) string {
+// commandLog returns the calls of the fake command name in dir.
+func commandLog(t *testing.T, dir, name string) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, "gh.log"))
+	data, err := os.ReadFile(filepath.Join(dir, name+".log"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return ""
 	}
@@ -284,11 +286,11 @@ func TestRunBlockReleaseDownload(t *testing.T) {
 				write(t, d, f, "")
 			}
 			md := write(t, t.TempDir(), "install.md", strings.Replace(block, "%s", tt.flags, 1))
-			got := runBlock(t, dir, []string{"V=1.2.3", fakeGH(t, dir)}, "", "verify", md)
+			got := runBlock(t, dir, []string{"V=1.2.3", fakeCommand(t, dir, "gh")}, "", "verify", md)
 			if got.code != 0 || got.stdout != "done\n" {
 				t.Fatalf("exit %d, %q, stderr: %s; want exit 0, \"done\"", got.code, got.stdout, got.stderr)
 			}
-			log := ghLog(t, dir)
+			log := commandLog(t, dir, "gh")
 			download := "release download v1.2.3 -R o/r -p checksums.txt -p gosftpd_1.2.3_linux_*.tar.gz"
 			if tt.flags != "" {
 				download += " " + tt.flags

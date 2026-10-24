@@ -722,7 +722,10 @@ jobs:
     `config example` and the `chown` with `sed -i "s|<paste your public
     key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`; and the `compose`
     block with `read_only` (its `image:`, a digest that cannot be retagged,
-    overridden with the local tag); and `serve --ephemeral --listen
+    overridden with the local tag), run as a reader runs it, in the
+    Quickstart's directory while the Quickstart's container still holds
+    port 2022 (the block removes that container, and the service serves
+    the Quickstart's host key and upload); and `serve --ephemeral --listen
     0.0.0.0:2022` in a container (see `serve --ephemeral`): `healthy`, one
     line on stdout, a key login with that key and the JSON's `known_hosts`
     line, `docker stop` exiting 0 after removing the key and the data. A
@@ -1452,8 +1455,10 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   archive install to a package" and what a removal keeps per format), the
   archive, Docker (the Quickstart with a configuration directory, named
   volumes as the variant without `chown`, `--stop-timeout 40`, a reload
-  with `docker kill -s HUP`) and compose (`docs/examples/compose.yaml`:
-  the image by digest, the configuration directory, `read_only: true`,
+  with `docker kill -s HUP`) and compose (`docs/examples/compose.yaml`,
+  which a test keeps equal to the file the compose block writes: the image
+  by digest, the Quickstart's configuration, data and state directories,
+  so that the host key and the uploads stay, `read_only: true`,
   `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,
   `stop_grace_period: 40s`, `init: true` when exec hooks are used). The
   blocks that CI runs carry `ci:` markers (Workflows).

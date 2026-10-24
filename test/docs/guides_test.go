@@ -129,3 +129,35 @@ func TestHtpasswdB(t *testing.T) {
 		}
 	}
 }
+
+// TestComposeExample checks that docs/examples/compose.yaml is the file
+// that the compose block of docs/install.md writes, with <digest> for the
+// digest that digests.txt names, and that the block first removes the
+// Quickstart's container, which holds port 2022 (test/docker/run.sh runs
+// the block against the image).
+func TestComposeExample(t *testing.T) {
+	t.Parallel()
+	m := regexp.MustCompile("(?m)^<!-- ci:compose -->\n```sh\nV=(\\S+)$").FindStringSubmatch(readFile(t, "docs", "install.md"))
+	if m == nil {
+		t.Fatal("docs/install.md: no compose block that starts with a V= line")
+	}
+	v := m[1]
+	digest := strings.Repeat("0123456789abcdef", 4)
+	dir := t.TempDir()
+	write(t, dir, "digests.txt", digest+"  ghcr.io/o-kolomoiets/gosftpd:v"+v+"\n")
+	got := runBlock(t, dir, []string{"V=" + v, fakeCommand(t, dir, "docker")}, "", "compose")
+	if got.code != 0 {
+		t.Fatalf("the compose block: exit %d, stderr: %s", got.code, got.stderr)
+	}
+	if log, want := commandLog(t, dir, "docker"), "rm -f gosftpd\ncompose up -d --wait\n"; log != want {
+		t.Errorf("the compose block ran docker with\n%s\nwant\n%s", log, want)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	example := readFile(t, "docs", "examples", "compose.yaml")
+	if want := strings.ReplaceAll(example, "<digest>", digest); string(data) != want {
+		t.Errorf("the compose block writes\n%s\ndocs/examples/compose.yaml, with the digest, is\n%s", data, want)
+	}
+}

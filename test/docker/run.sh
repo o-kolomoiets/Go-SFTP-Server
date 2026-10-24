@@ -11,7 +11,9 @@
 #   followed (the key placeholder replaced before the chown and chmod) to
 #   a healthy container on named volumes;
 # - the compose block, with read_only, its image (a digest) overridden by
-#   the image under test;
+#   the image under test, run while the Quickstart's container still runs
+#   in the Quickstart's directory, as the reader does: it replaces that
+#   container and keeps its host key and uploads;
 # - serve --ephemeral in a container, as ADR 0012 has it: --listen
 #   0.0.0.0:2022 with the port mapped, the client key copied out with
 #   docker cp (the image has no shell for docker exec).
@@ -161,6 +163,9 @@ logs() { docker logs "$1" 2>&1; }
 # count PATTERN TEXT: the number of lines of TEXT that match PATTERN.
 count() { grep -c -- "$1" <<<"$2" || true; }
 
+# gone CONTAINER: no such container exists.
+gone() { ! docker container inspect "$1" >/dev/null 2>&1; }
+
 # image_of CONTAINER: the image ID the container runs.
 image_of() { docker inspect -f '{{.Image}}' "$1"; }
 
@@ -185,7 +190,7 @@ for c in gosftpd gosftpd-ci-hint gosftpd-ci-ephemeral; do
 done
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=quickstart)" ] ||
 	die "the compose project quickstart has containers; remove them first"
-for v in gosftpd-ci-data gosftpd-ci-state quickstart_data quickstart_state; do
+for v in gosftpd-ci-data gosftpd-ci-state; do
 	! docker volume inspect "$v" >/dev/null 2>&1 || die "a volume $v exists; remove it first"
 done
 for port in 2022 2023; do
@@ -261,7 +266,7 @@ done
 check "the log says \"configuration reloaded\"" test "$(count 'configuration reloaded' "$(logs gosftpd)")" -gt "$reloads"
 check "alice, removed, is refused" refused alice 2022 "$WORK/known_hosts"
 check "bob, added, logs in" sftp_as bob 2022 "$WORK/known_hosts" ls
-docker rm -f gosftpd >/dev/null
+# The container keeps running: the compose block follows the Quickstart.
 
 phase "the hint for a missing host directory, followed"
 HINT="$WORK/hint"
@@ -318,9 +323,10 @@ keyscan 2023 "$WORK/known_hosts.hint" >/dev/null
 check "an sftp upload as alice" sftp_as alice 2023 "$WORK/known_hosts.hint" "put $WORK/upload.bin upload.bin"
 docker rm -f gosftpd-ci-hint >/dev/null
 
-phase "the compose block"
+phase "the compose block, while the Quickstart's container runs"
 cd "$QS"
 COMPOSE_DIR=$QS
+equal "the Quickstart's container" "$(docker inspect -f '{{.State.Status}}' gosftpd)" running
 # A stand-in for the release's digests.txt; the override replaces the
 # image, a digest that a local image cannot be tagged with, and never
 # pulls.
@@ -328,6 +334,7 @@ digest=${IMAGE_ID#sha256:}
 printf '%s  %s\n' "$digest" "$REPO:v$V" >digests.txt
 printf 'services:\n  gosftpd:\n    image: %s\n    pull_policy: never\n' "$REPO:v$V" >compose.override.yaml
 HOME="$BLOCK_HOME" "$ROOT/test/docs/run-block.sh" compose
+check "the block removed the Quickstart's container" gone gosftpd
 equal "the image of compose.yaml" "$(docker compose -f compose.yaml config --images)" "$REPO:v$V@sha256:$digest"
 c=$(docker compose ps --format '{{.Name}}' gosftpd)
 [ -n "$c" ] || die "docker compose started no container for the service gosftpd"
@@ -337,10 +344,13 @@ equal "read_only, cap_drop, security_opt, stop_grace_period" \
 	"$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.Config.StopTimeout}}' "$c")" \
 	"true [ALL] [no-new-privileges:true] 40"
 landlock "$c"
-keyscan 2022 "$WORK/known_hosts.compose" >/dev/null
-check "an sftp upload as bob" sftp_as bob 2022 "$WORK/known_hosts.compose" "put $WORK/upload.bin upload.bin"
-check "the upload is in the volume data" \
-	sudo cmp -s "$WORK/upload.bin" "$(docker volume inspect -f '{{.Mountpoint}}' quickstart_data)/upload.bin"
+equal "the host key fingerprint, the Quickstart's" "$(keyscan 2022 "$WORK/known_hosts.compose")" "$fp"
+equal "host keys generated" "$(count '(generated' "$(logs "$c")")" 0
+check "an sftp download as bob of the Quickstart's upload, with the first known_hosts" \
+	sftp_as bob 2022 "$WORK/known_hosts" "get upload.bin $WORK/download.compose.bin"
+check "the download is the upload" cmp -s "$WORK/upload.bin" "$WORK/download.compose.bin"
+check "an sftp upload as bob" sftp_as bob 2022 "$WORK/known_hosts" "put $WORK/upload.bin compose.bin"
+check "the upload is in ./data" sudo cmp -s "$WORK/upload.bin" data/compose.bin
 docker compose down --volumes >/dev/null 2>&1
 COMPOSE_DIR=
 CURRENT=
