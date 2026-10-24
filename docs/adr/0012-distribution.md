@@ -1381,11 +1381,24 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     the warnings about ignored sources and plain passwords, and for usage
     errors: `serve foo:pass:::upload` (a spec after `serve`) and a root
     argument that fails the spec test (` foo:pass`) are unknown commands,
-    whose cobra message repeats the argument. `noArgs` and the root
-    command's argument check therefore never echo an argument that
-    contains `:` and give its position instead: "unknown command (argument
-    1, not shown: it looks like an atmoz user spec; give specs directly
-    after the image name, without 'serve')".
+    whose cobra message repeats the argument. `noArgs` therefore never
+    echoes an argument that contains `:` and gives its position instead:
+    "unknown command (argument 1, not shown: it looks like an atmoz user
+    spec; give specs directly after the image name, without 'serve')".
+    After the first spec, the root command's argument check gives only
+    the position of an argument that is not a spec, and names it only
+    when it is a command (`foo:x serve`): it may be a word of a password
+    with a space that the shell split off (`foo:correct horse`). A flag
+    whose own value is missing takes the next argument, a spec perhaps, so
+    no flag value with `:` is shown either: pflag's error for a value it
+    cannot parse (`--read-only=foo:pass`), the checks of `--on-conflict`,
+    `--log-level` and `--log-format`, whose valid values have none, and of
+    `--listen`, which shows its value only as HOST:PORT with a port
+    number; in atmoz mode a path of `--users-conf`, `--host-key`,
+    `--state-dir` or `--audit-output` that looks like a spec and does not
+    exist exits 2, naming the flag only, instead of being created and
+    logged. The flags of the other commands and modes are not spec
+    positions and show their values.
 - **Layout as in atmoz:** user `foo` with directory `upload` sees
   `/upload`, stored in `/home/foo/upload`, so atmoz-style volumes
   (`-v ./upload:/home/foo/upload`) work unchanged. A user's directories are
@@ -1412,14 +1425,16 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
     that names the user and the directory. Two directories of one user
     whose names are equal ignoring case (`Upload` on the disk, `upload` in
     the spec) are an error that names both; across users they are fine.
-  - **A directory that cannot be created:** opening a mount at start is
-    otherwise fatal, so the builder creates each directory first and
-    passes one that fails as unavailable for its user
+  - **A directory that cannot be created or opened:** opening a mount at
+    start is otherwise fatal, so the builder creates and opens each
+    directory first and passes one that fails as unavailable for its user
     (`Options.Unavailable`), logged with the user, the directory and the
     fix; the others work. Docker creates the parent of a volume mount
     point (`/home/foo`) as root 0755, so a second spec directory without a
     volume of its own cannot be created by 65532: the fix is a volume for
-    it, or `chown 65532` of `/home/foo`.
+    it, or `chown 65532` of `/home/foo`. A volume whose host directory
+    65532 cannot open (another user's, mode 0700) needs a `chown 65532`
+    of that directory, or `--user` with its owner.
 - **Visible names.** `vfs.MountSpec.Display` and `config.Mount.Display`
   (`toml:"-"`, not a configuration key), passed through config/build.go,
   carry the directory's name. Where it is set, a session uses it instead
@@ -1458,7 +1473,10 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   a password as an argument): a warning names the source and position and
   points to `:e` with an argon2id hash or to keys. When plain and hashed
   passwords are mixed, the warning `config validate` gives for hashes of
-  different classes is logged too.
+  different classes is logged too. A users file that all users can read
+  is warned about, as a configuration file is (`CheckFS`), with a fix
+  that keeps it readable to gosftpd: `chown root:65532` and `chmod 0640`
+  (the group gosftpd runs as).
 - **Port 2022:** the container listens on 2022, so atmoz's `-p 22:22`
   becomes `-p 22:2022` and `-p 2222:22` becomes `-p 2222:2022`. The DoD
   says "the user spec `foo:pass:::upload` works unchanged".
@@ -1481,10 +1499,11 @@ from `SFTP_USERS` and from `/etc/sftp/users.conf`.
   the sentinel; a third input, a raw spec, is only checked not to panic.
   Unit tests: the default `/etc/sftp/users.conf` ignored without
   `GOSFTPD_ATMOZ_IMAGE`; no `SECRET` on stderr for `serve u:SECRET` or
-  for `u:SECRET` after a space; `checkTrusted` with keys inside and outside
-  `/home/<user>/<dir>`; a session test in which two users each see
-  `/upload` on different host paths, with `rename` and `stat_redirect`
-  kept apart. e2e tests with the README examples (arguments,
+  for `u:SECRET` after a space, nor for a spec as the value of any flag of
+  the root command or of a checked flag of `serve`; `checkTrusted` with
+  keys inside and outside `/home/<user>/<dir>`; a session test in which
+  two users each see `/upload` on different host paths, with `rename` and
+  `stat_redirect` kept apart. e2e tests with the README examples (arguments,
   `SFTP_USERS`, users file, a user without directories, `:e` with bcrypt,
   keys, an existing volume directory), a user given twice and a second
   upload of the same name; and the atmoz step of the `docker` CI job.

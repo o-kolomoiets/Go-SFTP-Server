@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+	"github.com/spf13/pflag"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 
@@ -400,6 +403,43 @@ func TestAtmozUnavailableDirectory(t *testing.T) {
 	}
 }
 
+// TestAtmozUnopenableDirectory: a directory that exists but cannot be
+// opened, such as a volume's host directory of another user with mode
+// 0700, is unavailable to its user too, instead of stopping the start
+// with the internal name of its mount; the user's other directory works.
+func TestAtmozUnopenableDirectory(t *testing.T) {
+	home := atmozEnv(t, false)
+	up := filepath.Join(home, "foo", "upload")
+	if err := os.MkdirAll(up, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(up, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(up, 0o755) })
+	if r, err := os.OpenRoot(up); err == nil {
+		r.Close()
+		t.Skip("a directory with mode 0000 opens: the test runs with CAP_DAC_OVERRIDE, or on Windows")
+	}
+	ts := startRun(t, "--allow-root", "--listen", "127.0.0.1:0", "foo:"+pw+":::upload,other")
+	c := mustLogin(t, ts.addr, "foo", ssh.Password(pw))
+	if got := names(t, c, "/"); !slices.Equal(got, []string{"other"}) {
+		t.Errorf("/ lists %v", got)
+	}
+	c.Close()
+	if code := ts.stop(t); code != exitOK {
+		t.Errorf("exit %d", code)
+	}
+	logs := ts.stderr.String()
+	if want := "argument 1 (user foo): directory upload cannot be opened (open " + up + ": permission denied), so it is unavailable to foo"; !strings.Contains(logs, want) {
+		t.Errorf("no %q in the log:\n%s", want, logs)
+	}
+	if strings.Contains(logs, "atmoz1") {
+		t.Errorf("the internal mount name shows:\n%s", logs)
+	}
+	noSecret(t, ts)
+}
+
 // TestAtmozModeSelection: --config and $GOSFTPD_CONFIG stay strict, in the
 // image an /etc/gosftpd without config.toml never leads to atmoz mode,
 // --users-conf goes only without a configuration file, --dir and
@@ -497,6 +537,48 @@ func TestAtmozModeSelection(t *testing.T) {
 	}
 }
 
+// TestAtmozUsersFileOnlyInImage: outside the image the default users file,
+// on a host perhaps one left over from atmoz with plain passwords, is never
+// read, also when an argument or $SFTP_USERS starts atmoz mode, and no
+// other mode warns that it is ignored. The case "users file outside the
+// image" of TestAtmozModeSelection has no other source, so it cannot tell
+// the two checks apart.
+func TestAtmozUsersFileOnlyInImage(t *testing.T) {
+	atmozEnv(t, false)
+	writeImageUsers(t) // foo
+	for _, tt := range []struct {
+		name, env string
+		args      []string
+	}{
+		{"an argument", "", []string{"--allow-root", "--listen", "127.0.0.1:0", "bar:" + pw + ":::d"}},
+		{"SFTP_USERS", "bar:" + pw + ":::d", []string{"serve", "--allow-root", "--listen", "127.0.0.1:0"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(atmoz.EnvUsers, tt.env)
+			ts := startRun(t, tt.args...)
+			mustLogin(t, ts.addr, "bar", ssh.Password(pw)).Close()
+			if c, err := atmozLogin(t, ts.addr, "foo", ssh.Password(pw)); err == nil {
+				c.Close()
+				t.Error("foo of the default users file logs in outside the image")
+			}
+			ts.stop(t)
+			logs := ts.stderr.String()
+			if !strings.Contains(logs, `msg="atmoz mode" users_file=0 `) || strings.Contains(logs, atmozUsersFile) {
+				t.Errorf("the default users file is read outside the image:\n%s", logs)
+			}
+			noSecret(t, ts)
+		})
+	}
+
+	keys := filepath.Join(t.TempDir(), "keys")
+	writeFile(t, keys, authorizedKey(newSigner(t))+"\n")
+	ts := startServe(t, "--listen", "127.0.0.1:0", "--dir", t.TempDir(), "--authorized-keys", keys, "--state-dir", t.TempDir())
+	ts.stop(t)
+	if logs := ts.stderr.String(); strings.Contains(logs, atmozUsersFile) {
+		t.Errorf("serve --dir outside the image names the default users file:\n%s", logs)
+	}
+}
+
 // statError is the message of os.Stat for path, which differs between
 // platforms.
 func statError(t *testing.T, path string) string {
@@ -579,11 +661,13 @@ func TestAtmozIgnoredSources(t *testing.T) {
 // TestAtmozUsageErrors: no usage error shows an argument with ':', which
 // may be an atmoz user spec with its password: a spec after serve or
 // another command, a root argument that fails atmoz's test of a spec
-// (with a space before it), a later argument that is not a spec, and an
-// unknown flag that is one.
+// (with a space before it), an unknown flag that is one, and a spec taken
+// as a flag's value. After a spec no argument is shown that is not one,
+// except a command: it may be a word of a password with a space.
 func TestAtmozUsageErrors(t *testing.T) {
 	atmozEnv(t, false)
 	spec := "u:" + pw + ":::upload"
+	const notShown = " (the value is not shown: it contains ':', as an atmoz user spec does)\n"
 	for _, tt := range []struct {
 		args []string
 		want string
@@ -593,14 +677,25 @@ func TestAtmozUsageErrors(t *testing.T) {
 		{[]string{" " + spec}, "Error: unknown command (argument 1, not shown: it looks like an atmoz user spec, but a spec starts with the user name and ':', without white space)\n"},
 		{[]string{":" + pw}, "Error: unknown command (argument 1, not shown: it looks like an atmoz user spec, but a spec starts with the user name and ':', without white space)\n"},
 		{[]string{"foo:x", " " + spec}, "Error: argument 2 (not shown: it contains ':') is not an atmoz user spec USER:PASS[:e][:UID[:GID[:DIR[,DIR]...]]]; after the first spec every argument must be one\n"},
-		{[]string{"foo:x", "serve"}, `Error: argument 2 ("serve") is not an atmoz user spec`},
+		{[]string{"foo:x", "serve"}, "Error: argument 2, the command 'serve', is not an atmoz user spec USER:PASS"},
+		{[]string{"foo:correct", pw}, "Error: argument 2 (not shown: it may be part of a spec, such as a word of a password with a space, which needs quotes) is not an atmoz user spec USER:PASS"},
+		{[]string{"--allow-root", "--on-conflict", spec, "bar:x"}, "Error: --on-conflict: want rename, reject, overwrite or version" + notShown},
+		{[]string{"--allow-root", "--log-level", spec, "bar:x"}, "Error: --log-level: want debug, info, warn or error" + notShown},
+		{[]string{"--allow-root", "--log-format", spec, "bar:x"}, "Error: --log-format: want text or json" + notShown},
+		{[]string{"--allow-root", "--listen", "u:" + pw, "bar:x"}, "Error: --listen: want HOST:PORT or :PORT, with a port number" + notShown},
+		{[]string{"serve", "--allow-root", "--listen", spec}, "Error: --listen: want HOST:PORT or :PORT, with a port number" + notShown},
+		// HOST:PORT with a port number is shown: only its range is wrong.
+		{[]string{"--allow-root", "--listen", "0.0.0.0:99999", "bar:x"}, "Error: configuration: 1 problem:\n  server.listen: \"0.0.0.0:99999\": invalid port\n"},
+		{[]string{"--read-only=" + spec, "bar:x"}, "Error: invalid argument for --read-only (not shown: it contains ':', as an atmoz user spec does)\n"},
+		{[]string{"--allow-root", "--listen", "127.0.0.1:0", "--users-conf", spec, "bar:x"}, "Error: --users-conf: the path does not exist (not shown: it looks like an atmoz user spec; give --users-conf its own value, before the specs)\n"},
+		{[]string{"--allow-root", "--listen", "127.0.0.1:0", "--state-dir", spec, "bar:x"}, "Error: --state-dir: the path does not exist (not shown: it looks like an atmoz user spec; give --state-dir its own value, before the specs)\n"},
 		{[]string{"-" + spec}, "Error: unknown flag (not shown: it contains ':', as an atmoz user spec does)\n"},
 		{[]string{"--" + spec}, "Error: unknown flag (not shown: it contains ':', as an atmoz user spec does)\n"},
 		{[]string{"serve", "-" + spec}, "Error: unknown flag (not shown: it contains ':', as an atmoz user spec does)\n"},
 		{[]string{"--allow-root", "U:" + pw}, "Error: argument 1: the user name is not one gosftpd accepts"},
 		{[]string{"bogus"}, `Error: unknown command "bogus" for "gosftpd"`},
 	} {
-		code, stdout, stderr := execute(t, tt.args...)
+		code, stdout, stderr := executeBounded(t, tt.args...)
 		if code != exitUsage || stdout != "" || !strings.HasPrefix(stderr, tt.want) {
 			t.Errorf("%q: exit %d, stderr:\n%s\nwant it to start with %q", tt.args, code, stderr, tt.want)
 		}
@@ -608,6 +703,62 @@ func TestAtmozUsageErrors(t *testing.T) {
 			t.Errorf("%q: stderr shows the password:\n%s", tt.args, stderr)
 		}
 	}
+}
+
+// TestAtmozSpecNeverShown: an atmoz user spec in a position where it
+// fails is never shown, with three fields or more and with two, which
+// net.SplitHostPort takes for HOST:PORT: as the value of every flag of the
+// root command, which a flag takes when its own value is missing, as the
+// value of the flags of serve whose values are checked, here with a
+// configuration file, and after a spec or a word that is not one.
+func TestAtmozSpecNeverShown(t *testing.T) {
+	atmozEnv(t, false)
+	writeLocalConfig(t)
+	listen := []string{"--allow-root", "--listen", "127.0.0.1:0"} // in case it starts
+	for _, spec := range []string{"u:" + pw + ":::upload", "u:" + pw} {
+		var lines [][]string
+		value := func(cmd, rest []string, f *pflag.Flag) {
+			if f.NoOptDefVal == "" {
+				lines = append(lines, slices.Concat(cmd, listen, []string{"--" + f.Name, spec}, rest))
+			}
+			lines = append(lines, slices.Concat(cmd, listen, []string{"--" + f.Name + "=" + spec}, rest))
+		}
+		root := NewRootCommand()
+		root.Flags().VisitAll(func(f *pflag.Flag) { value(nil, []string{"bar:x"}, f) })
+		serve, _, err := root.Find([]string{"serve"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		serve.Flags().VisitAll(func(f *pflag.Flag) {
+			if f.NoOptDefVal != "" || slices.Contains([]string{"on-conflict", "log-level", "log-format", "listen"}, f.Name) {
+				value([]string{"serve"}, nil, f)
+			}
+		})
+		lines = append(lines,
+			[]string{"--help=" + spec},
+			slices.Concat(listen, []string{"bar:x", spec + ":x"}), // a uid that is no number
+			slices.Concat(listen, []string{"bar:x", "word", spec}),
+			slices.Concat(listen, []string{"bar:x", " " + spec}),
+			slices.Concat(listen, []string{"bar:correct", pw}),
+		)
+		for _, args := range lines {
+			code, stdout, stderr := executeBounded(t, args...)
+			if code != exitUsage || strings.Contains(stdout+stderr, pw) {
+				t.Errorf("%q: exit %d, stdout:\n%s\nstderr:\n%s", args, code, stdout, stderr)
+			}
+		}
+	}
+}
+
+// executeBounded is execute for a usage error: a command line that serves
+// after all stops after 10 seconds, so that the test fails, not hangs.
+func executeBounded(t *testing.T, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var out, errOut bytes.Buffer
+	code = run(ctx, args, &out, &errOut)
+	return code, out.String(), errOut.String()
 }
 
 // TestRootHelp: the root command describes atmoz mode and takes only the

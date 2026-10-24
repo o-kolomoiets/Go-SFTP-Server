@@ -149,6 +149,9 @@ func newAtmoz(flags *pflag.FlagSet, o serveOptions, getenv func(string) string) 
 	if err := checkFlagValues(flags, o); err != nil {
 		return nil, nil, err
 	}
+	if err := checkSpecPaths(flags, o); err != nil {
+		return nil, nil, err
+	}
 	image := inImage(getenv)
 	a := &atmozMode{}
 	opts := atmoz.Options{Args: o.specs, Env: getenv(atmoz.EnvUsers), Home: atmozHome, Discover: image}
@@ -190,6 +193,33 @@ func newAtmoz(flags *pflag.FlagSet, o serveOptions, getenv func(string) string) 
 	}
 	applyOverrides(c, flags, o, getenv)
 	return c, a, nil
+}
+
+// checkSpecPaths refuses a path flag of atmoz mode whose value looks like
+// an atmoz user spec and names nothing: most likely a spec that the flag
+// took when its own value was missing. Its message names the flag only, as
+// the path may hold a password (ADR 0012); a state directory or an audit
+// log would otherwise be created under that name, and logged.
+func checkSpecPaths(flags *pflag.FlagSet, o serveOptions) error {
+	for _, f := range []struct {
+		name  string
+		paths []string
+	}{
+		{"users-conf", []string{o.usersConf}},
+		{"host-key", o.hostKeys},
+		{"state-dir", []string{o.stateDir}},
+		{"audit-output", []string{o.auditOutput}},
+	} {
+		if !flags.Changed(f.name) {
+			continue
+		}
+		for _, p := range f.paths {
+			if atmoz.LooksLikeSpec(p) && !exists(p) {
+				return usageError{fmt.Errorf("--%s: the path does not exist (not shown: it looks like an atmoz user spec; give --%s its own value, before the specs)", f.name, f.name)}
+			}
+		}
+	}
+	return nil
 }
 
 // atmozHostKeyFiles sets the host keys of atmoz mode: --host-key, else a
@@ -248,9 +278,10 @@ func (a *atmozMode) logMode(ctx context.Context, log *slog.Logger) {
 
 // rootArgs checks the arguments of the root command: atmoz user specs,
 // when the first passes atmoz's own test of one, and then every argument
-// must (ADR 0012). Anything else is an unknown command, as before. No
-// message repeats an argument that contains ':': it may be a spec with
-// its password.
+// must (ADR 0012). Anything else is an unknown command, as before. After
+// the first spec, an argument that is not one may be part of one, such as
+// a word of a password with a space that the shell split off, so the
+// message gives its position and names it only when it is a command.
 func rootArgs(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 || !atmoz.LooksLikeSpec(args[0]) {
 		return noArgs(cmd, args)
@@ -259,11 +290,26 @@ func rootArgs(cmd *cobra.Command, args []string) error {
 		if atmoz.LooksLikeSpec(a) {
 			continue
 		}
-		which := fmt.Sprintf("argument %d (%q)", i+1, a)
-		if strings.Contains(a, ":") {
+		var which string
+		switch {
+		case strings.Contains(a, ":"):
 			which = fmt.Sprintf("argument %d (not shown: it contains ':')", i+1)
+		case isCommand(cmd, a):
+			which = fmt.Sprintf("argument %d, the command '%s',", i+1, a)
+		default:
+			which = fmt.Sprintf("argument %d (not shown: it may be part of a spec, such as a word of a password with a space, which needs quotes)", i+1)
 		}
 		return usageError{fmt.Errorf("%s is not an atmoz user spec USER:PASS[:e][:UID[:GID[:DIR[,DIR]...]]]; after the first spec every argument must be one", which)}
 	}
 	return nil
+}
+
+// isCommand reports whether name is a subcommand of cmd.
+func isCommand(cmd *cobra.Command, name string) bool {
+	for _, c := range cmd.Commands() {
+		if c.Name() == name || c.HasAlias(name) {
+			return true
+		}
+	}
+	return false
 }
