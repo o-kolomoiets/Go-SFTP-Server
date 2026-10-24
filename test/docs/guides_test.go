@@ -429,7 +429,7 @@ func TestComposeFiles(t *testing.T) {
 	}
 	for _, f := range files {
 		var keys []string
-		for _, l := range strings.Split(f.text, "\n") {
+		for l := range strings.SplitSeq(f.text, "\n") {
 			if l == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "#") {
 				continue
 			}
