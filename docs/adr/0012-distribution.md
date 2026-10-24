@@ -768,26 +768,31 @@ jobs:
     `ghcr.io/o-kolomoiets/gosftpd:` with the image's `version` output (a
     snapshot reports the last tag: `v0.4.0`, never pushed, or after rc.1 a
     real image other than the one under test). `test/docker/run.sh` runs
-    the checks, and also checks that every container runs the loaded image.
-    It runs the `quickstart` block, which puts `~/.ssh/id_ed25519.pub` in
-    place of the key placeholder with the same `sed -i` (`healthy`, an sftp
-    upload, the host key fingerprint after recreating the container with
-    the block's own `docker run`); a reload: the configuration edited with
-    `sed -i` (a new inode), `docker kill -s HUP`, and a user removed from
-    it refused; the hint, reached by starting with `-v
-    ./gosftpd:/etc/gosftpd:ro` while `./gosftpd` does not exist, then its
-    commands followed to `healthy`, the placeholder replaced between
-    `config example` and the `chown` with `sed -i "s|<paste your public
-    key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`; and the `compose`
-    block with `read_only` (its `image:`, a digest that cannot be retagged,
-    overridden with the local tag), run as a reader runs it, in the
-    Quickstart's directory while the Quickstart's container still holds
-    port 2022 (the block removes that container, and the service serves
-    the Quickstart's host key and upload); and `serve --ephemeral --listen
-    0.0.0.0:2022` in a container (see `serve --ephemeral`): `healthy`, one
-    line on stdout, a key login with that key and the JSON's `known_hosts`
-    line, `docker stop` exiting 0 after removing the key and the data. A
-    second step, `test/docker/atmoz.sh IMAGE`, runs the examples of the
+    the checks, and also checks that every container runs the loaded
+    image. It runs the `quickstart` block (`healthy`, an sftp upload, the
+    host key fingerprint after recreating the container with the block's
+    own `docker run`), which puts `~/.ssh/id_ed25519.pub` in place of the
+    key placeholder with `sed -i.orig`, a form that the BSD sed of macOS
+    takes too (found in the final review); a reload: the configuration
+    edited with `sed -i` (a new inode), `docker kill -s HUP`, and a user
+    removed from it refused; the hint, reached by starting with
+    `-v ./gosftpd:/etc/gosftpd:ro` while `./gosftpd` does not exist, then
+    its commands followed to `healthy`, the placeholder replaced between
+    `config example` and the `chown` with
+    `sed -i "s|<paste your public key[^>]*>|$(cat "$KEY.pub")|" gosftpd/config.toml`;
+    and the `compose` block with `read_only` (its `image:`, a digest that
+    cannot be retagged, overridden with the local tag), run as a reader
+    runs it, in the Quickstart's directory while the Quickstart's
+    container still holds port 2022 (the block removes that container, and
+    the service serves the Quickstart's host key and upload), and again
+    after each variant of the Quickstart that install.md gives, named
+    volumes and the reader's own uid, with the setting the compose section
+    gives for it (`DATA` and `STATE`, `RUN_AS`; found in the final
+    review); and `serve --ephemeral --listen 0.0.0.0:2022` in a container
+    (see `serve --ephemeral`): `healthy`, one line on stdout, a key login
+    with that key and the JSON's `known_hosts` line, `docker stop` exiting
+    0 after removing the key and the data. A second step,
+    `test/docker/atmoz.sh IMAGE`, runs the examples of the
     atmoz README with OpenSSH's `sftp` against the loaded image, on host
     port 2222 (`ATMOZ_PORT`): `docker run -p 2222:2022 IMAGE
     foo:pass:::upload`, `healthy`, an upload and a second one of the same
@@ -1586,11 +1591,14 @@ gh attestation verify "oci://$IMAGE" --repo o-kolomoiets/Go-SFTP-Server \
   volumes as the variant without `chown`, `--stop-timeout 40`, a reload
   with `docker kill -s HUP`) and compose (`docs/examples/compose.yaml`,
   which a test keeps equal to the file the compose block writes: the image
-  by digest, the Quickstart's configuration, data and state directories,
-  so that the host key and the uploads stay, `read_only: true`,
-  `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`,
-  `stop_grace_period: 40s`, `init: true` when exec hooks are used). The
-  blocks that CI runs carry `ci:` markers (Workflows).
+  by digest, from the release's `digests.txt`, which the block downloads
+  before it removes anything and without which it removes nothing; the
+  Quickstart's configuration, data and state directories, or after its
+  variants its named volumes or its user, so that the host key and the
+  uploads stay; `read_only: true`, `cap_drop: [ALL]`,
+  `security_opt: [no-new-privileges:true]`, `stop_grace_period: 40s`,
+  `init: true` when exec hooks are used). The blocks that CI runs carry
+  `ci:` markers (Workflows).
   docs/quickstart.md and the README stop calling packages and Docker
   future work.
 - **The release checklist** describes the flow above, runs the local

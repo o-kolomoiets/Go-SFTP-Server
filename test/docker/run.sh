@@ -13,7 +13,9 @@
 # - the compose block, with read_only, its image (a digest) overridden by
 #   the image under test, run while the Quickstart's container still runs
 #   in the Quickstart's directory, as the reader does: it replaces that
-#   container and keeps its host key and uploads;
+#   container and keeps its host key and uploads; and the same after each
+#   variant of the Quickstart that install.md gives (named volumes, your
+#   own uid), with the setting the compose section gives for it;
 # - serve --ephemeral in a container, as ADR 0012 has it: --listen
 #   0.0.0.0:2022 with the port mapped, the client key copied out with
 #   docker cp (the image has no shell for docker exec).
@@ -29,9 +31,11 @@
 # Docker, under umask 002, as the Quickstart's users do. It uses ports 2022
 # (the blocks' own) and 2023, the container names gosftpd, gosftpd-ci-hint
 # and gosftpd-ci-ephemeral, the volumes gosftpd-ci-data and
-# gosftpd-ci-state and the compose project "quickstart", and refuses to
-# start when one of them is in use; it removes them, the tags it added and
-# its directory at the end.
+# gosftpd-ci-state and those of the named-volume variant, gosftpd-data and
+# gosftpd-state, and the compose projects "quickstart",
+# "quickstart-volumes" and "quickstart-uid", and refuses to start when one
+# of them is in use; it removes them, the tags it added and its directory
+# at the end.
 # REQUIRE_LANDLOCK=1 (CI) fails when gosftpd does not apply Landlock, which
 # is missing under QEMU, for example. Needs openssh-client and jq.
 
@@ -61,6 +65,7 @@ BLOCK_HOME="$WORK/home"
 KEY="$BLOCK_HOME/.ssh/id_ed25519"
 ADDED_TAGS=()
 COMPOSE_DIR=
+VOLUMES=(gosftpd-ci-data gosftpd-ci-state gosftpd-data gosftpd-state)
 # The container whose log a failure prints.
 CURRENT=
 
@@ -78,7 +83,7 @@ on_exit() {
 	if [ -n "$COMPOSE_DIR" ]; then
 		(cd "$COMPOSE_DIR" && docker compose down --volumes --timeout 5 >/dev/null 2>&1) || true
 	fi
-	docker volume rm gosftpd-ci-data gosftpd-ci-state >/dev/null 2>&1 || true
+	docker volume rm "${VOLUMES[@]}" >/dev/null 2>&1 || true
 	for t in "${ADDED_TAGS[@]}"; do docker rmi "$t" >/dev/null 2>&1 || true; done
 	# The data and state directories belong to 65532.
 	sudo rm -rf "$WORK"
@@ -183,14 +188,58 @@ tag() {
 	ADDED_TAGS+=("$1")
 }
 
+# compose_files: a stand-in for the release's digests.txt, and an override
+# that replaces the image, a digest that a local image cannot be tagged
+# with, and never pulls; in the current directory. Prints the digest.
+compose_files() {
+	local digest=${IMAGE_ID#sha256:}
+	printf '%s  %s\n' "$digest" "$REPO:v$V" >digests.txt
+	printf 'services:\n  gosftpd:\n    image: %s\n    pull_policy: never\n' "$REPO:v$V" >compose.override.yaml
+	echo "$digest"
+}
+
+# variant NAME: the quickstart block with the changes that install.md gives
+# for its variant NAME (volumes or uid), which its text must still name.
+variant() {
+	local block text words
+	block=$("$ROOT/test/docs/run-block.sh" --print quickstart)
+	text=$(tr -s ' \n' '  ' <"$ROOT/docs/install.md")
+	# The changes, as install.md words them.
+	# shellcheck disable=SC2016
+	case $1 in
+	volumes)
+		words='Leave out `sudo chown 65532:65532 data state` and mount `-v gosftpd-data:/srv/sftp -v gosftpd-state:/var/lib/gosftpd` instead.'
+		block=$(sed -e '/^sudo chown 65532:65532 data state$/d' \
+			-e 's|-v ./data:/srv/sftp -v ./state:/var/lib/gosftpd|-v gosftpd-data:/srv/sftp -v gosftpd-state:/var/lib/gosftpd|' <<<"$block")
+		grep -qF -- '-v gosftpd-data:/srv/sftp -v gosftpd-state:/var/lib/gosftpd' <<<"$block" ||
+			die "the volumes variant: the quickstart block has no -v ./data and ./state to replace"
+		;;
+	uid)
+		words='with `--user "$(id -u):$(id -g)"` added to `docker run -d`, needs no `sudo`: leave out both `chown` lines and run `chmod 0600 gosftpd/config.toml` instead.'
+		block=$(sed -e '/^sudo chown 65532:65532 data state$/d' \
+			-e 's|^sudo chown root:65532 gosftpd/config.toml && sudo chmod 0640 gosftpd/config.toml$|chmod 0600 gosftpd/config.toml|' \
+			-e 's|^docker run -d |docker run -d --user "$(id -u):$(id -g)" |' <<<"$block")
+		if ! grep -qxF 'chmod 0600 gosftpd/config.toml' <<<"$block" || ! grep -qF -- 'docker run -d --user' <<<"$block"; then
+			die "the uid variant: the quickstart block has no chown of gosftpd/config.toml or docker run -d to change"
+		fi
+		;;
+	esac
+	grep -qF -- "$words" <<<"$text" || die "install.md no longer gives the $1 variant as: $words"
+	! grep -q 'chown 65532:65532 data state' <<<"$block" || die "the $1 variant still gives data and state to 65532"
+	[ "$1" != uid ] || ! grep -q 'chown' <<<"$block" || die "the uid variant still has a chown"
+	printf '%s\n' "$block"
+}
+
 phase "the image and the references the run uses"
 IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE") || die "$IMAGE is not loaded"
 for c in gosftpd gosftpd-ci-hint gosftpd-ci-ephemeral; do
 	! docker container inspect "$c" >/dev/null 2>&1 || die "a container $c exists; remove it first"
 done
-[ -z "$(docker ps -aq --filter label=com.docker.compose.project=quickstart)" ] ||
-	die "the compose project quickstart has containers; remove them first"
-for v in gosftpd-ci-data gosftpd-ci-state; do
+for p in quickstart quickstart-volumes quickstart-uid; do
+	[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$p")" ] ||
+		die "the compose project $p has containers; remove them first"
+done
+for v in "${VOLUMES[@]}"; do
 	! docker volume inspect "$v" >/dev/null 2>&1 || die "a volume $v exists; remove it first"
 done
 for port in 2022 2023; do
@@ -327,12 +376,7 @@ phase "the compose block, while the Quickstart's container runs"
 cd "$QS"
 COMPOSE_DIR=$QS
 equal "the Quickstart's container" "$(docker inspect -f '{{.State.Status}}' gosftpd)" running
-# A stand-in for the release's digests.txt; the override replaces the
-# image, a digest that a local image cannot be tagged with, and never
-# pulls.
-digest=${IMAGE_ID#sha256:}
-printf '%s  %s\n' "$digest" "$REPO:v$V" >digests.txt
-printf 'services:\n  gosftpd:\n    image: %s\n    pull_policy: never\n' "$REPO:v$V" >compose.override.yaml
+digest=$(compose_files)
 HOME="$BLOCK_HOME" "$ROOT/test/docs/run-block.sh" compose
 check "the block removed the Quickstart's container" gone gosftpd
 equal "the image of compose.yaml" "$(docker compose -f compose.yaml config --images)" "$REPO:v$V@sha256:$digest"
@@ -340,9 +384,9 @@ c=$(docker compose ps --format '{{.Name}}' gosftpd)
 [ -n "$c" ] || die "docker compose started no container for the service gosftpd"
 wait_healthy "$c"
 equal "the container's image" "$(image_of "$c")" "$IMAGE_ID"
-equal "read_only, cap_drop, security_opt, stop_grace_period" \
-	"$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.Config.StopTimeout}}' "$c")" \
-	"true [ALL] [no-new-privileges:true] 40"
+equal "read_only, cap_drop, security_opt, stop_grace_period, user" \
+	"$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.Config.StopTimeout}} {{.Config.User}}' "$c")" \
+	"true [ALL] [no-new-privileges:true] 40 65532:65532"
 landlock "$c"
 equal "the host key fingerprint, the Quickstart's" "$(keyscan 2022 "$WORK/known_hosts.compose")" "$fp"
 equal "host keys generated" "$(count '(generated' "$(logs "$c")")" 0
@@ -354,6 +398,69 @@ check "the upload is in ./data" sudo cmp -s "$WORK/upload.bin" data/compose.bin
 docker compose down --volumes >/dev/null 2>&1
 COMPOSE_DIR=
 CURRENT=
+
+# The Quickstart's variants, each in a directory of its own, then the
+# compose block with the setting install.md gives for the variant.
+for v in volumes uid; do
+	phase "the Quickstart's $v variant, then the compose block"
+	dir="$WORK/quickstart-$v"
+	mkdir "$dir"
+	cd "$dir"
+	block=$(variant "$v")
+	printf '%s\n' "$block" | sed 's/^/    /'
+	HOME="$BLOCK_HOME" bash -euo pipefail -c "$block" >/dev/null
+	wait_healthy gosftpd
+	equal "the container's image" "$(image_of gosftpd)" "$IMAGE_ID"
+	landlock gosftpd
+	kh="$WORK/known_hosts.$v"
+	fp_v=$(keyscan 2022 "$kh")
+	check "an sftp upload as alice" sftp_as alice 2022 "$kh" "put $WORK/upload.bin upload.bin"
+	# What the compose section says to set first after the variant.
+	case $v in
+	volumes)
+		settings=(DATA=gosftpd-data STATE=gosftpd-state)
+		mp=$(docker volume inspect -f '{{.Mountpoint}}' gosftpd-data)
+		check "the upload is in the volume gosftpd-data" sudo cmp -s "$WORK/upload.bin" "$mp/upload.bin"
+		;;
+	uid)
+		settings=("RUN_AS=$(id -u):$(id -g)")
+		equal "the upload's owner" "$(owner_mode data/upload.bin | cut -d' ' -f1)" "$(id -u):$(id -g)"
+		;;
+	esac
+	text=$(tr -s ' \n' '  ' <"$ROOT/docs/install.md")
+	# shellcheck disable=SC2016
+	case $v in
+	volumes) words='`DATA=gosftpd-data STATE=gosftpd-state`' ;;
+	uid) words='`RUN_AS="$(id -u):$(id -g)"`' ;;
+	esac
+	grep -qF -- "$words" <<<"$text" || die "install.md's compose section no longer sets $words after the $v variant"
+	COMPOSE_DIR=$dir
+	compose_files >/dev/null
+	env HOME="$BLOCK_HOME" "${settings[@]}" "$ROOT/test/docs/run-block.sh" compose
+	check "the block removed the Quickstart's container" gone gosftpd
+	c=$(docker compose ps --format '{{.Name}}' gosftpd)
+	[ -n "$c" ] || die "docker compose started no container for the service gosftpd"
+	wait_healthy "$c"
+	equal "the container's image" "$(image_of "$c")" "$IMAGE_ID"
+	landlock "$c"
+	case $v in
+	volumes)
+		equal "the volumes of the service" \
+			"$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$c")" "gosftpd-data gosftpd-state "
+		;;
+	uid)
+		equal "the user of the service" "$(docker inspect -f '{{.Config.User}}' "$c")" "$(id -u):$(id -g)"
+		;;
+	esac
+	equal "the host key fingerprint, the Quickstart's" "$(keyscan 2022 "$kh.compose")" "$fp_v"
+	equal "host keys generated" "$(count '(generated' "$(logs "$c")")" 0
+	check "an sftp download of the Quickstart's upload" sftp_as alice 2022 "$kh" "get upload.bin $WORK/download.$v.bin"
+	check "the download is the upload" cmp -s "$WORK/upload.bin" "$WORK/download.$v.bin"
+	docker compose down --volumes >/dev/null 2>&1
+	COMPOSE_DIR=
+	CURRENT=
+done
+docker volume rm gosftpd-data gosftpd-state >/dev/null
 
 phase "serve --ephemeral in a container"
 # The JSON line names the container's port and 127.0.0.1, which hold on the

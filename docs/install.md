@@ -574,12 +574,15 @@ Two variants:
 
 - **Named volumes** need no `chown` of `data` and `state`: a new named
   volume starts with the owner and mode of the image's directory, which
-  belongs to 65532. Leave out `sudo chown 65532:65532 data state` and mount
-  `-v gosftpd-data:/srv/sftp -v gosftpd-state:/var/lib/gosftpd` instead.
-- **Your own uid**, with `--user "$(id -u):$(id -g)"` added to `docker
-  run -d`, needs no `sudo`: leave out both `chown` lines and run `chmod
-  0600 gosftpd/config.toml` instead. The directories and the uploads then
-  belong to you.
+  belongs to 65532. Leave out `sudo chown 65532:65532 data state` and
+  mount `-v gosftpd-data:/srv/sftp -v gosftpd-state:/var/lib/gosftpd`
+  instead.
+- **Your own uid**, with `--user "$(id -u):$(id -g)"` added to
+  `docker run -d`, needs no `sudo`: leave out both `chown` lines and run
+  `chmod 0600 gosftpd/config.toml` instead. The directories and the
+  uploads then belong to you.
+
+[Compose](#compose) takes over from either.
 
 To change the configuration, edit `gosftpd/config.toml`, check it as the
 server will read it, and reload:
@@ -600,38 +603,55 @@ the new tag. For tests, `serve --ephemeral` also runs in the container
 
 ### Compose
 
-Compose takes over from the Quickstart, in its directory, with the
-release's `digests.txt`, which names the image's digest. The first command
-removes the Quickstart's container, which holds port 2022; the service
-mounts the same `./gosftpd`, `./data` and `./state`, so the configuration,
-the uploads and the host key stay. The file is also in
-[examples/compose.yaml](examples/compose.yaml), with `<digest>` in place
-of the digest.
+Compose takes over from the Quickstart, in its directory: the service
+mounts the same configuration directory, data and state, so the
+configuration, the uploads and the host key stay. The block downloads the
+release's `digests.txt`, which names the image's digest (gh must be logged
+in, as for [Verify a release](#verify-a-release), which checks the image
+by that digest), and writes `compose.yaml`. Only once the digest is there
+and Compose accepts the file does it remove the Quickstart's container,
+which holds port 2022, and start the service; otherwise the container
+keeps running. The block follows the Quickstart as given above. After one
+of its variants, set first what that variant changed:
+
+- **Named volumes:** `DATA=gosftpd-data STATE=gosftpd-state`. Compose
+  mounts the variant's volumes as they are (`external`), instead of new
+  ones of its own with a new host key and no uploads.
+- **Your own uid:** `RUN_AS="$(id -u):$(id -g)"`, the `--user` of the
+  variant.
+
+The file is also in [examples/compose.yaml](examples/compose.yaml), with
+`<digest>` in place of the digest.
 
 <!-- ci:compose -->
 ```sh
 V=0.5.0
-docker rm -f gosftpd
+DATA=${DATA:-./data} STATE=${STATE:-./state} RUN_AS=${RUN_AS:-65532:65532}
+gh release download "v$V" -R o-kolomoiets/Go-SFTP-Server -p digests.txt --clobber
 DIGEST=$(awk -v t="ghcr.io/o-kolomoiets/gosftpd:v$V" '$2 == t { print $1 }' digests.txt)
 cat > compose.yaml <<EOF
 # In the directory of the Quickstart (docs/install.md): ./gosftpd holds
-# config.toml; ./data and ./state, owned by 65532, keep the uploads and
-# the host key.
+# config.toml; $DATA and $STATE keep the uploads and the host key.
 services:
   gosftpd:
     image: ghcr.io/o-kolomoiets/gosftpd:v$V@sha256:$DIGEST
+    user: "$RUN_AS"
     ports: ["2022:2022"]
     volumes:
       - ./gosftpd:/etc/gosftpd:ro
-      - ./data:/srv/sftp
-      - ./state:/var/lib/gosftpd
+      - $DATA:/srv/sftp
+      - $STATE:/var/lib/gosftpd
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 40s
     # init: true   # with exec hooks (docs/hooks.md)
+# The Quickstart's named volumes, used only when the service mounts them.
+volumes:
+  gosftpd-data: { external: true }
+  gosftpd-state: { external: true }
 EOF
-docker compose up -d --wait
+[ ${#DIGEST} = 64 ] && docker compose config --quiet && docker rm -f gosftpd && docker compose up -d --wait
 ```
 <!-- /ci -->
 

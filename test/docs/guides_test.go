@@ -136,11 +136,15 @@ func TestHtpasswdB(t *testing.T) {
 	}
 }
 
-// TestComposeExample checks that docs/examples/compose.yaml is the file
-// that the compose block of docs/install.md writes, with <digest> for the
-// digest that digests.txt names, and that the block first removes the
-// Quickstart's container, which holds port 2022 (test/docker/run.sh runs
-// the block against the image).
+// TestComposeExample checks the compose block of docs/install.md with a fake
+// docker and gh (test/docker/run.sh runs it against the image after each
+// variant of the Quickstart). It gets digests.txt with gh (run-block.sh
+// skips that when the file is present), and with the release's digest it
+// writes docs/examples/compose.yaml, with <digest> for the digest; only
+// then, and once docker compose config accepts the file, it removes the
+// Quickstart's container, which holds port 2022, and starts the service.
+// Without the digest it removes nothing. After the Quickstart's variants,
+// DATA and STATE name its named volumes, and RUN_AS its user.
 func TestComposeExample(t *testing.T) {
 	t.Parallel()
 	m := regexp.MustCompile("(?m)^<!-- ci:compose -->\n```sh\nV=(\\S+)$").FindStringSubmatch(readFile(t, "docs", "install.md"))
@@ -149,22 +153,85 @@ func TestComposeExample(t *testing.T) {
 	}
 	v := m[1]
 	digest := strings.Repeat("0123456789abcdef", 4)
-	dir := t.TempDir()
-	write(t, dir, "digests.txt", digest+"  ghcr.io/o-kolomoiets/gosftpd:v"+v+"\n")
-	got := runBlock(t, dir, []string{"V=" + v, fakeCommand(t, dir, "docker")}, "", "compose")
-	if got.code != 0 {
-		t.Fatalf("the compose block: exit %d, stderr: %s", got.code, got.stderr)
-	}
-	if log, want := commandLog(t, dir, "docker"), "rm -f gosftpd\ncompose up -d --wait\n"; log != want {
-		t.Errorf("the compose block ran docker with\n%s\nwant\n%s", log, want)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "compose.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	example := readFile(t, "docs", "examples", "compose.yaml")
-	if want := strings.ReplaceAll(example, "<digest>", digest); string(data) != want {
-		t.Errorf("the compose block writes\n%s\ndocs/examples/compose.yaml, with the digest, is\n%s", data, want)
+	example := strings.ReplaceAll(readFile(t, "docs", "examples", "compose.yaml"), "<digest>", digest)
+	const started = "compose config --quiet\nrm -f gosftpd\ncompose up -d --wait\n"
+	for _, tt := range []struct {
+		name    string
+		digests string   // digests.txt; none when empty
+		env     []string // the variant's variables
+		started bool     // the block removed the container and started the service
+		gh      string   // the calls of gh
+		file    func(string) string
+	}{
+		{
+			name:    "the release's digests.txt",
+			digests: digest + "  ghcr.io/o-kolomoiets/gosftpd:v" + v + "\n",
+			started: true,
+			file:    func(string) string { return example },
+		},
+		{
+			name: "no digests.txt, and gh downloads nothing",
+			gh:   "release download v" + v + " -R o-kolomoiets/Go-SFTP-Server -p digests.txt --clobber\n",
+		},
+		{
+			name:    "digests.txt without the version",
+			digests: digest + "  ghcr.io/o-kolomoiets/gosftpd:v0.0.1\n",
+		},
+		{
+			name:    "after the variant with named volumes",
+			digests: digest + "  ghcr.io/o-kolomoiets/gosftpd:v" + v + "\n",
+			env:     []string{"DATA=gosftpd-data", "STATE=gosftpd-state"},
+			started: true,
+			file: func(string) string {
+				return strings.NewReplacer(
+					"./data and ./state keep", "gosftpd-data and gosftpd-state keep",
+					"      - ./data:/srv/sftp\n", "      - gosftpd-data:/srv/sftp\n",
+					"      - ./state:/var/lib/gosftpd\n", "      - gosftpd-state:/var/lib/gosftpd\n",
+				).Replace(example)
+			},
+		},
+		{
+			name:    "after the variant with your own uid",
+			digests: digest + "  ghcr.io/o-kolomoiets/gosftpd:v" + v + "\n",
+			env:     []string{"RUN_AS=1000:1000"},
+			started: true,
+			file: func(string) string {
+				return strings.Replace(example, `    user: "65532:65532"`+"\n", `    user: "1000:1000"`+"\n", 1)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if tt.digests != "" {
+				write(t, dir, "digests.txt", tt.digests)
+			}
+			env := append([]string{"V=" + v, fakeCommand(t, dir, "docker", "gh"), "DATA=", "STATE=", "RUN_AS="}, tt.env...)
+			got := runBlock(t, dir, env, "", "compose")
+			if tt.started != (got.code == 0) {
+				t.Errorf("exit %d, stderr: %s", got.code, got.stderr)
+			}
+			want := ""
+			if tt.started {
+				want = started
+			}
+			if log := commandLog(t, dir, "docker"); log != want {
+				t.Errorf("the compose block ran docker with\n%s\nwant\n%s", log, want)
+			}
+			if log := commandLog(t, dir, "gh"); log != tt.gh {
+				t.Errorf("the compose block ran gh with\n%s\nwant\n%s", log, tt.gh)
+			}
+			if tt.file == nil {
+				return
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "compose.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := tt.file(example); string(data) != want {
+				t.Errorf("the compose block writes\n%s\nwant\n%s", data, want)
+			}
+		})
 	}
 }
 

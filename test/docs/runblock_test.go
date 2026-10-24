@@ -71,16 +71,18 @@ func write(t *testing.T, dir, name, text string) string {
 	return path
 }
 
-// fakeCommand writes a command name into a new directory that appends its
-// arguments to name.log in dir, and returns PATH with that directory
-// first.
-func fakeCommand(t *testing.T, dir, name string) string {
+// fakeCommand writes commands named names into a new directory, each of
+// which appends its arguments to NAME.log in dir, and returns PATH with
+// that directory first.
+func fakeCommand(t *testing.T, dir string, names ...string) string {
 	t.Helper()
 	bin := t.TempDir()
-	log := filepath.Join(dir, name+".log")
-	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
-	if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
+	for _, name := range names {
+		log := filepath.Join(dir, name+".log")
+		script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return "PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")
 }
