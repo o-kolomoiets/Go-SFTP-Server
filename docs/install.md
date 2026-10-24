@@ -117,16 +117,40 @@ every owner and mode:
   not edited; an edited one keeps its owner and mode.
 
 So leave these files to the group gosftpd. To run gosftpd as another
-account, add that account to the group instead (`sudo usermod -aG gosftpd
-ACCOUNT`) and name it in a drop-in, with the data directories given to it
-by a tmpfiles override (see [Another data path](#another-data-path)):
+account, here `sftp` with its group `sftp`, add that account to the group
+gosftpd instead and name it in a drop-in. Give it the data and the log
+too: an override of the tmpfiles file (as in
+[Another data path](#another-data-path)) for the directories, and once,
+with `chown -R`, what gosftpd has written there already, such as the
+mount `inbox` and the audit log, which belong to gosftpd: the account
+could not write them, and the start fails on the audit log.
 
-```ini
-# /etc/systemd/system/gosftpd.service.d/account.conf
+<!-- ci:account -->
+```sh
+sudo systemctl stop gosftpd
+sudo usermod -aG gosftpd sftp
+sudo mkdir -p /etc/systemd/system/gosftpd.service.d
+sudo tee /etc/systemd/system/gosftpd.service.d/account.conf >/dev/null <<'EOF'
 [Service]
 User=sftp
 Group=sftp
+EOF
+sudo tee /etc/tmpfiles.d/gosftpd.conf >/dev/null <<'EOF'
+d /srv/sftp 0750 sftp sftp -
+d /var/log/gosftpd 0750 sftp sftp -
+EOF
+sudo systemd-tmpfiles --create gosftpd.conf
+sudo chown -R sftp:sftp /srv/sftp /var/log/gosftpd
+sudo systemctl daemon-reload
+sudo systemctl start gosftpd
 ```
+<!-- /ci -->
+
+systemd gives the state directory, with the host keys, to the account at
+the start. The `chown -R` is a one-off: a `Z` line in the override would
+go through all the data, setting its owner and mode, at every boot. From
+then on, check the configuration as the account: `sudo -u sftp gosftpd
+config validate --check-fs`.
 
 A removal (`sudo apt remove gosftpd`, `sudo dnf remove gosftpd`, `sudo
 pacman -R gosftpd`) stops and disables the service on a running system and

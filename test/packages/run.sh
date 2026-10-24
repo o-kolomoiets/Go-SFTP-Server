@@ -27,6 +27,10 @@
 #   data kept, and what each format keeps of the configuration.
 # - The move from the archive install of docs/install.md, with an edited
 #   config.toml, to the package, with the step ADR 0012 gives per format.
+# - Another account, sftp, with the account block of docs/install.md, once
+#   the first start has created the mount inbox: the service runs as sftp
+#   and an upload into inbox works, over SFTP where openssh-client is
+#   installed (the Ubuntu runners), else written as sftp.
 #
 # Usage: test/packages/run.sh FORMAT DIR V
 # FORMAT is deb, rpm or archlinux; DIR holds the packages, the Linux
@@ -478,6 +482,52 @@ running "$(main_pid)"
 landlock
 out=$(validate /) || fail "config validate --check-fs as gosftpd: $out"
 equal "config validate" "$(tail -n 1 <<<"$out")" "$CONFIG: OK (1 mounts, 0 users)"
+
+phase "another account, as docs/install.md gives it"
+# The inbox that the first start created, which the recipe has to give
+# to the account.
+equal "/srv/sftp/inbox" "$(owner_mode /srv/sftp/inbox)" "gosftpd:gosftpd 750"
+getent passwd sftp >/dev/null && die "a user sftp exists already"
+nologin=$(command -v nologin || echo /bin/false)
+useradd --system --user-group --home-dir / --shell "$nologin" sftp
+# The block's sudo, as root: a stand-in where there is none (EL9, Arch).
+path=$PATH
+if ! command -v sudo >/dev/null; then
+	mkdir "$WORK/bin"
+	printf '#!/bin/sh\nexec "$@"\n' >"$WORK/bin/sudo"
+	chmod 0755 "$WORK/bin/sudo"
+	path="$WORK/bin:$PATH"
+fi
+PATH=$path "$ROOT/test/docs/run-block.sh" account || die "the account block of docs/install.md failed"
+pass "the account block of docs/install.md"
+pid=$(main_pid)
+running "$pid"
+# Not ps: the EL9 and Arch images have no procps.
+equal "the uid and gid of gosftpd" "$(awk '$1 == "Uid:" { u = $2 } $1 == "Gid:" { g = $2 } END { print u ":" g }' "/proc/$pid/status")" \
+	"$(id -u sftp):$(id -g sftp)"
+check "its groups hold gosftpd" grep -qw "$(getent group gosftpd | cut -d: -f3)" <<<"$(grep '^Groups:' "/proc/$pid/status")"
+equal "/srv/sftp/inbox" "$(owner_mode /srv/sftp/inbox)" "sftp:sftp 750"
+equal "/var/lib/gosftpd" "$(owner_mode /var/lib/gosftpd)" "sftp:sftp 700"
+equal "the host key" "$(owner_mode /var/lib/gosftpd/ssh_host_ed25519_key | cut -d' ' -f1)" sftp:sftp
+equal "the audit log" "$(owner_mode /var/log/gosftpd/audit.jsonl | cut -d' ' -f1)" sftp:sftp
+landlock
+out=$( (cd / && runuser -u sftp -- gosftpd config validate --check-fs 2>&1)) || fail "config validate --check-fs as sftp: $out"
+equal "config validate as sftp" "$(tail -n 1 <<<"$out")" "$CONFIG: OK (1 mounts, 0 users)"
+head -c 100000 /dev/urandom >"$WORK/upload.bin"
+if command -v sftp >/dev/null && command -v ssh-keygen >/dev/null; then
+	ssh-keygen -q -t ed25519 -N '' -f "$WORK/id"
+	gosftpd user add uploader --key "$WORK/id.pub" --access inbox=upload --write --config "$CONFIG" >/dev/null
+	check "systemctl reload with the user uploader" systemctl reload gosftpd
+	check "the status is \"configuration reloaded\"" status_is "configuration reloaded"
+	printf 'put %s up.bin\n' "$WORK/upload.bin" >"$WORK/put.batch"
+	check "an sftp upload into inbox" sftp -q -b "$WORK/put.batch" -P 2022 -i "$WORK/id" -o IdentitiesOnly=yes \
+		-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR uploader@127.0.0.1
+	check "the upload is in inbox" same "$WORK/upload.bin" /srv/sftp/inbox/up.bin
+	equal "its owner" "$(owner_mode /srv/sftp/inbox/up.bin | cut -d' ' -f1)" sftp:sftp
+else
+	echo "skip: no sftp client here: the upload is written as sftp instead"
+	check "sftp can write to inbox" runuser -u sftp -- sh -c 'cat >/srv/sftp/inbox/up.bin' <"$WORK/upload.bin"
+fi
 
 if [ "$FAILED" != 0 ]; then
 	echo "test/packages/run.sh: FAILED" >&2

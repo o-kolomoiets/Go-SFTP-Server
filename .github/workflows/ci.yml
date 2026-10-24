@@ -663,8 +663,9 @@ jobs:
 
   # The packages goreleaser-check built, under systemd as PID 1
   # (test/packages/run.sh, ADR 0012): installed (for deb the deb block of
-  # docs/install.md), reloaded, upgraded by a reinstall, removed, and
-  # installed over the archive install of docs/install.md. On the
+  # docs/install.md), reloaded, upgraded by a reinstall, removed,
+  # installed over the archive install of docs/install.md, and switched
+  # to another account with its account block. On the
   # ubuntu-24.04 and ubuntu-24.04-arm runners themselves, with needrestart
   # as on an Ubuntu server; in containers built from test/packages/ without
   # procps (test/packages/container.sh): Debian 12 (systemd 252, the drop-in

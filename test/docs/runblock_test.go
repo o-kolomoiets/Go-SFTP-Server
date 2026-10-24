@@ -340,9 +340,9 @@ func TestWorkflowBlocks(t *testing.T) {
 			names[m[1]] = append(names[m[1]], f)
 		}
 	}
-	// The docker job runs the first two, the packages job deb, release.yml
-	// and verify-release.yml verify (ADR 0012).
-	for _, want := range []string{"quickstart", "compose", "deb", "verify"} {
+	// The docker job runs the first two, the packages job deb and account,
+	// release.yml and verify-release.yml verify (ADR 0012).
+	for _, want := range []string{"quickstart", "compose", "deb", "account", "verify"} {
 		if names[want] == nil {
 			t.Errorf("no workflow or test script runs the %s block", want)
 		}

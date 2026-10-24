@@ -626,14 +626,14 @@ jobs:
   can no longer be repaired.
 - **Documented commands are run, not copied.** docs/install.md wraps each
   tested block in `<!-- ci:NAME -->` … `<!-- /ci -->` (`quickstart`,
-  `compose`, `deb`, `verify`); `test/docs/run-block.sh NAME` extracts only
-  the fenced block between the markers and runs it with `bash -euo
-  pipefail`, with `V` from the caller (the block's own `V=` line dropped)
-  and `gh release download` skipped when its files are present. The
-  `docker` and `packages` jobs, release.yml's verification step and
-  `verify-release.yml` call it, and a test fails when a marker a workflow
-  names is missing. Stream B writes the marked blocks, stream D the prose
-  around them. In release.yml the step's environment holds only
+  `compose`, `deb`, `account`, `verify`); `test/docs/run-block.sh NAME`
+  extracts only the fenced block between the markers and runs it with
+  `bash -euo pipefail`, with `V` from the caller (the block's own `V=`
+  line dropped) and `gh release download` skipped when its files are
+  present. The `docker` and `packages` jobs, release.yml's verification
+  step and `verify-release.yml` call it, and a test fails when a marker a
+  workflow names is missing. Stream B writes the marked blocks, stream D
+  the prose around them. In release.yml the step's environment holds only
   `GH_TOKEN`.
 - **`tag.yml`** (`workflow_dispatch`, input `version`; it tags only from
   `refs/heads/main`: on any other ref the run fails, rather than showing a
@@ -760,6 +760,12 @@ jobs:
     `systemctl enable gosftpd`, upgrades (still enabled), removes (no
     `multi-user.target.wants` link, not even one whose target is gone, and
     no empty `users.d`) and installs again (`is-enabled` says `disabled`).
+    Last, run.sh switches the service to another account with the
+    `account` block of docs/install.md, once the first start has created
+    the mount `inbox` (found in the final review): the service runs as
+    that account in the group `gosftpd`, owns the host key and the audit
+    log, and an upload into `inbox` works (over SFTP where
+    openssh-client is installed, else written as the account).
   - `docker` on ubuntu-24.04 and ubuntu-24.04-arm (arm64 with real
     Landlock, no QEMU), as a non-root user under umask 002, from the image
     `goreleaser-check` saved, tagged after `docker load` with every
@@ -1011,7 +1017,12 @@ nfpms:
   the files given to that group failed the reload, and the next start
   exited 2. A preinstall script that saved the group and mode for
   postinstall to restore would make every format keep them; the packages
-  have none. docs/install.md says this.
+  have none. docs/install.md says this, and gives the commands for an
+  account that joins the group as the marked block `account`: besides
+  the drop-in and a tmpfiles override, what gosftpd wrote already in the
+  data and the log directory needs a one-off `chown -R` to the account:
+  without it the start fails on the audit log, and the account could not
+  write to the mount `inbox` either (found in the final review).
 - **The scripts never enable, start or restart the service.** The operator
   enables it (the DoD runs `systemctl enable --now gosftpd`) and restarts
   it after an upgrade (docs/operations.md): a restart ends every session,
