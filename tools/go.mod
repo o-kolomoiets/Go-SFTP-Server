@@ -14,7 +14,7 @@ tool (
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/bitfield/gotestdox v0.2.3 // indirect
-	github.com/bmatcuk/doublestar/v4 v4.10.3 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.10.4 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dnephin/pflag v1.0.7 // indirect
 	github.com/fatih/color v1.19.0 // indirect
