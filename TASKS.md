@@ -15,6 +15,7 @@ The plan, rationale and acceptance criteria are in [ROADMAP.md](ROADMAP.md). Thi
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user and Ops | v0.4.0 | ✅ | 9 / 9 |
 | M5 Distribution | v0.5.0 | 🔄 | 11 / 13 |
+| M5b Desktop GUI | v0.6.0 | ⬜ | 0 / 9 |
 | M6 v1.0 | v1.0.0 | ⬜ | 0 / 8 |
 
 ## M0: Foundation and cleanup
@@ -155,6 +156,22 @@ Decisions and configuration: [ADR 0012](docs/adr/0012-distribution.md). Four str
 | M5-11 | Documents: `docs/install.md` (the prose around M5-06's marked blocks: packages, from the archive install to a package, what a removal keeps per format, what an upgrade does to the owners of `config.toml` and `users.d` per format and another account through the group `gosftpd`, archive, Docker with a configuration directory, compose by digest, verification by digest with the minimum cosign and gh versions, rebuilding a release), quickstart and README (Docker quickstart, install), SECURITY.md verification, `docs/operations.md` (upgrades, needrestart and unattended-upgrades, merging `.dpkg-dist`, `.rpmnew`, `.pacnew`, `.rpmsave` and `.pacsave`), `docs/configuration.md` and `docs/security.md` (search order, password without a file, Landlock in ephemeral mode), release checklist (the new flow, a dispatch by hand, an abandoned draft, a mistaken tag, the M5 smoke steps), CHANGELOG | ✅ |
 | M5-12 | Owner: `v*` tag ruleset, GHCR package `gosftpd` public after rc.1, publish the drafts | ⬜ 👤 |
 | M5-13 | M5 DoD: `v0.5.0-rc.1` → `verify-release`, a Scorecard check, the rebuild of docs/install.md (Rebuild a release) against the rc with all 12 `OK`, and the Quickstart by hand on a clean Ubuntu 24.04 VM (umask 002, not root, the fingerprint kept after a new container), as the release checklist's step 11 has them → `v0.5.0` (published by the owner) | ⬜ |
+
+## M5b: Desktop GUI (v0.6.0)
+
+A desktop application, `gosftpd-gui`, for people who do not use the command line; not a web UI (ROADMAP §1.4, §5 M5b).
+
+| ID | Task | Status |
+|---|---|---|
+| M5b-01 | ADR 0013: toolkit after a prototype of the same screen in each candidate, a separate `gosftpd-gui` binary (the server stays static and CGO-free), share a folder vs manage an installed server, security model, packaging and signing (D22) | ⬜ |
+| M5b-02 | `cmd/gosftpd-gui` and the logic it shares with the CLI in `internal/` (users, mounts, host keys, validation) | ⬜ |
+| M5b-03 | First run and share a folder: folders, a user with a password or key, host key, start and stop, connection details to copy | ⬜ |
+| M5b-04 | Users and folders: add, disable, remove, permissions, `on_conflict`, applied by a reload | ⬜ |
+| M5b-05 | Activity: state, sessions, latest transfers from the audit log, warnings in plain words | ⬜ |
+| M5b-06 | Manage an installed server (package, systemd, Docker), if ADR 0013 keeps it in M5b | ⬜ |
+| M5b-07 | Packaging and signing per OS in the release pipeline (Linux, macOS; Windows after M3b) | ⬜ |
+| M5b-08 | Tests: unit, the toolkit's UI test driver, an end-to-end upload with OpenSSH `sftp` on Linux and macOS; `docs/gui.md` with screenshots, README, quickstart | ⬜ |
+| M5b-09 | M5b DoD and `v0.6.0` | ⬜ |
 
 ## M6: v1.0.0
 
