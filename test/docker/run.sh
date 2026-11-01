@@ -445,8 +445,9 @@ for v in volumes uid; do
 	landlock "$c"
 	case $v in
 	volumes)
+		# Sorted: docker inspect lists .Mounts in no fixed order.
 		equal "the volumes of the service" \
-			"$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$c")" "gosftpd-data gosftpd-state "
+			"$(docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' "$c" | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' ')" "gosftpd-data gosftpd-state "
 		;;
 	uid)
 		equal "the user of the service" "$(docker inspect -f '{{.Config.User}}' "$c")" "$(id -u):$(id -g)"

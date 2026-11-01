@@ -816,19 +816,20 @@ func TestRefusalReasonAudited(t *testing.T) {
 		func() string { return "auth.failure events:\n" + e.auditLog.String() })
 	lines := auditLines(t, e.auditLog.String())
 	checkSchema(t, lines)
-	var reasons, fps []any
+	// The two connections end in either order, so the events are matched
+	// by what they say, not by their position: the expired account's key
+	// is refused with its reason and named; a key that is not the user's
+	// gets neither.
+	type failure struct{ reason, keyFP any }
+	var got []failure
 	for _, l := range lines {
 		if l["event"] == "auth.failure" {
-			reasons = append(reasons, l["reason"])
-			fps = append(fps, l["key_fp"])
+			got = append(got, failure{l["reason"], l["key_fp"]})
 		}
 	}
-	if len(reasons) != 2 || reasons[0] != "expired" || reasons[1] != nil {
-		t.Errorf("auth.failure reasons = %v, want [expired <nil>]", reasons)
-	}
-	// The refused key is named; a key that is not the user's is not.
-	if len(fps) != 2 || fps[0] != ssh.FingerprintSHA256(key.PublicKey()) || fps[1] != nil {
-		t.Errorf("auth.failure key_fp = %v", fps)
+	want := []failure{{"expired", ssh.FingerprintSHA256(key.PublicKey())}, {nil, nil}}
+	if len(got) != 2 || !slices.Contains(got, want[0]) || !slices.Contains(got, want[1]) {
+		t.Errorf("auth.failure (reason, key_fp) = %v, want %v in any order", got, want)
 	}
 }
 
