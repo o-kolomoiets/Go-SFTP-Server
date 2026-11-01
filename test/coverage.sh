@@ -14,6 +14,7 @@ declare -A FLOOR=(
 	[internal/sftpd]=85
 	[internal/hooks]=85
 	[internal/sandbox]=85
+	[internal/atmoz]=85
 )
 MODULE=github.com/o-kolomoiets/go-sftp-server
 

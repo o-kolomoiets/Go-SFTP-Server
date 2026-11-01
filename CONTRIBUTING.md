@@ -9,17 +9,19 @@ before proposing larger changes, and open an issue first to discuss them.
 - Go 1.26.5 or newer.
 - [golangci-lint](https://golangci-lint.run/welcome/install/) v2.14 as a
   binary (its docs advise against `go install`).
-- Other tools (govulncheck, staticcheck, gotestsum, actionlint) live in
-  `tools/go.mod` and run via `go tool -modfile=tools/go.mod <tool>`.
+- Other tools (govulncheck, staticcheck, gotestsum, actionlint,
+  go-licenses) live in `tools/go.mod` and run via
+  `go tool -modfile=tools/go.mod <tool>`.
 
-| Command      | What it does                                   |
-|--------------|------------------------------------------------|
-| `make test`  | unit tests with `-race`                        |
-| `make lint`  | gofmt, go vet, golangci-lint, actionlint       |
-| `make fmt`   | apply gofumpt and goimports                    |
-| `make vuln`  | govulncheck                                    |
-| `make build` | build `bin/gosftpd`                            |
-| `make tidy`  | `go mod tidy` for both modules                 |
+| Command         | What it does                                   |
+|-----------------|------------------------------------------------|
+| `make test`     | unit tests with `-race`                        |
+| `make lint`     | gofmt, go vet, golangci-lint, actionlint       |
+| `make fmt`      | apply gofumpt and goimports                    |
+| `make vuln`     | govulncheck                                    |
+| `make build`    | build `bin/gosftpd`                            |
+| `make tidy`     | `go mod tidy` for both modules                 |
+| `make generate` | man pages, completions, licenses into `out/`   |
 
 ## Pull requests
 

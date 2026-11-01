@@ -60,6 +60,17 @@ func (c *Config) checkFS(reload bool, live []LiveMount) (warnings, unavailable [
 			p.warnf(f, "readable by all users; consider chmod o-r")
 		}
 	}
+	// The atmoz users file holds passwords: it gets the same warning, with
+	// a fix that keeps it readable to gosftpd, which in the image does not
+	// own it.
+	for _, f := range c.Inlined {
+		if !f.Secret {
+			continue
+		}
+		if fi, err := os.Stat(f.Path); err == nil && worldReadable(fi) {
+			p.warnf(f.What+" "+f.Path, "readable by all users, and it holds passwords or their hashes; let only gosftpd's group read it: chown root:%d and chmod 0640 the file (for a bind mount, the host file)", os.Getegid())
+		}
+	}
 	unavailable = c.checkMounts(p, reload)
 	if !reload {
 		c.checkHostKeys(p)
@@ -76,6 +87,9 @@ func (c *Config) checkFS(reload bool, live []LiveMount) (warnings, unavailable [
 // are warnings and the mount is returned as unavailable.
 func (c *Config) checkMounts(p *problems, reload bool) (unavailable []string) {
 	for _, name := range sortedKeys(c.Mounts) {
+		if slices.Contains(c.Unavailable, name) {
+			continue
+		}
 		mp := &problems{}
 		c.checkMount(mp, name)
 		p.warns = append(p.warns, mp.warns...)
@@ -96,6 +110,9 @@ func (c *Config) checkMounts(p *problems, reload bool) (unavailable []string) {
 func (c *Config) checkMount(p *problems, name string) {
 	m := c.Mounts[name]
 	k := key("mounts", name, "path")
+	if c.Atmoz {
+		k = AtmozKey(m)
+	}
 	dir := m.Path
 	if filepath.Base(dir) == vfs.UserPlaceholder {
 		dir = filepath.Dir(dir)
@@ -206,6 +223,9 @@ func (c *Config) checkTrusted(p *problems, live []LiveMount) {
 	if out := c.Audit.Output; out != "" && out != "stdout" {
 		files = append(files, trusted{out, "the audit log", false, true})
 	}
+	for _, f := range c.Inlined {
+		files = append(files, trusted{f.Path, f.What, f.Secret, false})
+	}
 	for _, f := range c.hookFiles() {
 		files = append(files, trusted{f, "a file of a hook", true, false})
 	}
@@ -216,8 +236,11 @@ func (c *Config) checkTrusted(p *problems, live []LiveMount) {
 	var mounts []mount
 	for _, name := range sortedKeys(c.Mounts) {
 		k := key("mounts", name, "path")
-		if c.AnyUser != nil {
+		switch {
+		case c.AnyUser != nil:
 			k = "--dir " + name
+		case c.Atmoz:
+			k = AtmozKey(c.Mounts[name])
 		}
 		mounts = append(mounts, mount{k, c.Mounts[name].Path, c.Mounts[name].ReadOnly})
 	}
@@ -296,6 +319,10 @@ func (mi mountInfo) locate(path string) (dev, rel string, ok bool) {
 	}
 	return dev, rel, best >= 0
 }
+
+// AtmozKey names a mount of atmoz mode in messages, which never show its
+// internal name: by the user's directory.
+func AtmozKey(m *Mount) string { return "atmoz directory " + m.Path }
 
 // checkMountpoint fails if dir is on the same filesystem as its parent:
 // the disk meant to be mounted there is missing (ROADMAP §6.1 item 9).

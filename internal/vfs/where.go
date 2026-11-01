@@ -11,7 +11,7 @@ import (
 
 // Where locates the file of an event for hooks (ADR 0010).
 type Where struct {
-	Mount    string
+	Mount    string      // the visible name (Mount.Display)
 	HostPath string      // "" when the path names no file in a mount
 	Info     fs.FileInfo // the file's identity when the event happened; nil if unknown
 }
@@ -20,11 +20,11 @@ type Where struct {
 // user's directory.
 func (v *view) hostPath(rel string) string { return filepath.Join(v.root.Name(), rel) }
 
-// MountOf returns the name of the mount a client path lies in, or "" for
-// the virtual root and paths that name no mount. Nothing is opened.
+// MountOf returns the visible name of the mount a client path lies in, or
+// "" for the virtual root and paths that name no mount. Nothing is opened.
 func (s *Session) MountOf(vp string) string {
 	if s.flatten {
-		return s.views[0].m.name
+		return s.views[0].name()
 	}
 	p := path.Clean("/" + vp)
 	if p == "/" {
@@ -32,7 +32,7 @@ func (s *Session) MountOf(vp string) string {
 	}
 	name, _, _ := strings.Cut(p[1:], "/")
 	if v := s.byName[name]; v != nil {
-		return v.m.name
+		return v.name()
 	}
 	return ""
 }
@@ -45,7 +45,7 @@ func (s *Session) Locate(vp string) Where {
 	if err != nil || v == nil {
 		return Where{Mount: s.MountOf(vp)}
 	}
-	w := Where{Mount: v.m.name, HostPath: v.hostPath(rel)}
+	w := Where{Mount: v.name(), HostPath: v.hostPath(rel)}
 	if fi, err := v.root.Lstat(rel); err == nil {
 		w.Info = fi
 	}

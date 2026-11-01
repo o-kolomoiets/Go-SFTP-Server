@@ -8,6 +8,188 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Added
+
+- `gosftpd serve --ephemeral`, a throwaway server for tests (ADR 0012). It
+  serves a new temporary directory, or the one `--dir` names, as `/` to the
+  user `test`, who logs in with a random password or a generated ed25519
+  key, and once it serves prints the connection details as one JSON line on
+  stdout: `host`, `port`, `user`, `password`, `private_key_path`, `dir`,
+  `host_key_fingerprint`, `known_hosts` (a line for `UserKnownHostsFile`),
+  `pid` and `version`. Nothing else goes to stdout: logs and the audit log
+  go to stderr. It listens on `127.0.0.1:0` unless `--listen`, given once,
+  names another address; `$GOSFTPD_CONFIG` and `$GOSFTPD_LISTEN` are
+  ignored with a warning, and SIGHUP is logged and otherwise ignored. The
+  host key exists only in memory. On SIGINT or SIGTERM it deletes the
+  client key and the temporary data; under Landlock a rule on its
+  directory allows that, and the directory itself stays, empty.
+- Atmoz mode: the user specs of atmoz/sftp,
+  `user:pass[:e][:uid[:gid[:dir1[,dir2]...]]]`, work as in atmoz (ADR 0012,
+  docs/migrate-from-atmoz.md), except those gosftpd refuses with exit 2 and
+  a fix: MD5-crypt, SHA-crypt and yescrypt hashes (`:e` takes bcrypt or
+  argon2id), user names with upper case or a leading `.` or `_`, nested
+  directories (`a/b`) and extra fields. The uid and gid are ignored: files
+  belong to the user gosftpd runs as. The specs come as arguments to the
+  root command (`docker run IMAGE foo:pass:::upload`), in `$SFTP_USERS` or
+  in a users file (`--users-conf`, or in the container image
+  `/etc/sftp/users.conf`).
+  User foo with directory upload sees `/upload`, stored in
+  `/home/foo/upload`, one mount per user and directory under a read-only
+  root, and logs in with the password, a bcrypt or argon2id hash (`:e`),
+  or the keys in `/home/foo/.ssh/keys/`. An upload overwrites an existing
+  file. In the image, directories found under `/home/<user>` are served
+  too, and `/etc/ssh`'s host keys when they exist. The users, keys and
+  directories are read once, at start; SIGHUP is logged and ignored.
+  Atmoz mode starts only with specs as arguments or when no configuration
+  file is found; `--config` and `$GOSFTPD_CONFIG` stay strict, and in the
+  image a mounted `/etc/gosftpd` without `config.toml` exits 2. No message
+  shows a password or a spec: usage errors give the position of an
+  argument with `:`, or of any argument after a spec other than a command,
+  instead of the argument, and the flags of atmoz mode do not show a value
+  that looks like a spec (a flag whose own value is missing takes the next
+  argument), except `--listen`'s HOST:PORT with a port number. A new fuzz
+  target, `FuzzAtmozSpec`, and a test that gives a spec to every flag of
+  the root command check that. The audit log names each mount by its
+  directory.
+- Man pages, one per command, and bash, zsh and fish completions:
+  `make generate` writes them into `out/` (not committed) with
+  `internal/cli/gendocs`, from the command definitions, dated by the
+  commit (`SOURCE_DATE_EPOCH`), so that the same commit gives the same
+  files. Every release archive carries them in `man/` and `completions/`;
+  the packages install them (ADR 0012).
+- `THIRD_PARTY_LICENSES`: `make generate` also writes the name, version,
+  license and license text of every Go module in the Linux binary into
+  `out/THIRD_PARTY_LICENSES`, with go-licenses v2.0.1 (a tool in
+  `tools/go.mod`) and the template `packaging/third_party_licenses.tpl`,
+  and last the Go standard library and runtime, which every binary links
+  in, with the `LICENSE` of the Go that builds it. The file lists the
+  linux/amd64 build on every host, so a release rebuilt elsewhere keeps its
+  checksums. libcap/psx appears once, under BSD-3-Clause, the license
+  gosftpd uses it under. A license go-licenses cannot classify fails
+  `make generate`. Every release archive carries the file.
+- Release archives for FreeBSD (amd64, arm64): Tier 2, cross-built and not
+  tested (ADR 0012).
+- The container image `ghcr.io/o-kolomoiets/gosftpd` for linux/amd64 and
+  linux/arm64, built by GoReleaser from `packaging/docker/Dockerfile` and
+  tagged with the version (`vX.Y.Z`): distroless
+  (`static-debian13:nonroot`, pinned by digest and updated by Dependabot),
+  about 5 MB compressed, running gosftpd as uid 65532 with `serve`, which
+  finds `/etc/gosftpd/config.toml` in a mounted configuration directory, a
+  health check that turns `healthy` within seconds, and ports 2022 and
+  9090. `/var/lib/gosftpd` and `/srv/sftp` belong to uid 65532, so named
+  volumes need no `chown`; there is no `VOLUME`. docs/install.md gives the
+  Docker Quickstart and a compose file with a read-only root file system,
+  which a CI job runs against the image on amd64 and arm64, together with
+  a reload and the hint for a missing configuration (ADR 0012).
+- deb, rpm and Arch packages for amd64 and arm64 (no apk: Alpine has no
+  systemd). They install the files of the Linux archive in the layout
+  docs/install.md gives (`/etc/gosftpd/config.toml` as a conffile,
+  `%config(noreplace)` or Arch `backup` entry), an empty
+  `/etc/gosftpd/users.d`, the man pages, the completions, the reference
+  configuration and the license files. Their scripts create the user and
+  the directories, give `config.toml` and `users.d` to the group gosftpd,
+  and install the drop-in for systemd before 253 where systemd lacks
+  `Type=notify-reload` (and remove it where it has it, and with the
+  package). They never enable, start or restart the service, also not on
+  an upgrade, and the deb's `/etc/needrestart/conf.d/gosftpd.conf` keeps
+  needrestart (Ubuntu) from restarting it. The deb depends on procps, whose
+  `kill` the drop-in reloads with. A CI job installs, reloads, upgrades
+  and removes them under systemd on Ubuntu 24.04 (amd64 and arm64, with
+  needrestart), Debian 12 and 13, EL9 and Arch, and installs them over the
+  archive install (ADR 0012).
+- Signed releases with provenance: `checksums.txt`, which lists every
+  archive, package and SBOM, is signed with keyless cosign v3
+  (`checksums.txt.sigstore.json`), and so is the image, by digest; each
+  archive has an SPDX SBOM (`*.sbom.json`, syft); GitHub build provenance
+  attestations cover the files and the image, and the release carries the
+  provenance bundle (`gosftpd_X.Y.Z.intoto.jsonl`) and `digests.txt`, the
+  image's digest. docs/install.md gives the commands that verify a
+  release (cosign v3.0 or later, gh 2.68.0 or later); the release workflow
+  runs them before the release is published, and a workflow runs them
+  against every published release (ADR 0012).
+- Documentation of the packages and the image. docs/install.md, now
+  "Installation", gives the packages for Debian and Ubuntu, EL9 and Arch,
+  the move from the archive install to a package with the one step each
+  format needs, what an upgrade and a removal keep of the configuration,
+  `users.d`, their owners and modes per format, and the service under
+  another account; Docker with a configuration directory, named volumes
+  or your own uid, Compose by digest after each of them, a reload with
+  `docker kill -s HUP` and an upgrade; the verification of a release, the
+  image by its digest, also without the attestations API; and the rebuild
+  of a release from its tag. docs/operations.md adds upgrades with a
+  package, needrestart on Ubuntu, also for an archive install that
+  unattended-upgrades would otherwise restart, merging the `.dpkg-dist`,
+  `.dpkg-old`, `.rpmnew`, `.pacnew`, `.rpmsave` and `.pacsave` files, and
+  a reload in Docker. docs/configuration.md describes the search for the
+  configuration file with the atmoz fallback, ephemeral mode with a GitHub
+  Actions step that masks the password and its use in a container, and
+  atmoz mode; docs/security.md and the threat model the Landlock rule of
+  ephemeral mode, the plain-text passwords of atmoz mode and the signed
+  releases; SECURITY.md how to verify a release. The README and
+  docs/quickstart.md show the Docker Quickstart, which a test keeps equal
+  to the block CI runs, and link docs/migrate-from-atmoz.md. The release
+  checklist follows the new release flow, with the smoke tests of the
+  packages and the image, the one-time checks of a milestone's first rc,
+  an abandoned draft, a tag made by mistake and a stable run whose last
+  step met a newer tag.
+
+### Changed
+
+- The systemd unit's `Documentation=` names the man page `gosftpd(1)`
+  first, then docs/install.md.
+
+- Release archives are reproducible: every entry belongs to root (uid 0)
+  with mode 0644, or 0755 for the binary, and the time of the commit, so
+  that a rebuild of a tag with the same Go and GoReleaser versions gives
+  the same archives whatever the checkout's umask and time. A CI job builds
+  each commit twice, from two checkouts with cold caches, one of them made
+  under umask 002, and compares the checksums (ADR 0012).
+- Releases are built with GoReleaser v2.19.0, as a draft whose notes are
+  the version's section of CHANGELOG.md (for a pre-release without one,
+  the Unreleased section); `.github/scripts/release-notes.sh` extracts it
+  and fails when there are no notes (ADR 0012).
+- A release starts with the **Tag release** workflow on `main`: it checks
+  that the version is higher than every release tag, that CHANGELOG.md has
+  its notes and that `ci-ok` passed on the commit, tags that commit
+  (annotated, not signed) and starts the release workflow on the tag. That
+  workflow runs only by dispatch, and only for the highest release tag
+  whose release is not published yet; it builds the man pages,
+  completions and license file in a job without credentials, checks them,
+  and builds, signs and attests the release as a draft. The image's
+  `latest` tag moves only for a stable version, once the verification has
+  passed. The owner publishes the draft; the release is no longer built
+  after it is published (ADR 0012).
+- A missing configuration file is explained: when `--config` or
+  `$GOSFTPD_CONFIG` names a file that does not exist, when the
+  configuration file is a directory, or when no file is found, the error
+  (still exit code 2) says how to start: `gosftpd init`, whose
+  `./gosftpd.toml` the search finds, or `gosftpd serve --dir PATH`, and
+  with Docker the commands that create the file with `config example` and
+  mount it as a directory; it links the Docker section of
+  docs/install.md. A directory that `--config` or `$GOSFTPD_CONFIG` names
+  gets "name the file in it"; one found by the search, or in the container
+  image, is named as what Docker creates when the host file of a bind
+  mount does not exist, and so is, in the image, a mounted `/etc/gosftpd`
+  that holds no `config.toml` (ADR 0012). A reload that cannot find its
+  file logs that in one line, without the hint.
+- A configuration file that is a directory is reported as one, also by
+  `healthcheck`, instead of failing when it is read.
+
+### Fixed
+
+- The search for a configuration file no longer stops at a permission
+  error on `./gosftpd.toml`: from a working directory the user cannot
+  search, such as `sudo -u gosftpd gosftpd config validate` run from
+  `/root`, or `healthcheck` in a container started with `--user`, it goes
+  on to `/etc/gosftpd/config.toml`; when nothing is found, the error says
+  that `./gosftpd.toml` was not checked. A `./gosftpd.toml` the user can
+  see but not reach, such as a symlink into a directory they cannot
+  search, still fails, as do `--config`, `$GOSFTPD_CONFIG` and the other
+  paths of the search on such an error.
+- The `connect:` line of serve's banner puts an IPv6 listen address in
+  brackets (`sftp -P 2022 alice@[::1]`), which sftp needs to tell the host
+  from a path; it printed `alice@::1`.
+
 ## [0.4.0] - 2026-10-17
 
 Multi-user operation: reload on SIGHUP, users in `users.d`, SSH

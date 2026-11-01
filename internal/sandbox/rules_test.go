@@ -699,6 +699,107 @@ func TestMountRules(t *testing.T) {
 	})
 }
 
+// TestEphemeralRule: serve --ephemeral's directory gets remove_file and
+// remove_dir, through the descriptor it holds, besides its data mount;
+// with --dir the mount is elsewhere. A directory swapped or removed after
+// it was made fails the start.
+func TestEphemeralRule(t *testing.T) {
+	t.Parallel()
+	const dir = "/tmp/gosftpd-ephemeral-1"
+	m := newMemFS(t).dirs(dir+"/data", "/srv/share").files(dir + "/id_ed25519")
+	ephemeralInput := func(t *testing.T, mount string, readOnly bool) Input {
+		t.Helper()
+		c := config.Default()
+		c.EphemeralDir = native(dir)
+		c.AddMount(filepath.Base(mount), native(mount)).ReadOnly = readOnly
+		in := input(t, m, c)
+		info, err := m.Stat(native(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Ephemeral = &MountDir{FD: 5, Dev: info.Dev, Ino: info.Ino}
+		return in
+	}
+	const remove = "dir " + dir + " remove_file,remove_dir"
+
+	p := compute(t, ephemeralInput(t, dir+"/data", false))
+	checkPlan(t, p, []string{remove, "dir " + dir + "/data " + rw})
+	for _, r := range p.Rules {
+		switch slash(r.Path) {
+		case dir:
+			if r.Open != "/proc/self/fd/5" || !slices.Equal(r.For, []string{"--ephemeral"}) {
+				t.Errorf("%s: Open %q, For %v", dir, r.Open, r.For)
+			}
+		case dir + "/data":
+			if !slices.Equal(r.For, []string{"--ephemeral data"}) {
+				t.Errorf("data: For %v", r.For)
+			}
+		}
+	}
+
+	// Read-only, the data mount's rule keeps the read rights; the
+	// directory's rule lets gosftpd delete what a test put there.
+	checkPlan(t, compute(t, ephemeralInput(t, dir+"/data", true)), []string{remove, "dir " + dir + "/data " + ro})
+
+	in := ephemeralInput(t, "/srv/share", false)
+	p = compute(t, in)
+	checkPlan(t, p, []string{remove, "dir /srv/share " + rw})
+	if i := slices.IndexFunc(p.Rules, func(r Rule) bool { return slash(r.Path) == "/srv/share" }); !slices.Equal(p.Rules[i].For, []string{"--dir share"}) {
+		t.Errorf("--dir: For %v", p.Rules[i].For)
+	}
+
+	// Without the descriptor, by its path.
+	in.Ephemeral = nil
+	p = compute(t, in)
+	if i := slices.IndexFunc(p.Rules, func(r Rule) bool { return slash(r.Path) == dir }); p.Rules[i].Open != p.Rules[i].Path {
+		t.Errorf("by path: Open %q", p.Rules[i].Open)
+	}
+
+	in = ephemeralInput(t, "/srv/share", false)
+	in.Ephemeral.Ino++
+	if _, err := Compute(in); err == nil || err.Error() != "--ephemeral: "+native(dir)+" is no longer the directory gosftpd created" {
+		t.Errorf("swapped: Compute = %v", err)
+	}
+	in = ephemeralInput(t, "/srv/share", false)
+	gone := newMemFS(t).dirs("/srv/share")
+	in.FS = gone
+	in.Mounts = input(t, gone, in.Config).Mounts
+	if _, err := Compute(in); err == nil || !strings.Contains(err.Error(), "is no longer the directory gosftpd created") {
+		t.Errorf("removed: Compute = %v", err)
+	}
+}
+
+// TestAtmozMountRules: atmoz mode's mounts get rules under their
+// directory's path, never their internal names; one that is unavailable
+// from the start is not open and gets none. The users file and the key
+// files were read and inlined, and get none either (ADR 0012).
+func TestAtmozMountRules(t *testing.T) {
+	t.Parallel()
+	m := newMemFS(t).dirs("/home/foo/upload", "/home/bar/upload").files("/home/foo/.ssh/keys/id.pub", "/etc/sftp/users.conf")
+	c := config.Default()
+	c.Atmoz = true
+	c.AddMount("atmoz1", native("/home/foo/upload")).Display = "upload"
+	c.AddMount("atmoz2", native("/home/bar/upload")).Display = "upload"
+	c.AddMount("atmoz3", native("/home/bar/blocked")).Display = "blocked"
+	c.Unavailable = []string{"atmoz3"}
+	c.Inlined = []config.InlinedFile{{Path: native("/etc/sftp/users.conf"), Secret: true}, {Path: native("/home/foo/.ssh/keys/id.pub")}}
+	in := Input{Config: c, FS: m, ProcSelfFD: -1}
+	for _, name := range []string{"atmoz1", "atmoz2"} {
+		info, err := m.Stat(c.Mounts[name].Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Mounts = append(in.Mounts, MountDir{Name: name, FD: -1, Dev: info.Dev, Ino: info.Ino})
+	}
+	p := compute(t, in)
+	checkPlan(t, p, []string{"dir /home/bar/upload " + rw, "dir /home/foo/upload " + rw})
+	for _, r := range p.Rules {
+		if want := "atmoz directory " + r.Path; !slices.Equal(r.For, []string{want}) {
+			t.Errorf("%s: For %v, want %q", slash(r.Path), r.For, want)
+		}
+	}
+}
+
 // TestDedupe: one rule per path, with the rights of all; rules below a
 // directory rule that gives all their rights are left out.
 func TestDedupe(t *testing.T) {

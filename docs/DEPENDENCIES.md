@@ -95,11 +95,38 @@ support as a whole added 72 KiB (73 728 bytes, linux/amd64,
 |----------------------|---------|-----------------------|-------|
 | `go.uber.org/goleak` | v1.3.0  | goroutine leak checks | M1    |
 
+## Man pages
+
+`internal/cli/gendocs`, which `make generate` runs, writes the man pages
+with `github.com/spf13/cobra/doc` ([ADR 0012](adr/0012-distribution.md)).
+That package brings `github.com/cpuguy83/go-md2man/v2` v2.0.6,
+`github.com/russross/blackfriday/v2` v2.1.0 and `go.yaml.in/yaml/v3`
+v3.0.4, and the tests of yaml/v3 `github.com/kr/text` v0.2.0: indirect
+requirements of `go.mod`. None of them is linked into gosftpd (`go
+version -m`), but govulncheck scans them with the rest of the module.
+
+## `THIRD_PARTY_LICENSES`
+
+The release archives and packages carry `THIRD_PARTY_LICENSES`, which
+`make generate` writes into `out/` ([ADR 0012](adr/0012-distribution.md)):
+go-licenses lists every module of the linux/amd64 build (`GOOS=linux
+GOARCH=amd64`, so that every host writes the same file) with its license
+text, psx under BSD-3-Clause only. go-licenses skips the Go standard
+library and runtime, which every gosftpd binary links in statically under
+BSD-3-Clause; `make generate` appends their entry last, with the Go
+version and `$(go env GOROOT)/LICENSE`. A license go-licenses cannot
+classify (`License: Unknown`) fails `make generate`, and CI's
+`goreleaser-check` checks that every module in `go version -m` of the
+Linux binary has an entry and that the Go entry comes last.
+
 ## Developer tools (`tools/go.mod`)
 
-govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12.
-golangci-lint v2.14.0 is installed as a binary (CI uses
-`golangci/golangci-lint-action`).
+govulncheck v1.8.0, staticcheck v0.8.1, gotestsum v1.13.0, actionlint v1.7.12,
+go-licenses v2.0.1 (`github.com/google/go-licenses/v2`, which writes
+`THIRD_PARTY_LICENSES` in `make generate`; it brings
+`github.com/google/licenseclassifier/v2`, klog, OpenCensus and cobra v1.7.0
+and raises `golang.org/x/net` to v0.61.0). golangci-lint v2.14.0 is
+installed as a binary (CI uses `golangci/golangci-lint-action`).
 
 The `tool` directive marks every requirement in `tools/go.mod` as
 `// indirect`, so a module stays at the version the tools ask for until it
