@@ -15,13 +15,13 @@ tool (
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/bitfield/gotestdox v0.2.3 // indirect
-	github.com/bmatcuk/doublestar/v4 v4.10.3 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.10.4 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dnephin/pflag v1.0.7 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/go-logr/logr v1.2.0 // indirect
+	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/go-licenses/v2 v2.0.1 // indirect
 	github.com/google/licenseclassifier/v2 v2.0.0 // indirect
@@ -31,17 +31,18 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-runewidth v0.0.31 // indirect
 	github.com/mattn/go-shellwords v1.0.16 // indirect
-	github.com/otiai10/copy v1.10.0 // indirect
+	github.com/otiai10/copy v1.14.1 // indirect
+	github.com/otiai10/mint v1.6.3 // indirect
 	github.com/rhysd/actionlint v1.7.12 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
-	github.com/sergi/go-diff v1.2.0 // indirect
-	github.com/spf13/cobra v1.7.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/sergi/go-diff v1.4.0 // indirect
+	github.com/spf13/cobra v1.10.2 // indirect
+	github.com/spf13/pflag v1.0.9 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.3 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 // indirect
 	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/telemetry v0.0.0-20261010193011-f71dc92da45e // indirect
@@ -51,5 +52,5 @@ require (
 	golang.org/x/vuln v1.9.0 // indirect
 	gotest.tools/gotestsum v1.13.0 // indirect
 	honnef.co/go/tools v0.8.2 // indirect
-	k8s.io/klog/v2 v2.90.1 // indirect
+	k8s.io/klog/v2 v2.140.0 // indirect
 )
