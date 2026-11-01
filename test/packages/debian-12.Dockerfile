@@ -5,7 +5,7 @@
 # lacks Type=notify-reload, so postinstall installs the drop-in, whose
 # ExecReload= runs /bin/kill from procps. The package lists stay, for
 # that apt install.
-FROM debian:12@sha256:854dd8ab51d62866dbd8f5431d15ce77b12983a2a4a1e1fe43a2395dc7ef9f61
+FROM debian:13@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1
 RUN apt-get update -q \
 	&& apt-get install -y -q --no-install-recommends systemd systemd-sysv sudo \
 	&& ! dpkg -s procps >/dev/null 2>&1
