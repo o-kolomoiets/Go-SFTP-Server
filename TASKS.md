@@ -15,6 +15,7 @@ The plan, rationale and acceptance criteria are in [ROADMAP.md](ROADMAP.md). Thi
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user and Ops | v0.4.0 | ✅ | 9 / 9 |
 | M5 Distribution | v0.5.0 | 🔄 | 11 / 13 |
+| M5b Desktop GUI | v0.6.0 | ⬜ | 0 / 9 |
 | M6 v1.0 | v1.0.0 | ⬜ | 0 / 8 |
 
 ## M0: Foundation and cleanup
@@ -156,6 +157,22 @@ Decisions and configuration: [ADR 0012](docs/adr/0012-distribution.md). Four str
 | M5-12 | Owner: `v*` tag ruleset, GHCR package `gosftpd` public after rc.1, publish the drafts | ⬜ 👤 |
 | M5-13 | M5 DoD: `v0.5.0-rc.1` → `verify-release`, a Scorecard check, the rebuild of docs/install.md (Rebuild a release) against the rc with all 12 `OK`, and the Quickstart by hand on a clean Ubuntu 24.04 VM (umask 002, not root, the fingerprint kept after a new container), as the release checklist's step 11 has them → `v0.5.0` (published by the owner) | ⬜ |
 
+## M5b: Desktop GUI (v0.6.0)
+
+A desktop application, `gosftpd-gui`, for people who do not use the command line; not a web UI (ROADMAP §1.4, §5 M5b).
+
+| ID | Task | Status |
+|---|---|---|
+| M5b-01 | ADR 0013: toolkit after a prototype of the same screen in each candidate, a separate `gosftpd-gui` binary (the server stays static and CGO-free), share a folder vs manage an installed server, security model, packaging and signing (D22) | ⬜ |
+| M5b-02 | `cmd/gosftpd-gui` and the logic it shares with the CLI in `internal/` (users, mounts, host keys, validation) | ⬜ |
+| M5b-03 | First run and share a folder: folders, a user with a password or key, host key, start and stop, connection details to copy | ⬜ |
+| M5b-04 | Users and folders: add, disable, remove, permissions, `on_conflict`, applied by a reload | ⬜ |
+| M5b-05 | Activity: state, sessions, latest transfers from the audit log, warnings in plain words | ⬜ |
+| M5b-06 | Manage an installed server (package, systemd, Docker), if ADR 0013 keeps it in M5b | ⬜ |
+| M5b-07 | Packaging and signing per OS in the release pipeline (Linux, macOS; Windows after M3b) | ⬜ |
+| M5b-08 | Tests: unit, the toolkit's UI test driver, an end-to-end upload with OpenSSH `sftp` on Linux and macOS; `docs/gui.md` with screenshots, README, quickstart | ⬜ |
+| M5b-09 | M5b DoD and `v0.6.0` | ⬜ |
+
 ## M6: v1.0.0
 
 | ID | Block | Status |
@@ -199,3 +216,4 @@ Decisions and configuration: [ADR 0012](docs/adr/0012-distribution.md). Four str
 | 2026-10-17 | M4-09: operations documents and recipes, the M4 DoD tests, CHANGELOG `0.4.0`; a crash an authenticated client could cause, requests after CLOSE, the Scorecard vulnerability warnings; review from five angles (18 findings, fixed) | [o-kolomoiets/Go-SFTP-Server#24](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/24) |
 | 2026-10-23 | v0.4.0 released (2026-10-17); README and demo GIF from the release binary, M4 done | [o-kolomoiets/Go-SFTP-Server#29](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/29) |
 | 2026-10-24 | M5-01..11: ADR 0012 (three design review rounds); the config hint and the search fix; man pages, completions, `THIRD_PARTY_LICENSES`; the full GoReleaser configuration with reproducible builds, the image, deb/rpm/Arch packages, signatures, SBOMs, provenance and the release workflows; `serve --ephemeral`; atmoz mode; the documentation; implementation review from five angles and a final review (22 + 19 findings, fixed) | [o-kolomoiets/Go-SFTP-Server#30](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/30) |
+| 2026-11-01 | ROADMAP M5b: a desktop GUI, `gosftpd-gui` (not a web UI), after v0.5.0 and before v1.0; ADR 0013 first, decision D22 | [o-kolomoiets/Go-SFTP-Server#40](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/40) |

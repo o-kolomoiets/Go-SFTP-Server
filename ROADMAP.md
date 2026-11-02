@@ -97,6 +97,8 @@ Apart from SFTPGo, the niche of simple SFTP servers in Go is almost empty: the e
 | LDAP, OIDC, MFA in 1.x | Complex. For enterprise scenarios there are SSH certificates (M4) | SSH CA |
 | DB, HA, cluster | They contradict the "single binary" principle | — |
 
+A desktop GUI (milestone M5b) is not the web UI of this table: it is a separate local application, `gosftpd-gui`, with no listener and no remote admin API of its own. It runs under the desktop user's account and works through the same configuration files, checks and reloads as the CLI, so it adds no network attack surface and the server binary stays the same.
+
 ---
 
 ## 2. Current state (honest audit)
@@ -336,10 +338,12 @@ This adds up to 9 direct runtime dependencies (`goleak` is test-only). Every new
 | M3b | — | Windows: isolation test suite, WinSCP in CI, `windows/amd64` in releases; can come after v1.0 | 4–6 pd | 2–3 wk |
 | M4 | v0.4.0 | Multi-user and ops: reload, certificates, metrics, hooks, systemd | 14–20 pd | 7–10 wk |
 | M5 | v0.5.0 | Distribution: Docker, packages, signatures, SBOM, migration from atmoz | 9–12 pd | 5–6 wk |
+| M5b | v0.6.0 | Desktop GUI: share folders, manage users, start and stop the server, see activity, without the command line | 15–25 pd (refined by ADR 0013) | 2–3 mo |
 | M6 | v1.0.0 | Stabilization, benchmarks, contract freeze, launch | 6–10 pd + ≥ 4 wk RC | 2–3 mo |
 | Maintenance | — | Dependency updates, advisories, patch releases | ≈ 0.5 pd/mo, over 11–16 mo ≈ 6–8 pd | — |
 | Reserve | — | 20% of the M0–M6 milestone total | 14–20 pd | — |
-| **Total up to v1.0** (without M3b) | | | **≈ 91–130 pd** | **≈ 11–16 mo** including RC |
+| **Total up to v1.0** (without M3b and M5b) | | | **≈ 91–130 pd** | **≈ 11–16 mo** including RC |
+| M5b with its 20% reserve | | | **+ 18–30 pd** | **+ 2–3 mo** |
 
 ```mermaid
 flowchart LR
@@ -348,7 +352,8 @@ flowchart LR
     M2 --> M3["M3 Hardening v0.3.0"]
     M3 --> M4["M4 Multi-user and Ops v0.4.0"]
     M4 --> M5["M5 Distribution v0.5.0"]
-    M5 --> M6["M6 v1.0.0"]
+    M5 --> M5b["M5b Desktop GUI v0.6.0"]
+    M5b --> M6["M6 v1.0.0"]
     M6 --> P["Post-1.0"]
     M2 -.-> M5
     M3 -.-> M3b["M3b Windows, can come after v1.0"]
@@ -660,6 +665,22 @@ flowchart LR
 - The user spec `foo:pass:::upload` from the atmoz README works unchanged: `docker run -p 22:2022 -d ghcr.io/o-kolomoiets/gosftpd:v0.5.0 foo:pass:::upload` (the container port is 2022, not 22).
 
 **Estimate:** 9–12 pd (ADR 0012). **Dependencies:** M4 (healthcheck, unit); part of it can proceed in parallel with M3/M4 right after M2.
+
+### M5b: Desktop GUI (v0.6.0)
+
+**Goal.** People who never open a terminal can run gosftpd: choose the folders to share, add the people who may upload, start and stop the server, copy the connection details and see who uploaded what. The CLI stays the reference and the GUI never does what the CLI cannot. It is a desktop application, not a web UI (§1.4).
+
+- [ ] **ADR 0013, before any code.** The toolkit, chosen after a small prototype of the same screen in each candidate (for example Fyne, Gio, Wails, a Qt binding), by: native look and accessibility, CGO and cross-compilation, binary size, reproducible builds, packaging and signing per OS, license, maintenance. The architecture: a separate binary `gosftpd-gui` (its own `cmd/`, possibly its own module), so that `gosftpd` stays static, CGO-free and within its size budget (D21). The two modes and which comes first: **share a folder** (the GUI runs the server in-process for the desktop user, as `serve --dir` does) and **manage an installed server** (packages, systemd, Docker: the GUI edits `config.toml` and `users.d`, runs the same validation, reloads, and needs the rights the CLI needs). The security model: no listener of its own, never runs as root, secrets (passwords, keys) handled as the CLI handles them, nothing weaker by default.
+- [ ] `cmd/gosftpd-gui` and the shared logic behind it in `internal/` packages that the CLI uses too (user add/disable/remove, mounts, host keys, config validation), so that both stay in step and are tested once.
+- [ ] First run and **share a folder**: pick one or more folders, read-only or upload, add a person with a password or a public key, generate or reuse the host key, start and stop; the connection details (host, port, user, fingerprint, the `known_hosts` line, the `sftp` command) ready to copy.
+- [ ] Users and folders: list, add, disable, remove, change permissions and `on_conflict`, with the same checks and messages as the CLI; changes applied by a reload, never by a restart that drops uploads.
+- [ ] Activity: the server's state, its sessions and the latest uploads and downloads from the audit log, with a filter; errors and warnings of the log in plain words.
+- [ ] **Manage an installed server** (if ADR 0013 keeps it in this milestone): find it (package, systemd unit, Docker), edit its configuration with the rights it needs, validate, reload, show its status.
+- [ ] Packaging and signing in the release pipeline: Linux (format per ADR 0013, for example AppImage or Flatpak), macOS (signed and notarized `.app` in a `.dmg`), Windows only after M3b; checksums, signatures, SBOMs and provenance as for the server.
+- [ ] Tests: the shared logic by unit tests, the screens by the toolkit's test driver, an end-to-end run (share a folder, upload with OpenSSH `sftp`, see it in the activity view) in CI on Linux and macOS.
+- [ ] Documentation: `docs/gui.md` with screenshots, the README's first screen, `docs/quickstart.md`.
+
+**Definition of Done:** on a clean Linux desktop and a clean macOS, a person who never used gosftpd installs the GUI, shares a folder with one user and receives an upload from OpenSSH `sftp` in under 5 minutes, without a terminal; every action of the GUI has a CLI counterpart; the server binary is unchanged in size and still CGO-free; `v0.6.0` ships the GUI signed and verifiable like the server. **Estimate:** 15–25 pd, refined by ADR 0013 after the prototypes. **Dependencies:** M5 (packages and the release pipeline); Windows needs M3b. **Risks:** CGO and per-OS builds (macOS runners) against reproducible builds; signing costs (an Apple Developer ID; a Windows code-signing certificate), an owner decision (D22); a second user interface to keep in step with the CLI; scope creep toward a platform (§1.4): no remote admin, no web UI.
 
 ### M6: v1.0.0
 
@@ -1656,6 +1677,7 @@ Once a decision is made, `accepted YYYY-MM-DD, ADR 0001` (or the number of anoth
 | D19 | **Language of the project** | English; Russian; both | **English** everywhere: code, documentation including `ROADMAP.md` and `TASKS.md`, commit messages, issues and pull requests; this makes the project accessible to the awesome-selfhosted and HN audiences and to every contributor | M0 | accepted 2026-10-07 per recommendation, ADR 0001; extended to `ROADMAP.md` and `TASKS.md` by the owner 2026-10-10, ADR 0006 |
 | D20 | **If the audit log cannot be written** (disk full) | fail-closed: new connections and data-modifying operations are refused, `/readyz` → 503; fail-open: work continues, errors go to stderr and a metric | **fail-closed by default** (`audit.on_error`): auditing is one of the project's main promises, and `min_free_space` already stops uploads on a nearly full disk. fail-open is for those who value availability over the audit trail | M1 | open |
 | D21 | **Binary size budget** | 10 MB; 11 MiB; 12 MiB; own minimal HTTP code to stay within 10 MiB | **12 MiB**: `net/http` (with `crypto/tls`, x509 and HTTP/2) is needed for the admin listener and the webhooks and costs about 2.7 MB; a hand-written HTTP server would be more security-sensitive code for a saving that the webhooks undo | M4 | decided 2026-10-11 by the owner: **12 MiB**, keep `net/http` |
+| D22 | **Desktop GUI** (M5b) | The toolkit (Fyne, Gio, Wails, a Qt binding); share a folder first or manage an installed server first; signing for macOS (Apple Developer ID) and Windows | Decide in ADR 0013 after a prototype of the same screen in each toolkit; **share a folder first**, on Linux and macOS; a separate `gosftpd-gui` binary so that the server stays static and CGO-free | M5b | open |
 
 ---
 

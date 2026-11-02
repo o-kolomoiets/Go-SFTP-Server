@@ -39,5 +39,14 @@ updates:
   # test/docker/ holds scripts, no Dockerfile.
   - package-ecosystem: docker
     directories: [/packaging/docker, /test/packages]
+    ignore:
+      # debian-12.Dockerfile and el9.Dockerfile test those releases (the
+      # packages job's Debian 12 is its only systemd before 253): only
+      # their digests are updated, never their major version. Another
+      # release gets a Dockerfile and a matrix entry of its own.
+      - dependency-name: debian
+        update-types: ["version-update:semver-major"]
+      - dependency-name: rockylinux/rockylinux
+        update-types: ["version-update:semver-major"]
     schedule:
       interval: weekly
