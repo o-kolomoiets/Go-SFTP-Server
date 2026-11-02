@@ -53,7 +53,13 @@ jobs:
       matrix:
         # ubuntu-26.04: kernel 7.0, where the kernel itself applies a
         # Landlock ruleset to every thread (TSYNC, ADR 0011).
-        os: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, macos-latest, windows-latest]
+        # macos-15-intel: in 2026-11 GitHub could not give these jobs a
+        # macOS arm64 runner for hours ("not acquired by Runner of type
+        # hosted", capacity constraints), and ci-ok counts a cell that never
+        # ran as failed. The Intel image tests the same macOS (APFS, bash
+        # 3.2, /var as a link); darwin/arm64 is still built by
+        # goreleaser-check. Back to macos-latest once arm64 runners keep up.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, macos-15-intel, windows-latest]
         go: ["1.26.x", "1.27.x"]
     runs-on: ${{ matrix.os }}
     env:
