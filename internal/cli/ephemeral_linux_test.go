@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -75,6 +76,19 @@ func TestLandlockEphemeral(t *testing.T) {
 
 	if err := sb.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
+	}
+	// serve's own exit comes first: stop's "stop" line could end serve
+	// before the kernel delivers the signal, and serve's SIGTERM handler,
+	// gone with it, would then leave the child to be killed by the signal.
+	select {
+	case r := <-sb.replies:
+		code, ok := strings.CutPrefix(r, "exit ")
+		if !ok {
+			t.Fatalf("after SIGTERM: %q", r)
+		}
+		sb.code, _ = strconv.Atoi(code)
+	case <-time.After(time.Minute):
+		t.Fatalf("serve does not stop on SIGTERM:\n%s", sb.logs())
 	}
 	if code := sb.stop(t); code != exitOK {
 		t.Fatalf("exit %d:\n%s", code, sb.logs())
