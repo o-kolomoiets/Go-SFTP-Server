@@ -135,6 +135,14 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Changed
 
+- Dependencies: github.com/pkg/sftp v1.13.12, github.com/pires/go-proxyproto
+  v0.16.0, github.com/landlock-lsm/go-landlock v0.11.0, and the container
+  image's base at the current `distroless/static-debian13:nonroot`. The
+  server code paths gosftpd uses in pkg/sftp and the PROXY header parser are
+  unchanged; go-landlock applies Landlock ABI 11 with the kernel's own
+  thread synchronization. Building from source needs Go 1.26.9 or newer,
+  which go-proxyproto v0.16.0 requires.
+
 - The systemd unit's `Documentation=` names the man page `gosftpd(1)`
   first, then docs/install.md.
 
