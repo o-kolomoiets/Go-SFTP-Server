@@ -461,6 +461,17 @@ func route(dir string, req apiRequest) (int, any) {
 			return 500, map[string]string{"message": err.Error()}
 		}
 		return 200, parseTag(sha, text)
+	case req.method == "GET" && strings.HasPrefix(path, "actions/runs/") && strings.HasSuffix(path, "/jobs"):
+		// The jobs of a workflow run, as a test wrote them.
+		data, err := os.ReadFile(filepath.Join(dir, "jobs.json"))
+		if err != nil {
+			return 404, notFound
+		}
+		var jobs any
+		if err := json.Unmarshal(data, &jobs); err != nil {
+			return 500, map[string]string{"message": err.Error()}
+		}
+		return 200, jobs
 	case req.method == "GET" && strings.HasPrefix(path, "releases/tags/"):
 		tag := strings.TrimPrefix(path, "releases/tags/")
 		data, _ := os.ReadFile(filepath.Join(dir, "releases"))

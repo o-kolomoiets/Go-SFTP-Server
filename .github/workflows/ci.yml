@@ -744,8 +744,23 @@ jobs:
     if: always()
     needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln]
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read # the jobs of this run
     steps:
       - name: Fail if any required job failed
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
+      # needs.test.result has said success while a cell of the test matrix
+      # had failed (ubuntu-24.04-arm) or had been cancelled before it ran
+      # (macos-latest), so every job of the run is checked too.
+      - name: Fail if a job of this run did not succeed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bad=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | select(.name != "ci-ok" and .conclusion != "success" and .conclusion != "skipped") | "\(.name): \(.conclusion // .status)"')
+          if [ -n "$bad" ]; then
+            while IFS= read -r job; do echo "::error::$job"; done <<<"$bad"
+            exit 1
+          fi
       - run: echo "All required jobs passed"
