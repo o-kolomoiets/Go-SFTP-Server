@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,8 +36,11 @@ func newPadder(hashes []PasswordHash) *padder {
 	return &padder{classes: passwordClasses(hashes), sleep: time.Sleep}
 }
 
-// measure times each class (once to warm up, then once for real) on the
-// first attempt and sets the dummy and the target, 20% above the slowest.
+// measure times each class on the first attempt and sets the dummy and
+// the target, 20% above the slowest. Each class is timed three times, the
+// first run warming it up, and keeps its shortest: load only adds time,
+// and one slow run of a cheaper class must not make it the costliest,
+// whose dummy unknown users get.
 func (p *padder) measure(a *Authenticator) {
 	p.once.Do(func() {
 		var slowest time.Duration
@@ -44,10 +48,12 @@ func (p *padder) measure(a *Authenticator) {
 		probe := []byte("gosftpd timing probe")
 		for _, d := range p.classes {
 			n := a.acquire(d)
-			d.verify(probe)
-			start := time.Now()
-			d.verify(probe)
-			took := time.Since(start)
+			took := time.Duration(math.MaxInt64)
+			for range 3 {
+				start := time.Now()
+				d.verify(probe)
+				took = min(took, time.Since(start))
+			}
 			a.release(n)
 			if took > slowest {
 				slowest, p.dummy = took, d

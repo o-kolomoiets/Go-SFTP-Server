@@ -234,6 +234,48 @@ func (h slowHash) lanes() int          { return 1 }
 func (h slowHash) id() string          { return h.cls + " " + h.pw }
 func (h slowHash) dummy() PasswordHash { return slowHash{cls: h.cls, took: h.took, calls: h.calls} }
 
+// spikyHash is a slowHash whose verification number spike (counting from
+// 1) takes spikeTook instead, as one run does on a loaded machine.
+type spikyHash struct {
+	slowHash
+	spike     int32
+	spikeTook time.Duration
+}
+
+func (h spikyHash) verify([]byte) bool {
+	if h.calls.Add(1) == h.spike {
+		time.Sleep(h.spikeTook)
+	} else {
+		time.Sleep(h.took)
+	}
+	return false
+}
+func (h spikyHash) dummy() PasswordHash { return h }
+
+// TestPasswordPaddingMeasureUnderLoad: one slow run of the cheaper class
+// while the classes are timed does not make it the costliest: unknown
+// users still get the dummy of the costlier class, and the target follows
+// it (the test that failed on a loaded macOS runner, where a single timed
+// run decided).
+func TestPasswordPaddingMeasureUnderLoad(t *testing.T) {
+	t.Parallel()
+
+	var fastCalls, slowCalls atomic.Int32
+	// The spike is the second run, which a measure that warmed up once
+	// and then timed once would have taken as the class's time.
+	fast := spikyHash{slowHash{cls: "fast", took: 5 * time.Millisecond, calls: &fastCalls}, 2, 200 * time.Millisecond}
+	slow := slowHash{cls: "slow", took: 60 * time.Millisecond, calls: &slowCalls}
+	a := NewUsers(nil)
+	a.pad.classes = []PasswordHash{fast, slow}
+	a.pad.measure(a)
+	if got := a.pad.dummy.class(); got != "slow" {
+		t.Errorf("dummy of class %q, want slow", got)
+	}
+	if target := time.Duration(a.pad.target.Load()); target < 72*time.Millisecond || target > 150*time.Millisecond {
+		t.Errorf("target %v, want about 1.2 × 60ms", target)
+	}
+}
+
 // TestPasswordPadding checks the mechanism behind TestPasswordTiming with
 // hashes that sleep instead of hashing: each attempt verifies one hash,
 // unknown users and users without a password verify the costliest kind,
