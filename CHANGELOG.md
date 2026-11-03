@@ -8,6 +8,19 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-03
+
+Distribution: a container image, deb, rpm and Arch packages, FreeBSD
+archives, man pages and shell completions, and releases that are signed,
+carry build provenance and can be rebuilt byte for byte from their tag
+([docs/install.md](docs/install.md) shows how to verify and rebuild one).
+It also adds `serve --ephemeral`, a throwaway server for tests, and a mode
+that takes the user specs of atmoz/sftp
+([docs/migrate-from-atmoz.md](docs/migrate-from-atmoz.md)). An existing
+v0.4.0 configuration needs no change. To move an archive install to a
+package, follow [From the archive install to a package](docs/install.md#from-the-archive-install-to-a-package).
+Building from source needs Go 1.26.9 or newer.
+
 ### Added
 
 - `gosftpd serve --ephemeral`, a throwaway server for tests (ADR 0012). It
@@ -759,7 +772,8 @@ without `--allow-root`, and uploads stop below 1 GiB of free space unless
 - The non-functional 2023 skeleton (`main.go`, `cmd/server`, `pkg/`).
 - The JSON configuration promised by the old README; configuration will use TOML.
 
-[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/o-kolomoiets/go-sftp-server/compare/v0.1.0-alpha...v0.2.0
