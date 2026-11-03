@@ -92,7 +92,8 @@ connect: sftp -P 2022 <user>@vm
 ```
 
 Compare the fingerprint with the one `sftp` shows on first connect. The
-audit log follows on stdout; the banner and other messages go to stderr.
+banner and other messages go to stderr; the audit log goes to
+`audit.jsonl` here, and to stdout without `--audit-output`.
 
 The first three lines come from [Landlock](docs/security.md#landlock): on
 Linux, once started, gosftpd can open only its folders, its configuration,
@@ -407,12 +408,12 @@ A security tool should show its work. This is what runs in CI today:
 - **More tests than code.** Over 36k lines of tests for about 25k lines of
   Go in v0.5.0. Tests also fail if a config key, an audit event or a metric
   is missing from the docs.
-- **Releases you can check.** Every archive, package and SBOM is covered by
-  a `checksums.txt` signed with keyless cosign, the image is signed too,
-  and both have build provenance. CI builds the archives and packages of
-  every change twice, from cold caches, and fails if one checksum differs;
-  you can [rebuild a release](docs/install.md#rebuild-a-release) from its
-  tag and get the same checksums.
+- **Releases you can check.** `checksums.txt`, which covers every archive,
+  package and SBOM, and the image are signed with keyless cosign and have
+  build provenance. CI builds the archives and packages of every change
+  twice, from cold caches, and fails if any checksum differs; you can
+  [rebuild a release](docs/install.md#rebuild-a-release) from its tag and
+  get the same 12 archives and packages.
 - **Decisions written down.** A [threat model](docs/security/threat-model.md),
   a [hardening guide](docs/security/hardening.md) and 12
   [design records](docs/adr/).
@@ -509,7 +510,7 @@ the [migration guide](docs/migrate-from-atmoz.md) says what differs.
 and SBOM, and the image are signed with keyless cosign and have build
 provenance attestations;
 [verify them](docs/install.md#verify-a-release) before you install.
-Releases before v0.5.0 have only an unsigned `checksums.txt`.
+Releases v0.2.0 to v0.4.0 have only an unsigned `checksums.txt`.
 
 Not there yet: Windows binaries, Alpine (apk) packages and a package
 repository. The Linux archives carry a systemd unit with its user and
@@ -547,7 +548,9 @@ $ gosftpd serve --ephemeral 2>/dev/null
 {"host":"127.0.0.1","port":36263,"user":"test","password":"EAh487iQutEowqzWmD-ZjZkRkiOxVZak","private_key_path":"/tmp/gosftpd-ephemeral-2835406294/id_ed25519","dir":"/tmp/gosftpd-ephemeral-2835406294/data","host_key_fingerprint":"SHA256:8W+26l1vzDBw0c1DKhR3BvQQ7et8InSwZ1bgA6YHdkw","known_hosts":"[127.0.0.1]:36263 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH6zl3vuLof0qG0YAR0MmWAVtjFKFnLkUgSwdjI/TiOz","pid":2745,"version":"v0.5.0"}
 ```
 
-A GitHub Actions job that uses it is in the
+It runs until you stop it with Ctrl-C or `kill` (the line names its
+`pid`), then deletes the key and the data. Its log and audit log go to
+stderr, dropped here. A GitHub Actions job that uses it is in the
 [configuration reference](docs/configuration.md#in-github-actions).
 
 An existing v0.4.0 configuration needs no change. To move an archive
@@ -555,12 +558,14 @@ install to a package, follow
 [From the archive install to a package](docs/install.md#from-the-archive-install-to-a-package);
 the [changelog](CHANGELOG.md#050---2026-11-03) lists everything else.
 
-On its way is v0.6: `gosftpd-gui`, a desktop app for people who never open
-a terminal. They choose the folders to share, add the people who may
-upload, start and stop the server, copy the connection details and see who
-uploaded what. It runs on the desktop, not as a web UI, and works through
-the same configuration and checks as the CLI; the server stays the same
-binary (see the [roadmap](#roadmap)).
+Next is v0.6, planned but not started: `gosftpd-gui`, a desktop app for
+people who never open a terminal, first on Linux and macOS. The plan is
+that they choose the folders to share, add the people who may upload,
+start and stop the server, copy the connection details and see who
+uploaded what. A design record (ADR 0013) picks the toolkit before any
+code is written. It will be a separate program with no listener of its
+own, not a web UI, and use the same configuration and checks as the CLI;
+the `gosftpd` binary stays as it is (see the [roadmap](#roadmap)).
 
 ## What gosftpd is not
 
