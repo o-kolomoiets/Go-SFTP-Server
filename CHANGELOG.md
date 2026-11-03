@@ -185,6 +185,13 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ### Fixed
 
+- With password hashes of more than one kind or cost, one slow run on a
+  loaded host while gosftpd timed them at the first password attempt could
+  make a cheaper kind look like the costliest. Unknown users and users
+  without a password then got a dummy of that cheaper kind, and their
+  failed attempts could be told from real users' by their time. Each kind
+  is now timed three times and keeps its shortest run.
+
 - The search for a configuration file no longer stops at a permission
   error on `./gosftpd.toml`: from a working directory the user cannot
   search, such as `sudo -u gosftpd gosftpd config validate` run from
