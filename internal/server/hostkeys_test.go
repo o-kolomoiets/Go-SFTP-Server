@@ -484,8 +484,11 @@ func TestHostKeyReload(t *testing.T) {
 	if _, err := e.srv.Reload(cfg); err != nil {
 		t.Fatal(err)
 	}
-	// Traffic re-keys the open connection a few times.
-	for range 20 {
+	// Traffic re-keys the open connection. The client starts a key exchange
+	// in the background once the threshold is passed, and until then its
+	// requests still go out and get answered, so the traffic goes on until
+	// a second exchange has finished.
+	for deadline := time.Now().Add(10 * time.Second); len(c.kex.all()) < 2 && time.Now().Before(deadline); {
 		if _, _, err := c.conn.SendRequest("ping@example.org", true, bytes.Repeat([]byte{1}, 512)); err != nil {
 			t.Fatal(err)
 		}

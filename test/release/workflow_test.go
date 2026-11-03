@@ -3,6 +3,7 @@
 package release
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -254,6 +255,81 @@ func TestReleaseLatest(t *testing.T) {
 			}
 			if !slices.Equal(calls, want) {
 				t.Errorf("docker ran as\n%s\nwant\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// TestCIOK runs the script of ci-ok's step that checks every job of the
+// run, with the fake gh. needs.test.result has said success while a cell
+// of the test matrix had failed or had been cancelled before it ran, so
+// ci-ok must not rest on needs alone: ci-ok is the required check and the
+// one tag.yml requires before it tags.
+func TestCIOK(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ciOK, _ := strings.Cut(string(data), "\n  ci-ok:\n")
+	if !strings.Contains(ciOK, "\n    permissions:\n      actions: read") {
+		t.Error("ci-ok has no permissions: actions: read, which listing the run's jobs needs")
+	}
+	step := stepNamed(t, workflowSteps(t, "ci.yml", "ci-ok"), "Fail if a job of this run did not succeed")
+	if got := stepMap(step, "env")["GH_TOKEN"]; got != "${{ github.token }}" {
+		t.Errorf("the step sets GH_TOKEN to %q, want ${{ github.token }}", got)
+	}
+	script := runScript(t, step)
+	type job struct {
+		Name       string  `json:"name"`
+		Status     string  `json:"status"`
+		Conclusion *string `json:"conclusion"`
+	}
+	done := func(name, conclusion string) job { return job{name, "completed", &conclusion} }
+	green := []job{
+		done("lint", "success"),
+		done("test (ubuntu-24.04-arm, 1.26.x)", "success"),
+		done("test (macos-latest, 1.26.x)", "success"),
+		done("coverage", "skipped"),
+		{Name: "ci-ok", Status: "in_progress"},
+	}
+	for _, tt := range []struct {
+		name   string
+		jobs   []job
+		fail   string // failOn argument
+		code   int
+		stdout string // a part of standard output
+	}{
+		{name: "every job succeeded or was skipped", jobs: green},
+		{
+			name: "a failed matrix cell",
+			jobs: append(slices.Clone(green), done("test (ubuntu-24.04-arm, 1.27.x)", "failure")),
+			code: 1, stdout: "::error::test (ubuntu-24.04-arm, 1.27.x): failure",
+		},
+		{
+			name: "a cell cancelled before it ran",
+			jobs: append(slices.Clone(green), done("test (macos-latest, 1.27.x)", "cancelled")),
+			code: 1, stdout: "::error::test (macos-latest, 1.27.x): cancelled",
+		},
+		{name: "the jobs cannot be listed", jobs: green, fail: "actions/runs", code: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeGitHub(t)
+			body, err := json.Marshal(map[string]any{"total_count": len(tt.jobs), "jobs": tt.jobs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.dir, "jobs.json"), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.fail != "" {
+				f.failOn(tt.fail, "500")
+			}
+			// As GitHub Actions runs a bash step.
+			got := f.bash(t.TempDir(), []string{"GITHUB_RUN_ID=42"}, "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
+			if got.code != tt.code || !strings.Contains(got.stdout, tt.stdout) {
+				t.Errorf("the step = exit %d\n%s\nstderr: %s\nwant exit %d, stdout with %q", got.code, got.stdout, got.stderr, tt.code, tt.stdout)
 			}
 		})
 	}

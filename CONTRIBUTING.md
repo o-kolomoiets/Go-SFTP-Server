@@ -6,7 +6,7 @@ before proposing larger changes, and open an issue first to discuss them.
 
 ## Development setup
 
-- Go 1.26.5 or newer.
+- Go 1.26.9 or newer.
 - [golangci-lint](https://golangci-lint.run/welcome/install/) v2.14 as a
   binary (its docs advise against `go install`).
 - Other tools (govulncheck, staticcheck, gotestsum, actionlint,

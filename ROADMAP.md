@@ -317,9 +317,9 @@ This adds up to 9 direct runtime dependencies (`goleak` is test-only). Every new
 ### 4.6 Go version policy
 
 - **Rule:** we support the two latest major Go versions, just as Go itself does: a release is supported until two newer ones are out. As of 2026-10-07, these are **1.26 and 1.27**. Release dates: 1.26.0 — 2026-02-10; 1.27.0 — 2026-08-19; 1.27.1 and 1.26.8 — 2026-09-01. Go 1.25 is no longer supported: its last patch, 1.25.14, came out on 2026-08-19.
-- **`go.mod`:** `go 1.26.5`. The `toolchain go1.27.1` line is optional; it automatically updates the toolchain for contributors. If it is added, `env: GOTOOLCHAIN: local` is set at the top level of `ci.yml`, otherwise the `1.26.x` and `min-go` jobs will in fact build with go1.27.1. Reasons for the choice: x/crypto v0.56.0 and newer require go 1.26.0; the fix for escaping `os.Root` via a trailing slash (GO-2026-4970 / CVE-2026-39822) is in go1.25.12, go1.26.5 and go1.27.0-rc.2; the fix for GO-2026-4602 is in 1.26.1.
-- **The full `os.Root` API** has been available since Go 1.25; the 1.26.5 floor is dictated not by the API but by security (GO-2026-4970) and the x/crypto requirement.
-- **CI** runs `1.26.x` and `1.27.x`. `go.mod` specifies a patch version (`go 1.26.5`), so `setup-go` with `go-version-file: go.mod` installs exactly 1.26.5, and govulncheck on it reports stdlib vulnerabilities fixed in 1.26.6–1.26.8. Therefore `go-version-file` is used only in the `min-go` job; the other jobs use `1.26.x`/`1.27.x` or `stable` (§9.1). **Releases** are built with the latest `1.27.x`. The stdlib is compiled into the binary, so a Go security release requires a rebuild; whether that becomes an out-of-band patch release is decided by `govulncheck -mode=binary` (patch policy in §9.6).
+- **`go.mod`:** `go 1.26.9` since go-proxyproto v0.16.0, which requires it (2026-11; `go 1.26.5` before). The `toolchain go1.27.1` line is optional; it automatically updates the toolchain for contributors. If it is added, `env: GOTOOLCHAIN: local` is set at the top level of `ci.yml`, otherwise the `1.26.x` and `min-go` jobs will in fact build with go1.27.1. Reasons for the choice: x/crypto v0.56.0 and newer require go 1.26.0; the fix for escaping `os.Root` via a trailing slash (GO-2026-4970 / CVE-2026-39822) is in go1.25.12, go1.26.5 and go1.27.0-rc.2; the fix for GO-2026-4602 is in 1.26.1.
+- **The full `os.Root` API** has been available since Go 1.25; the 1.26.5 floor was dictated not by the API but by security (GO-2026-4970) and the x/crypto requirement, and a dependency raised it to 1.26.9.
+- **CI** runs `1.26.x` and `1.27.x`. `go.mod` specifies a patch version (`go 1.26.9`), so `setup-go` with `go-version-file: go.mod` installs exactly that version, and govulncheck on it reports the stdlib vulnerabilities fixed in later patches. Therefore `go-version-file` is used only in the `min-go` job; the other jobs use `1.26.x`/`1.27.x` or `stable` (§9.1). **Releases** are built with the latest `1.27.x`. The stdlib is compiled into the binary, so a Go security release requires a rebuild; whether that becomes an out-of-band patch release is decided by `govulncheck -mode=binary` (patch policy in §9.6).
 - **Next bump:** after Go 1.28 is released (expected around February 2027), the floor rises to 1.27. Then `encoding/json/v2` (JSONv2 is enabled by default in 1.27) and the `uuid` package, which appeared only in 1.27, become available without flags.
 - Useful additions in 1.25–1.26 for this project: the full set of `os.Root` methods (Rename, Link, Symlink, Chmod, Chtimes, MkdirAll and others appeared in **1.25**), `sync.WaitGroup.Go`, GA `testing/synctest`, `slog.NewMultiHandler`, `errors.AsType`, the cancellation cause in `signal.NotifyContext`, `T.ArtifactDir`.
 
@@ -1091,7 +1091,7 @@ output = "stdout"
 ### 7.2 Security checklist
 
 **P0 (before v0.1.0-alpha / v0.2.0)**
-- [ ] `x/crypto` ≥ v0.56.0 (we use v0.57.0) as a direct dependency; `pkg/sftp` v1.13.11; `go 1.26.5`; govulncheck clean.
+- [ ] `x/crypto` ≥ v0.56.0 (we use v0.57.0) as a direct dependency; `pkg/sftp` v1.13.12; `go 1.26.9`; govulncheck clean.
 - [ ] Handshake deadline; only `session` + the `sftp` subsystem are accepted; `exit-status`; `DiscardRequests`.
 - [ ] All file operations go through `os.Root`; a single `resolve()` function for all paths, including the rename `target`.
 - [ ] Symlink and hardlink requests return `OP_UNSUPPORTED`; `hardlink@openssh.com` is not advertised; FIFOs and devices are not opened.
@@ -1573,7 +1573,7 @@ Every claim in the README is covered by a test, CI or a real run; transcripts an
 
 | File | Contents | Milestone |
 |---|---|---|
-| `CONTRIBUTING.md` | Environment (Go 1.26.5+), make targets, lint, tests, interop, fuzz, Conventional Commits, DCO, PR checklist, link to the non-goals | M0 |
+| `CONTRIBUTING.md` | Environment (Go 1.26.9+), make targets, lint, tests, interop, fuzz, Conventional Commits, DCO, PR checklist, link to the non-goals | M0 |
 | `SECURITY.md` | Supported versions, private vulnerability reporting, acknowledgment within 72 h (best effort), fix and disclosure within 90 days, GHSA and CVE via the GitHub CNA, scope: directory escape, auth bypass, DoS | M0 |
 | `CODE_OF_CONDUCT.md` | Contributor Covenant 3.0 (2025-07-28) | M0 |
 | `CHANGELOG.md`, `.github/ISSUE_TEMPLATE/*.yml`, `PULL_REQUEST_TEMPLATE.md`, `CODEOWNERS` | | M0 |
@@ -1640,7 +1640,7 @@ Go runtime and process metrics with the names of the Prometheus Go client are ad
 | A single maintainer: time and bus factor | high / high | Small scope, automation (CI, Dependabot, GoReleaser), realistic estimates, decision D17 on the time budget |
 | The estimates turn out to be optimistic | high / medium | The 20% reserve and the maintenance line in §5; M3b can be postponed until after v1.0; estimates are revised if the deviation is > 30% (section "How to use this roadmap") |
 | The audit log stops being written (disk full) | low / high | `audit.on_error` (D20), `min_free_space`, the `gosftpd_audit_write_errors_total` metric |
-| The Go 1.26.5 minimum rules out the Go shipped by distributions | medium / low | Prebuilt binaries, Docker, packages; building from source is not required |
+| The Go 1.26.9 minimum rules out the Go shipped by distributions | medium / low | Prebuilt binaries, Docker, packages; building from source is not required |
 | Changing the license after the first external contributions becomes expensive | medium / medium | Decide D1 before the first external PR; DCO or CLA |
 | Weak differentiation from `sftpgo portable` and managed SFTP (AWS, Azure, and now Google Cloud FTP too) | medium / medium | Bet on isolation without root, drop-box semantics, a multi-user config file without a DB, size, migration from atmoz |
 | Different Windows semantics | medium / medium | Tier 2, a separate M3b track with an isolation test suite, and no Windows release before it; `O_EXCL` and `EqualFold` instead of byte comparison |

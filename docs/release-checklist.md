@@ -99,7 +99,10 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
      each for both), 6 SBOMs (`.sbom.json`), `checksums.txt`,
      `checksums.txt.sigstore.json`, `digests.txt` and
      `gosftpd_X.Y.Z.intoto.jsonl`;
-   - the image `ghcr.io/o-kolomoiets/gosftpd:vX.Y.Z` on the package's page.
+   - the image `ghcr.io/o-kolomoiets/gosftpd:vX.Y.Z` on the package's page,
+     and next to it a version tagged `sha256-<digest of vX.Y.Z>`: GHCR has
+     no OCI referrers API, so that version holds the image's cosign
+     signature. Keep it as long as the release is published.
 9. **Publish release**. Publishing starts **Verify release**, which runs
    the same verification against the published assets and pulls the image
    anonymously, by its digest.
@@ -246,7 +249,8 @@ docker buildx imagetools create --tag ghcr.io/o-kolomoiets/gosftpd:latest "ghcr.
 ```
 
 Then delete the abandoned version's image on the package's page, with the
-untagged versions pushed with it. Deleting a version deletes every tag on
+untagged versions pushed with it and the version tagged
+`sha256-<its digest>`, which holds its signature. Deleting a version deletes every tag on
 it, which is why `latest` moves first; without a previous stable image,
 `latest` goes with it. The tag `vX.Y.Z` stays, protected by the tag
 ruleset, so the next version must be higher: the next patch, or the next

@@ -9,13 +9,13 @@ A new dependency requires removing another one or revisiting this rule.
 |----------------------------------|----------|------------------------------------------|-------|
 | `github.com/spf13/cobra`         | v1.10.2  | CLI                                      | M0    |
 | `golang.org/x/crypto`            | v0.58.0  | `ssh`; later `argon2`, `bcrypt`          | M1    |
-| `github.com/pkg/sftp`            | v1.13.11 | SFTP `RequestServer`                     | M1    |
+| `github.com/pkg/sftp`            | v1.13.12 | SFTP `RequestServer`                     | M1    |
 | `golang.org/x/sys`               | v0.49.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
 | `github.com/spf13/pflag`         | v1.0.10  | flags of `serve` that override the file  | M2    |
 | `golang.org/x/term`              | v0.47.0  | password input without echo              | M3    |
-| `github.com/pires/go-proxyproto` | v0.15.0  | PROXY protocol v1 and v2 header parser (Apache-2.0) | M4    |
-| `github.com/landlock-lsm/go-landlock` | v0.10.1 | Landlock on Linux ([below](#go-landlock-and-psx)) | M4 |
+| `github.com/pires/go-proxyproto` | v0.16.0  | PROXY protocol v1 and v2 header parser (Apache-2.0); it requires Go 1.26.9 | M4    |
+| `github.com/landlock-lsm/go-landlock` | v0.11.0 | Landlock on Linux ([below](#go-landlock-and-psx)) | M4 |
 
 Planned later (see ROADMAP.md §4.5):
 `golang.org/x/time` for bandwidth limits, if they come.
@@ -47,7 +47,7 @@ rules and checks reloads against them.
 
 ### Why `golang.org/x/crypto` is a direct dependency
 
-`github.com/pkg/sftp` v1.13.11 requires x/crypto v0.54.0, which is affected by
+`github.com/pkg/sftp` v1.13.12 requires x/crypto v0.54.0, which is affected by
 GO-2026-6303, GO-2026-6354 and GO-2026-6355 (fixed in v0.55.0 and v0.56.0).
 gosftpd therefore requires x/crypto ≥ v0.56.0 itself, as a direct (not
 `// indirect`) requirement, and Dependabot keeps it current.

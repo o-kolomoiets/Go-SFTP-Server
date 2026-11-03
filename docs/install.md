@@ -761,6 +761,8 @@ command fetch and use that Go release. In the directory with the verified
 
 ```sh
 V=0.5.0
+# The Go that built the release, from the verified Linux archive:
+tar xzf "gosftpd_${V}_linux_amd64.tar.gz" gosftpd && export GOTOOLCHAIN="$(go version ./gosftpd | cut -d' ' -f2)"
 git clone --branch "v$V" https://github.com/o-kolomoiets/Go-SFTP-Server.git "gosftpd-$V"
 cd "gosftpd-$V"
 GORELEASER_CURRENT_TAG="v$V" goreleaser release --clean --skip=publish,sign,sbom,docker
