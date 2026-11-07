@@ -11,7 +11,10 @@ ed25519 key in authorized_keys (mode 0600), with the gosftpd binary from
 the release archive, sftp, tmux and jq in PATH, an empty ~/inbox, a 48 kB
 ~/report.pdf, no ~/.config/gosftpd (so the host key is generated), no
 [localhost]:2022 line in ~/.ssh/known_hosts, and "StrictHostKeyChecking
-accept-new" plus "LogLevel ERROR" for localhost in ~/.ssh/config. Then:
+accept-new" plus "LogLevel ERROR" for localhost in ~/.ssh/config. To
+match the README's alt text, run it as a user named alex (home
+/home/alex) on Linux 6.10 or later, where gosftpd applies Landlock ABI 5.
+Then:
 
     python3 record-demo.py demo.cast
     agg --font-family "JetBrains Mono" --font-size 16 --theme dracula \
@@ -19,6 +22,7 @@ accept-new" plus "LogLevel ERROR" for localhost in ~/.ssh/config. Then:
 
 (agg: https://github.com/asciinema/agg, v1.5.0)
 """
+import codecs
 import fcntl
 import json
 import os
@@ -70,10 +74,17 @@ def setup():
 def record(out, stop):
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvp("tmux", ["tmux", "-L", SOCK, "-f", CONF, "attach", "-t", "demo"])
+        # tmux encodes colours for this client's TERM, and the cast header
+        # below says xterm-256color: with TERM=linux the grey borders and
+        # titles come out black and white, with dumb or no TERM attach
+        # fails. -u: UTF-8 for the prompt and the borders in any locale.
+        os.environ["TERM"] = "xterm-256color"
+        os.execvp("tmux", ["tmux", "-u", "-L", SOCK, "-f", CONF, "attach", "-t", "demo"])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", H, W, 0, 0))
     start = time.monotonic()
     events = []
+    # A character split between two reads is decoded when it is complete.
+    utf8 = codecs.getincrementaldecoder("utf-8")("replace")
     while not stop.is_set():
         r, _, _ = select.select([fd], [], [], 0.05)
         if fd in r:
@@ -83,7 +94,9 @@ def record(out, stop):
                 break
             if not data:
                 break
-            events.append([round(time.monotonic() - start, 4), "o", data.decode("utf-8", "replace")])
+            text = utf8.decode(data)
+            if text:
+                events.append([round(time.monotonic() - start, 4), "o", text])
     with open(out, "w") as f:
         f.write(json.dumps({"version": 2, "width": W, "height": H,
                             "env": {"TERM": "xterm-256color", "SHELL": "/bin/bash"}}) + "\n")
