@@ -46,7 +46,7 @@ image too.
   <img src="docs/assets/demo.gif" width="760" alt="Terminal recording in two panes. Server pane: gosftpd serve --dir ./inbox --audit-output audit.jsonl prints two Landlock warnings that it covers authorized_keys and audit.jsonl only as single files, landlock: ABI v5 applied, its version, a newly generated ed25519 host key saved with mode 0600, its SHA256 fingerprint, a known_hosts line, the mount / -> /home/alex/inbox with on_conflict=rename, listen 0.0.0.0:2022 and a connect hint. Client pane: sftp uploads report.pdf twice; ls -l lists report (1).pdf next to report.pdf, both owned by alex; cd .. and pwd still show /; ls /etc says not found. Finally jq prints the audit event from audit.jsonl: fs.upload by alex, path /report.pdf, final_path /report (1).pdf, conflict renamed, 48000 bytes.">
 </p>
 <p align="center"><sub>
-  A real session with the v0.4.0 release binary, typed by <a href="docs/assets/record-demo.py">a script</a> you can run to record it again.
+  A real session with the v0.5.0 release binary, typed by <a href="docs/assets/record-demo.py">a script</a> you can run to record it again.
   The second upload becomes <code>report (1).pdf</code>, <code>cd ..</code> goes nowhere, and the audit log says exactly what happened.
 </sub></p>
 

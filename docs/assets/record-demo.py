@@ -11,7 +11,8 @@ ed25519 key in authorized_keys (mode 0600), with the gosftpd binary from
 the release archive, sftp, tmux and jq in PATH, an empty ~/inbox, a 48 kB
 ~/report.pdf, no ~/.config/gosftpd (so the host key is generated), no
 [localhost]:2022 line in ~/.ssh/known_hosts, and "StrictHostKeyChecking
-accept-new" plus "LogLevel ERROR" for localhost in ~/.ssh/config. Then:
+accept-new" plus "LogLevel ERROR" for localhost in ~/.ssh/config, in a
+UTF-8 locale (tmux draws the prompt and the borders with it). Then:
 
     python3 record-demo.py demo.cast
     agg --font-family "JetBrains Mono" --font-size 16 --theme dracula \
@@ -70,6 +71,9 @@ def setup():
 def record(out, stop):
     pid, fd = pty.fork()
     if pid == 0:
+        # The recording is replayed as xterm-256color; with another TERM
+        # tmux would draw the grey borders and titles in 8 colours.
+        os.environ["TERM"] = "xterm-256color"
         os.execvp("tmux", ["tmux", "-L", SOCK, "-f", CONF, "attach", "-t", "demo"])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", H, W, 0, 0))
     start = time.monotonic()
