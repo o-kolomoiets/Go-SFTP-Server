@@ -558,14 +558,17 @@ install to a package, follow
 [From the archive install to a package](docs/install.md#from-the-archive-install-to-a-package);
 the [changelog](CHANGELOG.md#050---2026-11-03) lists everything else.
 
-Next is v0.6, planned but not started: `gosftpd-gui`, a desktop app for
-people who never open a terminal, first on Linux and macOS. The plan is
-that they choose the folders to share, add the people who may upload,
-start and stop the server, copy the connection details and see who
-uploaded what. A design record (ADR 0013) picks the toolkit before any
-code is written. It will be a separate program with no listener of its
-own, not a web UI, and use the same configuration and checks as the CLI;
-the `gosftpd` binary stays as it is (see the [roadmap](#roadmap)).
+Next is v0.6: `gosftpd-gui`, a desktop app for people who never open a
+terminal, first on Linux and macOS. In it they will choose the folders to
+share, add the people who may upload, start and stop sharing, copy the
+connection details and see who uploaded what. Its design record,
+[ADR 0013](docs/adr/0013-desktop-gui.md), chose Qt 6 after the same screen
+was prototyped in four toolkits; the code is not written yet. The app
+will be a separate program with no listener of its own, not a web UI. It
+will run `gosftpd` as a child process and change the configuration only
+through gosftpd's commands, so `gosftpd` stays a single static program;
+it will gain a few command-line options the app uses (see the
+[roadmap](#roadmap)).
 
 ## What gosftpd is not
 
