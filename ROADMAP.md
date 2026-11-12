@@ -97,7 +97,7 @@ Apart from SFTPGo, the niche of simple SFTP servers in Go is almost empty: the e
 | LDAP, OIDC, MFA in 1.x | Complex. For enterprise scenarios there are SSH certificates (M4) | SSH CA |
 | DB, HA, cluster | They contradict the "single binary" principle | — |
 
-A desktop GUI (milestone M5b) is not the web UI of this table: it is a separate local application, `gosftpd-gui`, with no listener and no remote admin API of its own. It runs under the desktop user's account and works through the same configuration files, checks and reloads as the CLI, so it adds no network attack surface and the server binary stays the same.
+A desktop GUI (milestone M5b) is not the web UI of this table: it is a separate local application, `gosftpd-gui`, with no listener and no remote admin API of its own. It runs under the desktop user's account and starts the same `gosftpd` binary that CLI users run as a child process, changing the configuration only through gosftpd's own commands ([ADR 0013](docs/adr/0013-desktop-gui.md)). So it adds no network attack surface, and the server stays a static, CGO-free binary with a few options added for the GUI.
 
 ---
 
@@ -338,12 +338,12 @@ This adds up to 9 direct runtime dependencies (`goleak` is test-only). Every new
 | M3b | — | Windows: isolation test suite, WinSCP in CI, `windows/amd64` in releases; can come after v1.0 | 4–6 pd | 2–3 wk |
 | M4 | v0.4.0 | Multi-user and ops: reload, certificates, metrics, hooks, systemd | 14–20 pd | 7–10 wk |
 | M5 | v0.5.0 | Distribution: Docker, packages, signatures, SBOM, migration from atmoz | 9–12 pd | 5–6 wk |
-| M5b | v0.6.0 | Desktop GUI: share folders, manage users, start and stop the server, see activity, without the command line | 15–25 pd (refined by ADR 0013) | 2–3 mo |
+| M5b | v0.6.0 | Desktop GUI: share folders, manage users, start and stop the server, see activity, without the command line | 19–27 pd (ADR 0013) | 2–3 mo |
 | M6 | v1.0.0 | Stabilization, benchmarks, contract freeze, launch | 6–10 pd + ≥ 4 wk RC | 2–3 mo |
 | Maintenance | — | Dependency updates, advisories, patch releases | ≈ 0.5 pd/mo, over 11–16 mo ≈ 6–8 pd | — |
 | Reserve | — | 20% of the M0–M6 milestone total | 14–20 pd | — |
 | **Total up to v1.0** (without M3b and M5b) | | | **≈ 91–130 pd** | **≈ 11–16 mo** including RC |
-| M5b with its 20% reserve | | | **+ 18–30 pd** | **+ 2–3 mo** |
+| M5b with its 20% reserve | | | **+ 23–32 pd** | **+ 3–4 mo** |
 
 ```mermaid
 flowchart LR
@@ -670,17 +670,50 @@ flowchart LR
 
 **Goal.** People who never open a terminal can run gosftpd: choose the folders to share, add the people who may upload, start and stop the server, copy the connection details and see who uploaded what. The CLI stays the reference and the GUI never does what the CLI cannot. It is a desktop application, not a web UI (§1.4).
 
-- [ ] **ADR 0013, before any code.** The toolkit, chosen after a small prototype of the same screen in each candidate (for example Fyne, Gio, Wails, a Qt binding), by: native look and accessibility, CGO and cross-compilation, binary size, reproducible builds, packaging and signing per OS, license, maintenance. The architecture: a separate binary `gosftpd-gui` (its own `cmd/`, possibly its own module), so that `gosftpd` stays static, CGO-free and within its size budget (D21). The two modes and which comes first: **share a folder** (the GUI runs the server in-process for the desktop user, as `serve --dir` does) and **manage an installed server** (packages, systemd, Docker: the GUI edits `config.toml` and `users.d`, runs the same validation, reloads, and needs the rights the CLI needs). The security model: no listener of its own, never runs as root, secrets (passwords, keys) handled as the CLI handles them, nothing weaker by default.
-- [ ] `cmd/gosftpd-gui` and the shared logic behind it in `internal/` packages that the CLI uses too (user add/disable/remove, mounts, host keys, config validation), so that both stay in step and are tested once.
+- [x] **ADR 0013, before any code** ([ADR 0013](docs/adr/0013-desktop-gui.md), 2026-11-12). The same screen was prototyped in Fyne, Gio, Wails and Qt through miqt, and the owner chose **Qt 6 Widgets through miqt**. Only Qt and Wails were visible to screen readers on Linux, and Qt uses about a tenth of Wails' memory and no browser engine. The GUI is a separate program in its own module, `gui/`. It runs the same gosftpd binary as the CLI as a child process, because Landlock confines a whole process, `serve` re-executes itself and the toolkit needs CGO. It changes the configuration only through gosftpd commands. Share a folder first; managing an installed server moved to the backlog (Q4). No listener, never root, no secret in arguments.
+- [ ] The CLI additions the GUI uses (ADR 0013):
+  - `serve --print-details` and `--stop-on-stdin-eof`;
+  - `init` with `--state-dir`, `--listen`, `--audit-output`, `--on-conflict`, `--read-only`, `--password-logins`, `--disconnect-removed-users`, `--no-user` and `--no-create`, and a checked, atomic `--force`;
+  - `user set`, `--password-stdin` and `user list --json`;
+  - `config show --json`.
+- [ ] `gui/cmd/gosftpd-gui` and its supervisor:
+  - start, and the state directory;
+  - reload, with the result of the `server.reload` event;
+  - a restart only for `restart_required`, and only with nobody connected or with the person's say;
+  - stop on SIGTERM, and on a closed stdin pipe when the GUI dies;
+  - the version check of the shipped gosftpd.
 - [ ] First run and **share a folder**: pick one or more folders, read-only or upload, add a person with a password or a public key, generate or reuse the host key, start and stop; the connection details (host, port, user, fingerprint, the `known_hosts` line, the `sftp` command) ready to copy.
-- [ ] Users and folders: list, add, disable, remove, change permissions and `on_conflict`, with the same checks and messages as the CLI; changes applied by a reload, never by a restart that drops uploads.
-- [ ] Activity: the server's state, its sessions and the latest uploads and downloads from the audit log, with a filter; errors and warnings of the log in plain words.
-- [ ] **Manage an installed server** (if ADR 0013 keeps it in this milestone): find it (package, systemd unit, Docker), edit its configuration with the rights it needs, validate, reload, show its status.
-- [ ] Packaging and signing in the release pipeline: Linux (format per ADR 0013, for example AppImage or Flatpak), macOS (signed and notarized `.app` in a `.dmg`), Windows only after M3b; checksums, signatures, SBOMs and provenance as for the server.
-- [ ] Tests: the shared logic by unit tests, the screens by the toolkit's test driver, an end-to-end run (share a folder, upload with OpenSSH `sftp`, see it in the activity view) in CI on Linux and macOS.
-- [ ] Documentation: `docs/gui.md` with screenshots, the README's first screen, `docs/quickstart.md`.
+- [ ] Users and folders: list, add, disable, remove, change permissions and `on_conflict`, with the same checks and messages as the CLI. A reload applies the changes. A restart happens only when the reload asks for one, and never without the person's say while someone is connected.
+- [ ] Activity: the server's state, who is connected and the latest finished uploads and downloads from the audit log, with a filter; errors and warnings of the log in plain words.
+- [ ] Packaging and signing in the release pipeline (ADR 0013):
+  - deb, rpm and Arch packages for amd64 that carry their own gosftpd, built in Debian 12 and EL 9 images (arm64 when someone asks);
+  - a macOS `.app` for Apple silicon in a `.dmg`, ad-hoc signed and not notarized (D22);
+  - all in `checksums.txt`, signed with cosign, with SBOMs of the binaries and build provenance;
+  - Windows only after M3b.
+- [ ] Tests (ADR 0013):
+  - the CLI additions and the supervisor by unit tests;
+  - an end-to-end run on Linux in CI that drives the GUI through its accessibility tree: share a folder, upload with OpenSSH `sftp`, see it in the activity view;
+  - the packages started in the debian-12, debian-13, el9 and arch containers;
+  - a smoke test of the macOS app in CI.
+- [ ] Documentation: `docs/gui.md` with screenshots (macOS's one-time Open Anyway step included), the README's first screen, `docs/quickstart.md`.
 
-**Definition of Done:** on a clean Linux desktop and a clean macOS, a person who never used gosftpd installs the GUI, shares a folder with one user and receives an upload from OpenSSH `sftp` in under 5 minutes, without a terminal; every action of the GUI has a CLI counterpart; the server binary is unchanged in size and still CGO-free; `v0.6.0` ships the GUI signed and verifiable like the server. **Estimate:** 15–25 pd, refined by ADR 0013 after the prototypes. **Dependencies:** M5 (packages and the release pipeline); Windows needs M3b. **Risks:** CGO and per-OS builds (macOS runners) against reproducible builds; signing costs (an Apple Developer ID; a Windows code-signing certificate), an owner decision (D22); a second user interface to keep in step with the CLI; scope creep toward a platform (§1.4): no remote admin, no web UI.
+**Definition of Done:** on a clean Linux desktop and a clean macOS, a person who never used gosftpd installs the GUI, shares a folder with one user and receives an upload from OpenSSH `sftp` in under 5 minutes, without a terminal. On macOS this includes the one-time Open Anyway step.
+
+- Every action of the GUI has a CLI counterpart: it is a gosftpd command.
+- Every control has an accessible name on Linux.
+- A killed GUI leaves no gosftpd running.
+- The server binary is still CGO-free and within D21, changed only by the CLI additions.
+- `v0.6.0` ships the GUI in `checksums.txt`, signed with cosign and with provenance, like the server; on macOS it is ad-hoc signed, not notarized (D22).
+
+**Estimate:** 19–27 pd (ADR 0013). **Dependencies:** M5 (packages and the release pipeline); Windows needs M3b.
+
+**Risks:**
+- The 7 GB macOS runner, against a compiler that peaks near 7 GiB on `miqt/qt6` (`GOGC=50` lowers it).
+- miqt is v0.x.
+- Qt advisories are followed by hand for the frameworks in the macOS app.
+- The unnotarized macOS app's first start.
+- A second user interface to keep in step with the CLI.
+- Scope creep toward a platform (§1.4): no remote admin, no web UI.
 
 ### M6: v1.0.0
 
@@ -716,6 +749,7 @@ flowchart LR
 | 12 | memfs and S3 backends (`aws-sdk-go-v2/service/s3` v1.114.1 or `minio-go/v7` v7.3.0), sequential writes only | uncertain / L | Possibly never (D15) |
 | 13 | Admin HTTP API (loopback or unix socket only, tokens) | uncertain / L | Only if there is real demand |
 | 14 | Releases from `release/1.N` branches (§9.6): `tag.yml` and the release guard accept a patch tag off `main` that is not the highest, and `latest` moves only for the highest stable version | low / S | Deferred by ADR 0012; needed with the first patch to an older minor |
+| 15 | The GUI manages an installed server (package, systemd unit, Docker): finds it, edits `/etc/gosftpd` with elevated rights (polkit, sudo, macOS authorization), validates, reloads, shows its status | medium / L | Moved out of M5b by ADR 0013 (Q4); planned after v0.6.0. If it is planned before 1.0, it leaves this table for a milestone of its own |
 
 ---
 
@@ -1677,7 +1711,7 @@ Once a decision is made, `accepted YYYY-MM-DD, ADR 0001` (or the number of anoth
 | D19 | **Language of the project** | English; Russian; both | **English** everywhere: code, documentation including `ROADMAP.md` and `TASKS.md`, commit messages, issues and pull requests; this makes the project accessible to the awesome-selfhosted and HN audiences and to every contributor | M0 | accepted 2026-10-07 per recommendation, ADR 0001; extended to `ROADMAP.md` and `TASKS.md` by the owner 2026-10-10, ADR 0006 |
 | D20 | **If the audit log cannot be written** (disk full) | fail-closed: new connections and data-modifying operations are refused, `/readyz` → 503; fail-open: work continues, errors go to stderr and a metric | **fail-closed by default** (`audit.on_error`): auditing is one of the project's main promises, and `min_free_space` already stops uploads on a nearly full disk. fail-open is for those who value availability over the audit trail | M1 | open |
 | D21 | **Binary size budget** | 10 MB; 11 MiB; 12 MiB; own minimal HTTP code to stay within 10 MiB | **12 MiB**: `net/http` (with `crypto/tls`, x509 and HTTP/2) is needed for the admin listener and the webhooks and costs about 2.7 MB; a hand-written HTTP server would be more security-sensitive code for a saving that the webhooks undo | M4 | decided 2026-10-11 by the owner: **12 MiB**, keep `net/http` |
-| D22 | **Desktop GUI** (M5b) | The toolkit (Fyne, Gio, Wails, a Qt binding); share a folder first or manage an installed server first; signing for macOS (Apple Developer ID) and Windows | Decide in ADR 0013 after a prototype of the same screen in each toolkit; **share a folder first**, on Linux and macOS; a separate `gosftpd-gui` binary so that the server stays static and CGO-free | M5b | open |
+| D22 | **Desktop GUI** (M5b) | The toolkit (Fyne, Gio, Wails, a Qt binding); share a folder first or manage an installed server first; signing for macOS (Apple Developer ID) and Windows | Decide in ADR 0013 after a prototype of the same screen in each toolkit; **share a folder first**, on Linux and macOS; a separate `gosftpd-gui` binary so that the server stays static and CGO-free | M5b | decided 2026-11-12 by the owner ([ADR 0013](docs/adr/0013-desktop-gui.md)): **Qt 6 Widgets through miqt**; share a folder first, on Linux and macOS; managing an installed server after v0.6.0; **no Apple Developer ID for now** (the macOS app is ad-hoc signed and not notarized; revisit before v1.0 or when users ask); Windows signing with M3b |
 
 ---
 
