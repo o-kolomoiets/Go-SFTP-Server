@@ -5,6 +5,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,32 +28,33 @@ import (
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "user",
-		Short: "Add, list, disable and remove users",
+		Short: "Add, change, list, disable and remove users",
 		Args:  noArgs,
 		RunE:  showHelp,
 	}
-	cmd.AddCommand(newUserAddCmd(), newUserListCmd(), newHashPasswordCmd(),
+	cmd.AddCommand(newUserAddCmd(), newUserSetCmd(), newUserListCmd(), newHashPasswordCmd(),
 		newUserEditCmd("disable", config.DisableUser), newUserEditCmd("enable", config.EnableUser), newUserEditCmd("remove", config.RemoveUser))
 	return cmd
 }
 
 type userAddOptions struct {
-	keys         []string
-	principals   []string
-	passwordHash string
-	access       []string
-	expires      string
-	allowFrom    []string
-	write        bool
-	force        bool
-	config       string
-	host         string
+	keys          []string
+	principals    []string
+	passwordHash  string
+	passwordStdin bool
+	access        []string
+	expires       string
+	allowFrom     []string
+	write         bool
+	force         bool
+	config        string
+	host          string
 }
 
 func newUserAddCmd() *cobra.Command {
 	var o userAddOptions
 	cmd := &cobra.Command{
-		Use:   "add NAME --key FILE|KEY|--password-hash HASH --access MOUNT=PERMISSIONS...",
+		Use:   "add NAME --key FILE|KEY|--password-hash HASH|--password-stdin --access MOUNT=PERMISSIONS...",
 		Short: "Add a user, or print its [users.NAME] block",
 		Long: `Print a [users.NAME] block to add to the configuration file. With --write,
 write it to users.d/NAME.toml instead (the directory of the configuration's
@@ -61,16 +63,21 @@ new user, and print the connection details to send to the user. The main
 configuration file is never rewritten. A running server applies the new
 file on reload (systemctl reload gosftpd, or kill -HUP).
 
-A user needs a --key or a --password-hash, unless the configuration trusts
-CAs (auth.trusted_user_ca_keys) and --write is given: the user then logs
-in with a certificate for its name, or for a --principal.
+A user needs a --key or a password, unless the configuration trusts CAs
+(auth.trusted_user_ca_keys) and --write is given: the user then logs in
+with a certificate for its name, or for a --principal. The password is a
+--password-hash from user hash-password, or, with --password-stdin, the
+first line of standard input, hashed as user hash-password does; neither
+the password nor its hash is then an argument, which other local users
+could read.
 
 Permissions are a preset (read, upload, readwrite, full) or a list of flags
 (list, read, write, overwrite, delete, rename, mkdir, rmdir, setstat).`,
 		Example: `  gosftpd user add partner --key partner.pub --access inbox=upload --expires 720h --write
   gosftpd user add partner --key partner.pub --access inbox=upload >> gosftpd.toml
   gosftpd user add alice --key "ssh-ed25519 AAAA... alice@laptop" --access home=full --access public=read
-  gosftpd user add bob --principal bob@corp.example --access inbox=upload --write`,
+  gosftpd user add bob --principal bob@corp.example --access inbox=upload --write
+  printf '%s\n' "$PASSWORD" | gosftpd user add carol --password-stdin --access inbox=upload --write`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
 				return usageError{err}
@@ -78,6 +85,16 @@ Permissions are a preset (read, upload, readwrite, full) or a list of flags
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if o.passwordStdin {
+				if o.passwordHash != "" {
+					return usageError{errors.New("--password-hash and --password-stdin cannot be used together")}
+				}
+				h, err := stdinPassword(cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+				o.passwordHash = h
+			}
 			block, err := userBlock(args[0], o, time.Now())
 			if err != nil {
 				return usageError{err}
@@ -97,6 +114,7 @@ Permissions are a preset (read, upload, readwrite, full) or a list of flags
 	f.StringArrayVar(&o.keys, "key", nil, "public key, or a file with public keys (repeatable)")
 	f.StringArrayVar(&o.principals, "principal", nil, "certificate principal for trusted CAs, instead of the user name (repeatable)")
 	f.StringVar(&o.passwordHash, "password-hash", "", "password hash from 'gosftpd user hash-password'")
+	f.BoolVar(&o.passwordStdin, "password-stdin", false, "read the password from the first line of standard input, instead of --password-hash")
 	f.StringArrayVar(&o.access, "access", nil, "MOUNT=PERMISSIONS (repeatable)")
 	f.StringVar(&o.expires, "expires", "", "account expiry: a duration from now (72h) or a date (2026-12-31, RFC 3339)")
 	f.StringArrayVar(&o.allowFrom, "allow-from", nil, "allowed client address or CIDR block (repeatable)")
@@ -109,7 +127,7 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 		return "", fmt.Errorf("invalid user name %q: use lowercase letters, digits, '.', '_' and '-' (max 32)", name)
 	}
 	if len(o.keys) == 0 && o.passwordHash == "" && !o.write {
-		return "", errors.New("at least one --key or a --password-hash is required (with --write, a user of a configuration that trusts CAs may have neither)")
+		return "", errors.New("at least one --key, a --password-hash or --password-stdin is required (with --write, a user of a configuration that trusts CAs may have none of them)")
 	}
 	if slices.Contains(o.principals, "") {
 		return "", errors.New("--principal: empty principal")
@@ -131,21 +149,13 @@ func userBlock(name string, o userAddOptions, now time.Time) (string, error) {
 		keys = append(keys, lines...)
 	}
 
-	var access []string
-	seen := map[string]bool{}
-	for _, a := range o.access {
-		mount, perm, ok := strings.Cut(a, "=")
-		if !ok || !vfs.ValidMountName(mount) {
-			return "", fmt.Errorf("--access %q: want MOUNT=PERMISSIONS, e.g. inbox=upload", a)
-		}
-		if seen[mount] {
-			return "", fmt.Errorf("--access: mount %q given twice", mount)
-		}
-		seen[mount] = true
-		if _, err := vfs.ParsePerm(perm); err != nil {
-			return "", fmt.Errorf("--access %q: %w", a, err)
-		}
-		access = append(access, tomlKey(mount)+" = "+tomlString(perm))
+	mounts, perms, err := parseAccess(o.access)
+	if err != nil {
+		return "", err
+	}
+	access := make([]string, len(mounts))
+	for i, mount := range mounts {
+		access[i] = tomlKey(mount) + " = " + tomlString(perms[mount])
 	}
 
 	for _, a := range o.allowFrom {
@@ -206,12 +216,7 @@ func writeUser(out, errOut io.Writer, name, block string, o userAddOptions) erro
 	if err != nil {
 		return err
 	}
-	prefix := "users." + tomlKey(name)
-	for _, w := range warns {
-		if strings.HasPrefix(w, prefix+".") || strings.HasPrefix(w, prefix+" ") || strings.HasPrefix(w, prefix+":") {
-			fmt.Fprintln(errOut, "warning:", w)
-		}
-	}
+	printUserWarnings(errOut, name, warns)
 	if !c.CanLogIn(name) && !o.force {
 		return usageError{fmt.Errorf("%s could not log in (see the warnings); pass --force to write it anyway", name)}
 	}
@@ -225,6 +230,203 @@ func writeUser(out, errOut io.Writer, name, block string, o userAddOptions) erro
 	fmt.Fprintf(out, "Wrote %s. Apply it with: systemctl reload gosftpd (or kill -HUP the server).\n\n", path)
 	_, err = fmt.Fprint(out, partnerInstructions(c, name, o.host))
 	return err
+}
+
+// printUserWarnings prints the warnings of the configuration about user
+// name.
+func printUserWarnings(errOut io.Writer, name string, warns []string) {
+	prefix := "users." + tomlKey(name)
+	for _, w := range warns {
+		if strings.HasPrefix(w, prefix+".") || strings.HasPrefix(w, prefix+" ") || strings.HasPrefix(w, prefix+":") {
+			fmt.Fprintln(errOut, "warning:", w)
+		}
+	}
+}
+
+// parseAccess checks the values of --access, MOUNT=PERMISSIONS with each
+// mount once, and returns the mounts in the order given and their
+// permissions.
+func parseAccess(values []string) ([]string, map[string]string, error) {
+	mounts := make([]string, 0, len(values))
+	perms := make(map[string]string, len(values))
+	for _, a := range values {
+		mount, perm, ok := strings.Cut(a, "=")
+		if !ok || !vfs.ValidMountName(mount) {
+			return nil, nil, fmt.Errorf("--access %q: want MOUNT=PERMISSIONS, e.g. inbox=upload", a)
+		}
+		if _, dup := perms[mount]; dup {
+			return nil, nil, fmt.Errorf("--access: mount %q given twice", mount)
+		}
+		if _, err := vfs.ParsePerm(perm); err != nil {
+			return nil, nil, fmt.Errorf("--access %q: %w", a, err)
+		}
+		mounts = append(mounts, mount)
+		perms[mount] = perm
+	}
+	return mounts, perms, nil
+}
+
+// stdinPassword reads the password of --password-stdin, the first line of
+// in, and returns its hash, as user hash-password --stdin does.
+func stdinPassword(in io.Reader) (string, error) {
+	pw, err := readPassword(in, io.Discard, true)
+	if err != nil {
+		return "", usageError{fmt.Errorf("--password-stdin: %w", err)}
+	}
+	defer clear(pw)
+	h, err := auth.HashPassword(pw)
+	if err != nil {
+		return "", usageError{fmt.Errorf("--password-stdin: %w", err)}
+	}
+	return h, nil
+}
+
+type userSetOptions struct {
+	access        []string
+	noAccess      bool
+	passwordStdin bool
+	force         bool
+	config        string
+}
+
+func newUserSetCmd() *cobra.Command {
+	var o userSetOptions
+	cmd := &cobra.Command{
+		Use:   "set NAME --access MOUNT=PERMISSIONS...|--no-access|--password-stdin",
+		Short: "Change the access or the password of a user",
+		Long: `Change the access or the password of a user. The user must be defined in
+an included file (such as users.d/NAME.toml from user add --write): the main
+configuration file is never rewritten. The rest of the file, comments
+included, stays as it is.
+
+--access replaces the whole access of the user with the mounts given, so
+name every mount the user keeps. --no-access leaves the user none: it can
+still log in, but sees nothing. --password-stdin sets the password to the
+first line of standard input, hashed as user hash-password does; neither
+the password nor its hash is then an argument, which other local users
+could read.
+
+The configuration is checked with the change before the file is written.
+A user that then could not log in (no key, password or certificate
+principal that auth.methods allows) is refused unless --force is given. A
+running server applies the change on reload (systemctl reload gosftpd, or
+kill -HUP); open connections keep the access they had until they end.
+
+Permissions are a preset (read, upload, readwrite, full) or a list of flags
+(list, read, write, overwrite, delete, rename, mkdir, rmdir, setstat).`,
+		Example: `  gosftpd user set partner --access inbox=upload --access archive=read
+  gosftpd user set partner --no-access
+  printf '%s\n' "$PASSWORD" | gosftpd user set partner --password-stdin`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+				return usageError{err}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setUser(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], o)
+		},
+	}
+	f := cmd.Flags()
+	f.StringArrayVar(&o.access, "access", nil, "MOUNT=PERMISSIONS of the new access, which replaces the old (repeatable)")
+	f.BoolVar(&o.noAccess, "no-access", false, "leave the user no access")
+	f.BoolVar(&o.passwordStdin, "password-stdin", false, "set the password to the first line of standard input")
+	f.BoolVar(&o.force, "force", false, "write a user that could not log in (no usable key or password)")
+	f.StringVar(&o.config, "config", "", "configuration file (default: the one serve would use)")
+	return cmd
+}
+
+// setUser changes the access or the password of user name in the file
+// that defines it, after checking the configuration with the change.
+func setUser(in io.Reader, out, errOut io.Writer, name string, o userSetOptions) error {
+	switch {
+	case len(o.access) > 0 && o.noAccess:
+		return usageError{errors.New("--access and --no-access cannot be used together")}
+	case len(o.access) == 0 && !o.noAccess && !o.passwordStdin:
+		return usageError{errors.New("nothing to change: give --access MOUNT=PERMISSIONS, --no-access or --password-stdin")}
+	}
+	ch := config.UserChange{SetAccess: len(o.access) > 0 || o.noAccess, Access: map[string]string{}}
+	if len(o.access) > 0 {
+		var err error
+		if _, ch.Access, err = parseAccess(o.access); err != nil {
+			return usageError{err}
+		}
+	}
+	c, err := loadConfig(o.config, os.Getenv)
+	if err != nil {
+		return err
+	}
+	u, err := includedUser(c, name)
+	if err != nil {
+		return err
+	}
+	if o.passwordStdin {
+		if ch.PasswordHash, err = stdinPassword(in); err != nil {
+			return err
+		}
+	}
+	fi, err := os.Stat(u.From)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(u.From)
+	if err != nil {
+		return err
+	}
+	data, changed, err := config.SetUser(u.From, data, name, ch)
+	if err != nil {
+		return configError{err}
+	}
+	if !changed {
+		_, err := fmt.Fprintf(out, "%s has this access already.\n", name)
+		return err
+	}
+	users, err := config.ParseUsers(u.From, data)
+	if err != nil {
+		return configError{err}
+	}
+	next := users[name]
+	next.From = u.From
+	c.Users[name] = next
+	warns, err := checkConfig(c, false)
+	if err != nil {
+		return err
+	}
+	printUserWarnings(errOut, name, warns)
+	// Unlike user add, a disabled or expired user is no reason to refuse:
+	// set does not change that, and a disabled user may lose a mount.
+	if !c.HasLogin(name) && !o.force {
+		return usageError{fmt.Errorf("%s could not log in (see the warnings); pass --force to write it anyway", name)}
+	}
+	if err := writeUsersFile(u.From, data, fi.Mode().Perm(), fi, false); err != nil {
+		return fmt.Errorf("user set: %w", err)
+	}
+	accessChanged := ch.SetAccess && !maps.Equal(u.Access, ch.Access)
+	what := "password"
+	switch {
+	case accessChanged && ch.PasswordHash != "":
+		what = "access and password"
+	case accessChanged:
+		what = "access"
+	}
+	fmt.Fprintf(out, "Set the %s of %s in %s. Apply it with: systemctl reload gosftpd (or kill -HUP the server).\n", what, name, u.From)
+	if accessChanged {
+		fmt.Fprintln(out, "Open connections of the user keep the access they had until they end.")
+	}
+	return nil
+}
+
+// includedUser returns user name of c, which must be defined in an
+// included file: the main configuration file is never rewritten.
+func includedUser(c *config.Config, name string) (*config.User, error) {
+	u, ok := c.Users[name]
+	switch {
+	case !ok:
+		return nil, usageError{fmt.Errorf("no user %q in %s", name, c.File)}
+	case u.From == c.File:
+		return nil, usageError{fmt.Errorf("user %q is defined in %s itself, which gosftpd does not rewrite (its comments would be lost); change it there", name, c.File)}
+	}
+	return u, nil
 }
 
 func newUserEditCmd(verb string, edit config.UserEdit) *cobra.Command {
@@ -264,12 +466,9 @@ func editUser(out io.Writer, file, name, verb string, edit config.UserEdit) erro
 	if err != nil {
 		return err
 	}
-	u, ok := c.Users[name]
-	switch {
-	case !ok:
-		return usageError{fmt.Errorf("no user %q in %s", name, c.File)}
-	case u.From == c.File:
-		return usageError{fmt.Errorf("user %q is defined in %s itself, which gosftpd does not rewrite (its comments would be lost); change it there", name, c.File)}
+	u, err := includedUser(c, name)
+	if err != nil {
+		return err
 	}
 	fi, err := os.Stat(u.From)
 	if err != nil {
@@ -367,74 +566,147 @@ func parseExpires(s string, now time.Time) (time.Time, error) {
 }
 
 func newUserListCmd() *cobra.Command {
-	var file string
+	var (
+		file   string
+		asJSON bool
+	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List the configured users",
-		Args:  noArgs,
+		Long: `List the configured users, sorted by name: their access, the number of
+their keys, their certificate principals for trusted CAs, whether they have
+a password, their expiry and their status (active, expired or disabled).
+"off" marks keys, principals or a password that auth.methods leaves out; a
+key count ending in "+?" leaves out an authorized_keys_file that could not
+be read.
+
+With --json it prints a JSON array instead, one object per user, with the
+same information: name, access (mount name to permissions), keys,
+keys_unreadable, keys_off, principals, principals_off, password (true or
+false), password_off, expires (RFC 3339 in UTC, or null) and status.`,
+		Example: `  gosftpd user list
+  gosftpd user list --json`,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := loadConfig(file, os.Getenv)
 			if err != nil {
 				return err
 			}
-			names := make([]string, 0, len(c.Users))
-			for name := range c.Users {
-				names = append(names, name)
+			users := listUsers(c, time.Now())
+			if asJSON {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				enc.SetEscapeHTML(false)
+				return enc.Encode(users)
 			}
-			slices.Sort(names)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			fmt.Fprintln(w, "USER\tACCESS\tKEYS\tCERT\tPASSWORD\tEXPIRES\tSTATUS")
-			keysOn, pwOn := c.Auth.HasMethod(auth.MethodPublicKey), c.Auth.HasMethod(auth.MethodPassword)
-			now := time.Now()
-			for _, name := range names {
-				u := c.Users[name]
-				var access []string
-				for _, m := range slices.Sorted(maps.Keys(u.Access)) {
-					access = append(access, m+"="+u.Access[m])
-				}
-				keys := strconv.Itoa(len(u.AuthorizedKeys))
-				if u.AuthorizedKeysFile != "" {
-					data, err := os.ReadFile(u.AuthorizedKeysFile)
-					if err != nil {
-						keys += "+?"
-					} else {
-						ks, _ := auth.ParseAuthorizedKeys(data, u.AuthorizedKeysFile)
-						keys = strconv.Itoa(len(u.AuthorizedKeys) + len(ks))
-					}
-				}
-				if !keysOn {
-					keys = "off" // auth.methods
-				}
-				cert := "-" // principals for trusted CAs
-				if ps := c.CertificatePrincipals(name); len(ps) > 0 {
-					cert = strings.Join(ps, ",")
-				} else if c.Auth.TrustsCAs() && !keysOn {
-					cert = "off"
-				}
-				password := "-"
-				if u.PasswordHash != "" {
-					password = "yes"
-					if !pwOn {
-						password = "off"
-					}
-				}
-				expires, status := "-", "active"
-				if u.Expires != nil {
-					expires = u.Expires.UTC().Format(time.RFC3339)
-					if u.Expires.Before(now) {
-						status = "expired"
-					}
-				}
-				if u.Disabled {
-					status = "disabled"
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, strings.Join(access, ", "), keys, cert, password, expires, status)
+			for _, u := range users {
+				fmt.Fprintln(w, u.row())
 			}
 			return w.Flush()
 		},
 	}
 	cmd.Flags().StringVar(&file, "config", "", "configuration file (default: the one serve would use)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print as a JSON array")
 	return cmd
+}
+
+// userInfo is a user as user list shows it: a row of the table, and an
+// object of the --json array, whose field names stay.
+type userInfo struct {
+	Name           string            `json:"name"`
+	Access         map[string]string `json:"access"`
+	Keys           int               `json:"keys"`
+	KeysUnreadable bool              `json:"keys_unreadable"`
+	KeysOff        bool              `json:"keys_off"`
+	Principals     []string          `json:"principals"`
+	PrincipalsOff  bool              `json:"principals_off"`
+	Password       bool              `json:"password"`
+	PasswordOff    bool              `json:"password_off"`
+	Expires        *string           `json:"expires"`
+	Status         string            `json:"status"`
+}
+
+// listUsers returns the users of c, sorted by name.
+func listUsers(c *config.Config, now time.Time) []userInfo {
+	keysOn, pwOn := c.Auth.HasMethod(auth.MethodPublicKey), c.Auth.HasMethod(auth.MethodPassword)
+	users := make([]userInfo, 0, len(c.Users))
+	for _, name := range slices.Sorted(maps.Keys(c.Users)) {
+		u := c.Users[name]
+		info := userInfo{
+			Name:       name,
+			Access:     maps.Clone(u.Access),
+			Keys:       len(u.AuthorizedKeys),
+			KeysOff:    !keysOn,
+			Principals: c.CertificatePrincipals(name),
+			Password:   u.PasswordHash != "",
+			Status:     "active",
+		}
+		if info.Access == nil {
+			info.Access = map[string]string{}
+		}
+		if u.AuthorizedKeysFile != "" {
+			data, err := os.ReadFile(u.AuthorizedKeysFile)
+			if err != nil {
+				info.KeysUnreadable = true
+			} else {
+				ks, _ := auth.ParseAuthorizedKeys(data, u.AuthorizedKeysFile)
+				info.Keys += len(ks)
+			}
+		}
+		if info.Principals == nil {
+			info.Principals = []string{}
+			info.PrincipalsOff = c.Auth.TrustsCAs() && !keysOn
+		}
+		info.PasswordOff = info.Password && !pwOn
+		if u.Expires != nil {
+			s := u.Expires.UTC().Format(time.RFC3339)
+			info.Expires = &s
+			if u.Expires.Before(now) {
+				info.Status = "expired"
+			}
+		}
+		if u.Disabled {
+			info.Status = "disabled"
+		}
+		users = append(users, info)
+	}
+	return users
+}
+
+// row returns the user's row of the table, its columns separated by tabs.
+func (u userInfo) row() string {
+	access := make([]string, 0, len(u.Access))
+	for _, m := range slices.Sorted(maps.Keys(u.Access)) {
+		access = append(access, m+"="+u.Access[m])
+	}
+	keys := strconv.Itoa(u.Keys)
+	switch {
+	case u.KeysOff:
+		keys = "off" // auth.methods
+	case u.KeysUnreadable:
+		keys += "+?"
+	}
+	cert := "-" // principals for trusted CAs
+	switch {
+	case len(u.Principals) > 0:
+		cert = strings.Join(u.Principals, ",")
+	case u.PrincipalsOff:
+		cert = "off"
+	}
+	password := "-"
+	switch {
+	case u.PasswordOff:
+		password = "off"
+	case u.Password:
+		password = "yes"
+	}
+	expires := "-"
+	if u.Expires != nil {
+		expires = *u.Expires
+	}
+	return strings.Join([]string{u.Name, strings.Join(access, ", "), keys, cert, password, expires, u.Status}, "\t")
 }
 
 func newHashPasswordCmd() *cobra.Command {
