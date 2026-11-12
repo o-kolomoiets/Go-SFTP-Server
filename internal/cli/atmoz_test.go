@@ -798,10 +798,16 @@ func TestRootHelp(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit %d", code)
 	}
-	for _, want := range []string{"gosftpd [USER:PASS[:e][:UID[:GID[:DIR[,DIR]...]]]...] [flags]", "--users-conf", `--on-conflict string     when an upload targets an existing file: overwrite, rename, reject or version (default "overwrite")`} {
+	for _, want := range []string{"gosftpd [USER:PASS[:e][:UID[:GID[:DIR[,DIR]...]]]...] [flags]", "--users-conf"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("no %q in:\n%s", want, stdout)
 		}
+	}
+	// The padding depends on the longest flag column, which pflag sets
+	// (since v1.1.0 a bool flag reads --name[=true|false]).
+	onConflict := regexp.MustCompile(`--on-conflict string +when an upload targets an existing file: overwrite, rename, reject or version \(default "overwrite"\)`)
+	if !onConflict.MatchString(stdout) {
+		t.Errorf("no %s in:\n%s", onConflict, stdout)
 	}
 	flags := regexp.MustCompile(`(?m)^\s+(?:-\w, )?--([a-z-]+)`).FindAllStringSubmatch(stdout, -1)
 	var got []string

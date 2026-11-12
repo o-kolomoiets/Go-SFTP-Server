@@ -8,6 +8,14 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Changed
+
+- Dependencies: `github.com/spf13/pflag` v1.1.0 and `golang.org/x/sys`
+  v0.50.0. With pflag 1.1, `--help` shows a boolean flag as
+  `--name[=true|false]`, for example `--read-only[=true|false]`. The flags
+  are given as before; an invalid value such as `--read-only=yes` now says
+  that it must be true or false.
+
 ## [0.5.0] - 2026-11-03
 
 Distribution: a container image, deb, rpm and Arch packages, FreeBSD
