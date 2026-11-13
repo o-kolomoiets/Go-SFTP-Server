@@ -665,3 +665,36 @@ func TestServeDetailsHelp(t *testing.T) {
 		t.Errorf("exit %d:\n%s", code, out)
 	}
 }
+
+// TestSameAsStdout: an audit log path that names stdout is refused with
+// --print-details, as "stdout" is; a stdout thrown away is not stdout.
+func TestSameAsStdout(t *testing.T) {
+	dir := t.TempDir()
+	file, other := filepath.Join(dir, "out"), filepath.Join(dir, "other")
+	f, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	writeFile(t, other, "")
+	saved := os.Stdout
+	t.Cleanup(func() { os.Stdout = saved })
+
+	os.Stdout = f
+	if !sameAsStdout(file) || sameAsStdout(other) || sameAsStdout("stdout") || sameAsStdout(filepath.Join(dir, "missing")) {
+		t.Errorf("stdout to %s: file %v, other %v", file, sameAsStdout(file), sameAsStdout(other))
+	}
+	if code, _, stderr := execute(t, "serve", "--allow-root", "--print-details", "--dir", dir, "--audit-output", file); code != exitUsage || !strings.Contains(stderr, "is stdout, which with --print-details") {
+		t.Errorf("--audit-output %s: exit %d\n%s", file, code, stderr)
+	}
+
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { null.Close() })
+	os.Stdout = null
+	if sameAsStdout(os.DevNull) {
+		t.Error("a stdout thrown away counts as the audit log's file")
+	}
+}

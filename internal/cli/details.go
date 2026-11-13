@@ -116,15 +116,41 @@ func checkDetailsFlags(flags *pflag.FlagSet, o serveOptions) error {
 		return usageError{errors.New("--print-details and --ephemeral cannot be used together: --ephemeral prints its own line of connection details")}
 	case flags.Changed("audit-output") && isStdout(o.auditOutput):
 		return usageError{errors.New("--audit-output stdout cannot be used with --print-details, whose stdout carries only the connection details; name a file for the audit log")}
+	case flags.Changed("audit-output") && sameAsStdout(o.auditOutput):
+		return usageError{fmt.Errorf("--audit-output %s is stdout, which with --print-details carries only the connection details; name another file for the audit log", o.auditOutput)}
 	}
 	return nil
+}
+
+// sameAsStdout reports whether dest, an audit log path, is the file that
+// stdout is: /dev/stdout, /dev/fd/1, or the file stdout was redirected to.
+// A stdout thrown away to the null device does not count.
+func sameAsStdout(dest string) bool {
+	if isStdout(dest) {
+		return false
+	}
+	out, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	if null, err := os.Stat(os.DevNull); err == nil && os.SameFile(out, null) {
+		return false
+	}
+	fi, err := os.Stat(dest)
+	return err == nil && os.SameFile(fi, out)
 }
 
 // checkDetailsAudit refuses, with --print-details, an audit log on stdout
 // that the configuration file sets or leaves as the default; at start and
 // on reload.
 func checkDetailsAudit(o serveOptions, c *config.Config) error {
-	if !o.printDetails || !isStdout(c.Audit.Output) {
+	if !o.printDetails {
+		return nil
+	}
+	if sameAsStdout(c.Audit.Output) {
+		return configError{fmt.Errorf("audit.output %s is stdout, which with --print-details carries only the connection details; set it to another file", c.Audit.Output)}
+	}
+	if !isStdout(c.Audit.Output) {
 		return nil
 	}
 	if c.File != "" && c.Defined("audit.output") {

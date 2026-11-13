@@ -654,7 +654,10 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	// keepalive@openssh.com requests do (keepalive_interval).
 	lc := net.ListenConfig{KeepAliveConfig: net.KeepAliveConfig{Enable: true, Idle: time.Minute, Interval: 15 * time.Second, Count: 4}}
 	for _, addr := range c.Server.Listen {
-		ln, err := lc.Listen(ctx, "tcp", addr)
+		// Not ctx: a stop asked for while starting (SIGTERM, or end of
+		// file on stdin) would fail the lookup of a host name, which
+		// --print-details would report as a listen error.
+		ln, err := lc.Listen(context.WithoutCancel(ctx), "tcp", addr)
 		if err != nil {
 			for _, l := range listeners {
 				_ = l.Close()

@@ -247,3 +247,24 @@ func TestServeStopOnStdinEOFEphemeral(t *testing.T) {
 		t.Errorf("stderr:\n%s", logs)
 	}
 }
+
+// TestServeStopOnStdinEOFHostName: a stop asked for while starting does not
+// fail the lookup of a listen address that is a host name, which
+// --print-details would report as a listen error.
+func TestServeStopOnStdinEOFHostName(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	path := detailsConfig(t, dir, `listen = ["localhost:0"]`, "", newSigner(t))
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close() // at end of file before serve starts
+	t.Cleanup(func() { r.Close() })
+	for range 5 {
+		code, out, errOut := runWith(t, r, "serve", "--allow-root", "--stop-on-stdin-eof", "--print-details", "--config", path)
+		if code != exitOK || strings.Contains(out, `"error"`) {
+			t.Fatalf("exit %d, stdout %q, stderr:\n%s", code, out, errOut)
+		}
+	}
+}
