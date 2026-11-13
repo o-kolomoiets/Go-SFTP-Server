@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -192,10 +193,44 @@ func newConfigShowJSON(c *config.Config) configShowJSON {
 // version --json is, with a newline after it. '&', '<' and '>' in paths
 // are written as they are.
 func writeConfigShowJSON(w io.Writer, c *config.Config) error {
+	j := newConfigShowJSON(c)
+	if err := checkShowUTF8(j); err != nil {
+		return err
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
-	return enc.Encode(newConfigShowJSON(c))
+	return enc.Encode(j)
+}
+
+// checkShowUTF8 refuses a value that is not valid UTF-8: encoding/json
+// would replace its bytes with U+FFFD, and a path so printed names another
+// file. JSON cannot carry it, so the command fails as for an unusable
+// configuration.
+func checkShowUTF8(j configShowJSON) error {
+	bad := func(field, v string) error {
+		if utf8.ValidString(v) {
+			return nil
+		}
+		return configError{fmt.Errorf("config show --json: %s %q is not valid UTF-8, which JSON cannot carry; use config show", field, v)}
+	}
+	fields := make([][2]string, 0, 2+len(j.Server.Listen)+len(j.Server.HostKeys)+2*len(j.Mounts))
+	fields = append(fields, [2]string{"file", j.File}, [2]string{"audit.output", j.Audit.Output})
+	for _, v := range j.Server.Listen {
+		fields = append(fields, [2]string{"server.listen", v})
+	}
+	for _, v := range j.Server.HostKeys {
+		fields = append(fields, [2]string{"server.host_keys", v})
+	}
+	for name, m := range j.Mounts {
+		fields = append(fields, [2]string{"mounts", name}, [2]string{"mounts." + name + ".path", m.Path})
+	}
+	for _, f := range fields {
+		if err := bad(f[0], f[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newConfigExampleCmd() *cobra.Command {

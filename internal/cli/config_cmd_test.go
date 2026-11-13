@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -389,5 +390,27 @@ func TestConfigShowJSONErrors(t *testing.T) {
 				t.Errorf("without --json: exit %d, stdout %q, stderr:\n%s\nwith --json: exit %d, stderr:\n%s", code, stdout, stderr, codeJSON, stderrJSON)
 			}
 		})
+	}
+}
+
+// TestConfigShowJSONNotUTF8: a path that is not valid UTF-8 would be
+// printed with U+FFFD in its place, naming another file; the command fails
+// instead, as for an unusable configuration.
+func TestConfigShowJSONNotUTF8(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs a file system that takes any bytes in a name")
+	}
+	isolate(t)
+	dir := filepath.Join(t.TempDir(), "caf\xe9")
+	showMkdir(t, dir)
+	path := filepath.Join(dir, "gosftpd.toml")
+	writeFile(t, path, "config_version = 1\n[server]\nhost_keys = [\"k\"]\n[mounts.m]\npath = \"/m\"\n")
+	code, out, errOut := execute(t, "config", "show", "--json", "--config", path)
+	if code != exitUsage || out != "" || !strings.Contains(errOut, "is not valid UTF-8") {
+		t.Errorf("exit %d, stdout %q, stderr:\n%s", code, out, errOut)
+	}
+	// Without --json, config show prints the bytes as they are.
+	if code, out, errOut := execute(t, "config", "show", "--config", path); code != exitOK || !strings.Contains(out, "caf\xe9") {
+		t.Errorf("config show: exit %d\n%s%s", code, out, errOut)
 	}
 }
