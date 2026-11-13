@@ -3,8 +3,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -82,11 +85,28 @@ files that need a restart once they are replaced by rename.`,
 }
 
 func newConfigShowCmd() *cobra.Command {
-	var file string
+	var (
+		file   string
+		asJSON bool
+	)
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Print the effective configuration with all defaults",
-		Args:  noArgs,
+		Long: `Print the effective configuration, as serve would use it: every key with
+its value or default, the users of included files, and what
+$GOSFTPD_LISTEN, $GOSFTPD_LOG_LEVEL and $GOSFTPD_LOG_FORMAT override. Exit
+code 2 means the configuration is invalid.
+
+With --json, print one JSON object instead, with the path of the file and
+these keys under their names in the file: the mounts (path, read_only,
+create, on_conflict), server.listen, server.host_keys, auth.methods,
+defaults.on_conflict, audit.output and reload.disconnect_removed_users.
+It leaves out the users and the hooks, and so every password hash, key and
+webhook URL; gosftpd user list --json lists the users. Later versions may
+add keys, never remove or rename one.`,
+		Example: `  gosftpd config show
+  gosftpd config show --json --config /etc/gosftpd/config.toml`,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := loadConfig(file, os.Getenv)
 			if err != nil {
@@ -95,6 +115,9 @@ func newConfigShowCmd() *cobra.Command {
 			applyEnv(c, os.Getenv)
 			if _, err := checkConfig(c, false); err != nil {
 				return err
+			}
+			if asJSON {
+				return writeConfigShowJSON(cmd.OutOrStdout(), c)
 			}
 			data, err := c.Encode()
 			if err != nil {
@@ -106,7 +129,108 @@ func newConfigShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&file, "config", "", "configuration file (default: the one serve would use)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the mounts and main settings as JSON, without users")
 	return cmd
+}
+
+// configShowJSON is what config show --json prints (ADR 0013): the part of
+// the effective configuration that the desktop GUI reads, with the names
+// and values of the keys that config show prints. Fields may be added
+// later, never removed or renamed (the M6 compatibility contract).
+//
+// The users are left out: user list --json describes them, and so no
+// password hash, key or allow_from is printed. The hooks are left out
+// too: a webhook URL or an exec argument can hold a token.
+type configShowJSON struct {
+	File   string `json:"file"`
+	Server struct {
+		Listen   []string `json:"listen"`
+		HostKeys []string `json:"host_keys"`
+	} `json:"server"`
+	Auth struct {
+		Methods []string `json:"methods"`
+	} `json:"auth"`
+	Defaults struct {
+		OnConflict string `json:"on_conflict"`
+	} `json:"defaults"`
+	Mounts map[string]configShowMount `json:"mounts"`
+	Audit  struct {
+		Output string `json:"output"`
+	} `json:"audit"`
+	Reload struct {
+		DisconnectRemovedUsers bool `json:"disconnect_removed_users"`
+	} `json:"reload"`
+}
+
+// configShowMount is a mount of configShowJSON. OnConflict is the mount's
+// own value, which is [defaults]' unless the mount sets it.
+type configShowMount struct {
+	Path       string `json:"path"`
+	ReadOnly   bool   `json:"read_only"`
+	Create     bool   `json:"create"`
+	OnConflict string `json:"on_conflict"`
+}
+
+// newConfigShowJSON describes c, which Validate has accepted.
+func newConfigShowJSON(c *config.Config) configShowJSON {
+	var j configShowJSON
+	j.File = c.File
+	// Copies that are never nil, so that an empty list is [], not null.
+	j.Server.Listen = append([]string{}, c.Server.Listen...)
+	j.Server.HostKeys = append([]string{}, c.Server.HostKeys...)
+	j.Auth.Methods = append([]string{}, c.Auth.Methods...)
+	j.Defaults.OnConflict = c.Defaults.OnConflict
+	j.Mounts = make(map[string]configShowMount, len(c.Mounts))
+	for name, m := range c.Mounts {
+		j.Mounts[name] = configShowMount{Path: m.Path, ReadOnly: m.ReadOnly, Create: m.Create, OnConflict: m.OnConflict}
+	}
+	j.Audit.Output = c.Audit.Output
+	j.Reload.DisconnectRemovedUsers = c.Reload.DisconnectRemovedUsers
+	return j
+}
+
+// writeConfigShowJSON writes the object of config show --json, indented as
+// version --json is, with a newline after it. '&', '<' and '>' in paths
+// are written as they are.
+func writeConfigShowJSON(w io.Writer, c *config.Config) error {
+	j := newConfigShowJSON(c)
+	if err := checkShowUTF8(j); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(j)
+}
+
+// checkShowUTF8 refuses a value that is not valid UTF-8: encoding/json
+// would replace its bytes with U+FFFD, and a path so printed names another
+// file. JSON cannot carry it, so the command fails as for an unusable
+// configuration.
+func checkShowUTF8(j configShowJSON) error {
+	bad := func(field, v string) error {
+		if utf8.ValidString(v) {
+			return nil
+		}
+		return configError{fmt.Errorf("config show --json: %s %q is not valid UTF-8, which JSON cannot carry; use config show", field, v)}
+	}
+	fields := make([][2]string, 0, 2+len(j.Server.Listen)+len(j.Server.HostKeys)+2*len(j.Mounts))
+	fields = append(fields, [2]string{"file", j.File}, [2]string{"audit.output", j.Audit.Output})
+	for _, v := range j.Server.Listen {
+		fields = append(fields, [2]string{"server.listen", v})
+	}
+	for _, v := range j.Server.HostKeys {
+		fields = append(fields, [2]string{"server.host_keys", v})
+	}
+	for name, m := range j.Mounts {
+		fields = append(fields, [2]string{"mounts", name}, [2]string{"mounts." + name + ".path", m.Path})
+	}
+	for _, f := range fields {
+		if err := bad(f[0], f[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newConfigExampleCmd() *cobra.Command {

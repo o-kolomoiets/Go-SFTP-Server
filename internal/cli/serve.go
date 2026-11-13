@@ -53,6 +53,8 @@ type serveOptions struct {
 	auditOutput    string
 	allowRoot      bool
 	ephemeral      bool
+	printDetails   bool
+	stopOnStdinEOF bool
 	usersConf      string
 	// specs are the atmoz user specs given to the root command.
 	specs []string
@@ -85,6 +87,14 @@ once it serves; logs and the audit log go to stderr. It listens on
 127.0.0.1:0 unless --listen says otherwise, ignores $GOSFTPD_CONFIG,
 $GOSFTPD_LISTEN and SIGHUP, and on SIGINT or SIGTERM deletes the key and
 the temporary data.
+
+With --print-details, gosftpd prints the connection details as one JSON
+line on stdout once it serves, instead of the banner on stderr; a start
+that fails prints one JSON line with the error and its kind (listen,
+config, sandbox or other) instead. The audit log must then go to a file.
+With --stop-on-stdin-eof, it stops as on SIGTERM when its stdin, which
+must be a pipe or a socket, reaches end of file: the program that started
+gosftpd holds the other end, and gosftpd stops when that program exits.
 
 Flags override the environment ($GOSFTPD_LISTEN, $GOSFTPD_LOG_LEVEL,
 $GOSFTPD_LOG_FORMAT), which overrides the configuration file.`,
@@ -125,6 +135,8 @@ func serveFlags(f *pflag.FlagSet, o *serveOptions, atmoz bool) {
 	f.StringVar(&o.auditOutput, "audit-output", "stdout", "audit log destination: stdout or a file path (with --ephemeral, stdout is refused and the default goes to stderr)")
 	f.BoolVar(&o.allowRoot, "allow-root", false, "run even as root (not recommended: run as a dedicated user)")
 	f.BoolVar(&o.ephemeral, "ephemeral", false, "serve a temporary directory to user test, for tests; the connection details go to stdout as one JSON line")
+	f.BoolVar(&o.printDetails, "print-details", false, "print the connection details as one JSON line on stdout once serving starts, or the error of a failed start, instead of the banner; the audit log must go to a file")
+	f.BoolVar(&o.stopOnStdinEOF, "stop-on-stdin-eof", false, "stop as on SIGTERM when stdin, a pipe or a socket, reaches end of file; what is written to it is discarded")
 	f.StringVar(&o.usersConf, "users-conf", "", "atmoz mode: a users file of atmoz/sftp user specs, one per line (in the image /etc/sftp/users.conf by default)")
 	if !atmoz {
 		return
@@ -218,6 +230,10 @@ func buildConfig(flags *pflag.FlagSet, o serveOptions, getenv func(string) strin
 	set := applyOverrides(c, flags, o, getenv)
 	var masked []string
 	if reload {
+		// At start runServe checks this, in every mode.
+		if err := checkDetailsAudit(o, c); err != nil {
+			return nil, nil, err
+		}
 		final := map[string]string{"log.level": c.Log.Level, "audit.output": c.Audit.Output}
 		for _, k := range slices.Sorted(maps.Keys(set)) {
 			if c.File != "" && c.Defined(k) && file[k] != final[k] {
@@ -444,6 +460,18 @@ func checkConfig(c *config.Config, checkFS bool) ([]string, error) {
 }
 
 func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv func(string) string, stderr, stdout io.Writer) (err error) {
+	// With --print-details, a start that fails says why on stdout too,
+	// last, with the final error; once serving has started, an error is
+	// no failed start.
+	serving := false
+	if o.printDetails {
+		defer func() {
+			if err != nil && !serving {
+				reportFailure(stdout, err)
+			}
+		}()
+	}
+
 	// SIGHUP reloads. Its default action would kill the process, so it is
 	// caught from the start; a signal during startup waits for the loop.
 	hup, injected := ctx.Value(hupKey{}).(<-chan os.Signal)
@@ -458,6 +486,18 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 
 	if err := checkRoot(o.allowRoot, os.Geteuid()); err != nil {
 		return err
+	}
+	if err := checkDetailsFlags(flags, o); err != nil {
+		return err
+	}
+	var stdin *os.File // with --stop-on-stdin-eof
+	if o.stopOnStdinEOF {
+		if stdin, err = stopStdin(ctx); err != nil {
+			return err
+		}
+		// The program that holds stdin's other end may hold the readers
+		// of stdout and stderr too: when it exits, they go with it.
+		catchSIGPIPE()
 	}
 	mode, modeWarns, err := selectMode(flags, o, getenv)
 	if err != nil {
@@ -479,13 +519,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 				err = errors.Join(err, rerr)
 			}
 		}()
-		// A write to a stdout or stderr whose reader has gone raises
-		// SIGPIPE, whose default action would kill the process before
-		// that clean-up; caught, it makes the write fail with EPIPE.
-		// Caught, not ignored, which a child such as the Landlock probe
-		// would inherit; never stopped, as the clean-up and the error
-		// come last.
-		signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+		// A write to a stdout or stderr whose reader has gone must not
+		// kill the process before that clean-up.
+		catchSIGPIPE()
 		modeWarns = append(modeWarns, eph.warnings...)
 	case modeAtmoz:
 		if c, atm, err = newAtmoz(flags, o, getenv); err != nil {
@@ -496,6 +532,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		if c, _, err = buildConfig(flags, o, getenv, false); err != nil {
 			return err
 		}
+	}
+	if err := checkDetailsAudit(o, c); err != nil {
+		return err
 	}
 	warns, err := checkConfig(c, true)
 	if err != nil {
@@ -601,18 +640,29 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if stdin != nil {
+		// End of file on stdin stops serve as the first SIGTERM does: a
+		// signal after it terminates immediately.
+		var stopOnEOF context.CancelFunc
+		ctx, stopOnEOF = context.WithCancel(ctx)
+		defer stopOnEOF()
+		go watchStdin(ctx, stdin, log, stopOnEOF)
+	}
 
 	var listeners []net.Listener
 	// TCP keepalive finds dead peers before the SSH handshake too; after it,
 	// keepalive@openssh.com requests do (keepalive_interval).
 	lc := net.ListenConfig{KeepAliveConfig: net.KeepAliveConfig{Enable: true, Idle: time.Minute, Interval: 15 * time.Second, Count: 4}}
 	for _, addr := range c.Server.Listen {
-		ln, err := lc.Listen(ctx, "tcp", addr)
+		// Not ctx: a stop asked for while starting (SIGTERM, or end of
+		// file on stdin) would fail the lookup of a host name, which
+		// --print-details would report as a listen error.
+		ln, err := lc.Listen(context.WithoutCancel(ctx), "tcp", addr)
 		if err != nil {
 			for _, l := range listeners {
 				_ = l.Close()
 			}
-			return err
+			return listenError{addr, err}
 		}
 		listeners = append(listeners, ln)
 	}
@@ -623,7 +673,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 			for _, l := range listeners {
 				_ = l.Close()
 			}
-			return err
+			return listenError{c.Metrics.Listen, err}
 		}
 	}
 
@@ -637,7 +687,7 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 		if admin != nil {
 			admin.stop(ctx)
 		}
-		return err
+		return sandboxError{err}
 	}
 	r.ruleset = sb.Ruleset
 	ruleset.Store(sb.Ruleset)
@@ -651,7 +701,9 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	dispatcher.Update(hookSpecs)
 	warnOrphans(ctx, log, hookSpecs)
 
-	printBanner(stderr, bannerInfo{c: c, listeners: listeners, admin: admin, keys: keys, auth: authn, mounts: mounts})
+	if !o.printDetails { // whose line replaces it
+		printBanner(stderr, bannerInfo{c: c, listeners: listeners, admin: admin, keys: keys, auth: authn, mounts: mounts})
+	}
 	addrs := make([]string, len(listeners))
 	for i, ln := range listeners {
 		addrs[i] = ln.Addr().String()
@@ -684,10 +736,15 @@ func runServe(ctx context.Context, flags *pflag.FlagSet, o serveOptions, getenv 
 	}
 	var serveErr error
 	pending := len(listeners)
-	// serve --ephemeral prints its line now that it serves, just before
-	// it reports ready; if it cannot, it stops at once.
-	if eph != nil {
+	// serve --ephemeral and --print-details print their line now that it
+	// serves, just before it reports ready; if they cannot, it stops at
+	// once.
+	serving = true
+	switch {
+	case eph != nil:
 		serveErr = eph.announce(stdout, listeners[0].Addr())
+	case o.printDetails:
+		serveErr = announceDetails(ctx, stdout, listeners, keys, log)
 	}
 	if serveErr == nil {
 		health.SetReady()

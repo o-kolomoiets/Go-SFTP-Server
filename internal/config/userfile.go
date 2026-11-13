@@ -5,9 +5,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,8 +17,8 @@ import (
 )
 
 // Files of users written by gosftpd user add --write and changed by user
-// disable, enable and remove (ROADMAP M4). The main configuration file is
-// never rewritten: its comments would be lost.
+// disable, enable and remove (ROADMAP M4) and user set (ADR 0013). The main
+// configuration file is never rewritten: its comments would be lost.
 
 // UsersFile returns the file user add --write creates for name: NAME.toml
 // in the directory of the first include pattern that matches it, such as
@@ -54,7 +56,15 @@ func (c *Config) CanLogIn(name string) bool {
 	case u == nil, u.Disabled, u.Expires != nil && u.Expires.Before(time.Now()):
 		return false
 	}
-	return c.usesKeys(u) || c.canUsePassword(u)
+	return c.HasLogin(name)
+}
+
+// HasLogin reports whether the user name exists and has a key, password
+// or certificate principal that auth.methods allows, whether or not it is
+// disabled or expired.
+func (c *Config) HasLogin(name string) bool {
+	u := c.Users[name]
+	return u != nil && (c.usesKeys(u) || c.canUsePassword(u))
 }
 
 // ParseUsers decodes the [users.NAME] tables of an included file, as Load
@@ -130,15 +140,239 @@ func EditUser(file string, data []byte, name string, edit UserEdit) (out []byte,
 	out = []byte(strings.Join(lines, ""))
 	after, err := ParseUsers(file, out)
 	if err != nil || !reflect.DeepEqual(before, after) {
-		return nil, false, fmt.Errorf("%s: cannot change user %q without touching the rest of the file; change it by hand", file, name)
+		return nil, false, byHand(file, name)
 	}
 	return out, true, nil
 }
 
+// byHand is the error of an edit that would change more than the user.
+func byHand(file, name string) error {
+	return fmt.Errorf("%s: cannot change user %q without touching the rest of the file; change it by hand", file, name)
+}
+
+// UserChange is what SetUser changes in a user.
+type UserChange struct {
+	// SetAccess replaces the user's whole access with Access, mount name
+	// to permissions; an empty Access leaves the user none.
+	SetAccess bool
+	Access    map[string]string
+	// PasswordHash, unless empty, replaces the user's password_hash.
+	PasswordHash string
+}
+
+// SetUser applies ch to the [users.NAME] table in data, the content of
+// file, keeping everything else, comments included, as EditUser does.
+//   - The new access is written where the old one was: as an inline table
+//     (access = { ... }, with the mounts sorted), or as the keys of the
+//     user's [users.NAME.access] table. A user without access gets the
+//     inline table after its last key.
+//   - The password hash replaces the value of password_hash, or is added
+//     before access.
+//
+// It checks the result by decoding it: every other user and every other
+// field must be unchanged. changed is false when there was nothing to do
+// (the same access and no password).
+func SetUser(file string, data []byte, name string, ch UserChange) (out []byte, changed bool, err error) {
+	before, err := ParseUsers(file, data)
+	if err != nil {
+		return nil, false, err
+	}
+	u, ok := before[name]
+	if !ok {
+		return nil, false, fmt.Errorf("%s does not define user %q", file, name)
+	}
+	setAccess := ch.SetAccess && !maps.Equal(u.Access, ch.Access)
+	if !setAccess && ch.PasswordHash == "" {
+		return data, false, nil
+	}
+	lines := strings.SplitAfter(string(data), "\n")
+	start, end := userSection(lines, name)
+	if start < 0 {
+		return nil, false, fmt.Errorf("%s: no [users.%s] table to edit; change the file by hand", file, name)
+	}
+	nl := "\n"
+	if strings.HasSuffix(lines[start], "\r\n") {
+		nl = "\r\n"
+	}
+	if setAccess {
+		lines = replaceAccess(lines, start, end, name, ch.Access, nl)
+		u.Access = maps.Clone(ch.Access)
+		start, end = userSection(lines, name)
+	}
+	if ch.PasswordHash != "" {
+		lines = setKey(lines, start, end, passwordRE, "password_hash = "+basicString(ch.PasswordHash), nl)
+		u.PasswordHash = ch.PasswordHash
+	}
+	out = []byte(strings.Join(lines, ""))
+	after, err := ParseUsers(file, out)
+	if err != nil || !reflect.DeepEqual(noNilAccess(before), noNilAccess(after)) {
+		return nil, false, byHand(file, name)
+	}
+	return out, true, nil
+}
+
+// replaceAccess writes access into the user's table lines[start:end]:
+// into its [users.NAME.access] table if it has one, else as an inline
+// table in place of the old access key or its dotted keys (access.MOUNT =
+// ...), or after the table's last key.
+func replaceAccess(lines []string, start, end int, name string, access map[string]string, nl string) []string {
+	mounts := slices.Sorted(maps.Keys(access))
+	for i := start + 1; i < end; i++ {
+		m := headerRE.FindStringSubmatch(strings.TrimRight(lines[i], "\r\n"))
+		if m == nil || arrayRE.MatchString(lines[i]) || !slices.Equal(keyPath(m[1]), []string{"users", name, "access"}) {
+			continue
+		}
+		// The table's keys go; its comments stay, after the new keys.
+		body := i + 1
+		for body < end && !headerRE.MatchString(strings.TrimRight(lines[body], "\r\n")) && !arrayRE.MatchString(lines[body]) {
+			if line := strings.TrimSpace(lines[body]); line != "" && line[0] != '#' {
+				lines = slices.Delete(lines, body, body+1)
+				end--
+				continue
+			}
+			body++
+		}
+		keys := make([]string, len(mounts))
+		for j, mount := range mounts {
+			keys[j] = key(mount) + " = " + basicString(access[mount]) + nl
+		}
+		if !strings.HasSuffix(lines[i], "\n") {
+			lines[i] += nl
+		}
+		return slices.Insert(lines, i+1, keys...)
+	}
+
+	pairs := make([]string, len(mounts))
+	for j, mount := range mounts {
+		pairs[j] = key(mount) + " = " + basicString(access[mount])
+	}
+	inline := "access = {}"
+	if len(pairs) > 0 {
+		inline = "access = { " + strings.Join(pairs, ", ") + " }"
+	}
+	// Dotted keys go; the inline table takes the place of the first one.
+	own := ownKeys(lines, start, end)
+	first := -1
+	for i := start + 1; i < own; i++ {
+		if accessDotRE.MatchString(lines[i]) {
+			if first < 0 {
+				first = i
+			}
+			lines = slices.Delete(lines, i, i+1)
+			i--
+			own--
+			end--
+		}
+	}
+	if first >= 0 {
+		return slices.Insert(lines, first, inline+nl)
+	}
+	return setKey(lines, start, end, accessRE, inline, nl)
+}
+
+// setKey replaces the line of the key that re matches among the table's
+// own keys (before any sub-table) with kv, keeping its indentation and
+// comment. Without one, it adds kv before the access key, or after the last
+// key.
+func setKey(lines []string, start, end int, re *regexp.Regexp, kv, nl string) []string {
+	own := ownKeys(lines, start, end)
+	for i := start + 1; i < own; i++ {
+		if m := re.FindStringSubmatch(lines[i]); m != nil {
+			code, comment := splitComment(lines[i])
+			eol := lines[i][len(strings.TrimRight(lines[i], "\r\n")):]
+			if comment != "" {
+				comment = code[len(strings.TrimRight(code, " \t")):] + comment
+			}
+			lines[i] = m[1] + kv + comment + eol
+			return lines
+		}
+	}
+	at := start + 1
+	for i := start + 1; i < own; i++ {
+		if accessRE.MatchString(lines[i]) {
+			at = i
+			break
+		}
+		if line := strings.TrimSpace(lines[i]); line != "" && line[0] != '#' {
+			at = i + 1
+		}
+	}
+	if !strings.HasSuffix(lines[at-1], "\n") {
+		lines[at-1] += nl
+	}
+	return slices.Insert(lines, at, kv+nl)
+}
+
+// ownKeys returns the end of the lines of a table's own keys: the first
+// sub-table header after start, or end.
+func ownKeys(lines []string, start, end int) int {
+	for i := start + 1; i < end; i++ {
+		line := strings.TrimRight(lines[i], "\r\n")
+		if headerRE.MatchString(line) || arrayRE.MatchString(line) {
+			return i
+		}
+	}
+	return end
+}
+
+// splitComment splits a line at the # of its comment, outside strings.
+func splitComment(line string) (code, comment string) {
+	line = strings.TrimRight(line, "\r\n")
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case quote == '"' && c == '\\':
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '#':
+			return line[:i], line[i:]
+		}
+	}
+	return line, ""
+}
+
+// basicString quotes s as a TOML basic string.
+func basicString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// noNilAccess gives the users without an access table an empty one, which
+// decodes the same.
+func noNilAccess(users map[string]*User) map[string]*User {
+	for _, u := range users {
+		if u.Access == nil {
+			u.Access = map[string]string{}
+		}
+	}
+	return users
+}
+
 var (
-	headerRE   = regexp.MustCompile(`^\s*\[\s*([^\[\]]*?)\s*\]\s*(?:#.*)?$`)
-	arrayRE    = regexp.MustCompile(`^\s*\[\[`)
-	disabledRE = regexp.MustCompile(`^(\s*disabled\s*=\s*)(true|false)(\s*(?:#.*)?)$`)
+	headerRE    = regexp.MustCompile(`^\s*\[\s*([^\[\]]*?)\s*\]\s*(?:#.*)?$`)
+	arrayRE     = regexp.MustCompile(`^\s*\[\[`)
+	disabledRE  = regexp.MustCompile(`^(\s*disabled\s*=\s*)(true|false)(\s*(?:#.*)?)$`)
+	accessRE    = regexp.MustCompile(`^(\s*)(?:access|"access"|'access')\s*=`)
+	accessDotRE = regexp.MustCompile(`^\s*(?:access|"access"|'access')\s*\.`)
+	passwordRE  = regexp.MustCompile(`^(\s*)(?:password_hash|"password_hash"|'password_hash')\s*=`)
 )
 
 func isComment(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "#") }

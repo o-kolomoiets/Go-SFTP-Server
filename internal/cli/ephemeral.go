@@ -3,12 +3,10 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -282,13 +280,9 @@ func detailsHost(addr net.Addr) (string, int) {
 // announce writes the details of the server listening on addr to w, as one
 // line in one write.
 func (e *ephemeral) announce(w io.Writer, addr net.Addr) error {
-	var b bytes.Buffer
-	enc := json.NewEncoder(&b) // a newline after the object
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(e.details(addr)); err != nil { //nolint:gosec // G117: the password is in the line by design, for the test that started gosftpd
-		return err
-	}
-	if _, err := w.Write(b.Bytes()); err != nil {
+	// The password is in the line by design, for the test that started
+	// gosftpd.
+	if err := writeLine(w, e.details(addr)); err != nil {
 		return fmt.Errorf("writing the connection details: %w", err)
 	}
 	return nil
