@@ -534,3 +534,68 @@ func TestInitForceSymlink(t *testing.T) {
 		t.Errorf("the link or its file changed: %v, %v", fi, err)
 	}
 }
+
+// TestInitForceHostKeyFirst: with --force, a host key that cannot be made
+// fails init before the rename, so that exit status 2 leaves the old file.
+func TestInitForceHostKeyFirst(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test cannot write to")
+	}
+	dir, keys := initSetup(t)
+	out := filepath.Join(dir, "gosftpd.toml")
+	runInitOK(t, "--out", out, "--state-dir", filepath.Join(dir, "state"), "--user", "alice", "--authorized-keys", keys, "--dir", "inbox="+filepath.Join(dir, "inbox"))
+	before := initRead(t, out)
+	ro := filepath.Join(dir, "ro")
+	if err := os.Mkdir(ro, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
+
+	code, stdout, stderr := execute(t, "init", "--force", "--out", out, "--state-dir", filepath.Join(ro, "sub"), "--no-user", "--dir", "inbox="+filepath.Join(dir, "inbox"))
+	if code != exitUsage || !strings.Contains(stderr, "host key: ") {
+		t.Errorf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	if after := initRead(t, out); !bytes.Equal(after, before) {
+		t.Errorf("the file changed:\n%s", after)
+	}
+	if tmp := initLeftovers(t, dir); len(tmp) > 0 {
+		t.Errorf("temporary files left: %q", tmp)
+	}
+}
+
+// TestInitForceNamesTheFile: the problems of a refused --force name the
+// file it was to write, not the temporary file, which is gone.
+func TestInitForceNamesTheFile(t *testing.T) {
+	dir, keys := initSetup(t)
+	out := filepath.Join(dir, "gosftpd.toml")
+	state := filepath.Join(dir, "state")
+	runInitOK(t, "--out", out, "--state-dir", state, "--no-user", "--dir", "inbox="+filepath.Join(dir, "inbox"))
+	if code, _, stderr := execute(t, "user", "add", "bob", "--key", authorizedKey(newSigner(t)), "--access", "inbox=upload", "--write", "--config", out); code != exitOK {
+		t.Fatalf("user add: exit %d: %s", code, stderr)
+	}
+	// bob is defined in users.d already: the new file may not define him.
+	code, stdout, stderr := execute(t, "init", "--force", "--out", out, "--state-dir", state, "--user", "bob", "--authorized-keys", keys, "--dir", "inbox="+filepath.Join(dir, "inbox"))
+	if code != exitUsage || !strings.Contains(stderr, "already defined in "+out) {
+		t.Errorf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, ".tmp") {
+		t.Errorf("the error names the temporary file:\n%s", stderr)
+	}
+}
+
+// TestInitNoCreateUserMount: with --no-create, a {user} mount needs its
+// parent directory, as config validate --check-fs checks it.
+func TestInitNoCreateUserMount(t *testing.T) {
+	dir, _ := initSetup(t)
+	homes := filepath.Join(dir, "homes")
+	if err := os.Mkdir(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "gosftpd.toml")
+	runInitOK(t, "--out", out, "--state-dir", filepath.Join(dir, "state"), "--no-user", "--no-create", "--dir", "home="+filepath.Join(homes, "{user}"))
+	initValid(t, out)
+	code, stdout, stderr := execute(t, "init", "--out", filepath.Join(dir, "other.toml"), "--state-dir", filepath.Join(dir, "state"), "--no-user", "--no-create", "--dir", "home="+filepath.Join(dir, "missing", "{user}"))
+	if code != exitUsage || !strings.Contains(stderr, filepath.Join(dir, "missing")+" does not exist") {
+		t.Errorf("exit %d\n%s%s", code, stdout, stderr)
+	}
+}

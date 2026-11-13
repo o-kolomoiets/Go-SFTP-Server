@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/o-kolomoiets/go-sftp-server/internal/auth"
 	"github.com/o-kolomoiets/go-sftp-server/internal/config"
@@ -173,9 +174,22 @@ func runInit(w, errOut io.Writer, o initOptions) (err error) {
 	// it: under Landlock, an include directory that is missing at start
 	// needs a restart for its first file (ADR 0011).
 	usersDir := filepath.Join(filepath.Dir(o.out), "users.d")
-	var madeUsersDir bool
+	var (
+		madeUsersDir bool
+		k            ssh.Signer
+		generated    bool
+	)
+	loadKey := func() error {
+		var err error
+		if k, generated, err = hostkey.LoadOrGenerate(keyPath); err != nil {
+			return configError{fmt.Errorf("host key: %w", err)}
+		}
+		return nil
+	}
 	if o.force {
-		madeUsersDir, err = replaceConfig(errOut, o.out, data, usersDir)
+		// The host key is loaded or generated before the rename, so that
+		// exit status 2 always means that the old file is as it was.
+		madeUsersDir, err = replaceConfig(errOut, o.out, data, usersDir, loadKey)
 		if err != nil {
 			return err
 		}
@@ -192,12 +206,11 @@ func runInit(w, errOut io.Writer, o initOptions) (err error) {
 		if madeUsersDir, err = makeUsersDir(usersDir, cfg); err != nil {
 			return err
 		}
+		if err := loadKey(); err != nil {
+			return err
+		}
 	}
 
-	k, generated, err := hostkey.LoadOrGenerate(keyPath)
-	if err != nil {
-		return configError{fmt.Errorf("host key: %w", err)}
-	}
 	state := "existing"
 	if generated {
 		state = "generated"
@@ -313,13 +326,19 @@ func initMounts(o initOptions) ([]initMount, error) {
 			return nil, usageError{fmt.Errorf("--dir %q: the mount name %q is used twice; name them with --dir NAME=PATH", d, n)}
 		}
 		if o.noCreate {
-			switch fi, err := os.Stat(abs); {
+			check := abs
+			if filepath.Base(abs) == vfs.UserPlaceholder {
+				// One directory per user below it, as config validate
+				// --check-fs checks it: the parent must exist.
+				check = filepath.Dir(abs)
+			}
+			switch fi, err := os.Stat(check); {
 			case errors.Is(err, fs.ErrNotExist):
-				return nil, usageError{fmt.Errorf("--dir %q: %s does not exist, and with --no-create it is never created", d, abs)}
+				return nil, usageError{fmt.Errorf("--dir %q: %s does not exist, and with --no-create it is never created", d, check)}
 			case err != nil:
 				return nil, usageError{fmt.Errorf("--dir %q: %w", d, err)}
 			case !fi.IsDir():
-				return nil, usageError{fmt.Errorf("--dir %q: %s is not a directory", d, abs)}
+				return nil, usageError{fmt.Errorf("--dir %q: %s is not a directory", d, check)}
 			}
 		}
 		seen[strings.ToLower(n)] = true
@@ -415,10 +434,10 @@ func initFile(o initOptions, name, keysFile, keyPath, auditOut string, mounts []
 // replaceConfig writes data to path for init --force: to a temporary file
 // in the same directory, renamed to path only once the new configuration,
 // with the files it includes, passes the checks of config validate
-// --check-fs. It creates usersDir before the check, as init does, and
-// reports whether it did. On a failure path stays as it was, and what
-// replaceConfig created is removed.
-func replaceConfig(errOut io.Writer, path string, data []byte, usersDir string) (madeUsersDir bool, err error) {
+// --check-fs, and once beforeRename (the host key) has succeeded. It creates
+// usersDir before the check, as init does, and reports whether it did. On a
+// failure path stays as it was, and what replaceConfig created is removed.
+func replaceConfig(errOut io.Writer, path string, data []byte, usersDir string, beforeRename func() error) (madeUsersDir bool, err error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return false, err
@@ -437,7 +456,10 @@ func replaceConfig(errOut io.Writer, path string, data []byte, usersDir string) 
 	}
 	tmp, err := writeTemp(abs, data, old)
 	if err != nil {
-		return false, err
+		// --force writes next to the file and renames: its directory must
+		// exist and be writable. The temporary name means nothing to the
+		// caller.
+		return false, configError{fmt.Errorf("%s (not written): --force writes a temporary file in %s and renames it, so that directory must exist and be writable: %w", path, filepath.Dir(abs), errors.Unwrap(err))}
 	}
 	defer func() {
 		if err != nil {
@@ -458,6 +480,9 @@ func replaceConfig(errOut io.Writer, path string, data []byte, usersDir string) 
 		return madeUsersDir, err
 	}
 	if err = checkNewConfig(errOut, tmp, abs); err != nil {
+		return madeUsersDir, err
+	}
+	if err = beforeRename(); err != nil {
 		return madeUsersDir, err
 	}
 	return madeUsersDir, os.Rename(tmp, abs)
@@ -506,7 +531,7 @@ func writeTemp(path string, data []byte, like fs.FileInfo) (string, error) {
 func checkNewConfig(errOut io.Writer, tmp, path string) error {
 	c, err := config.Load(tmp)
 	if err != nil {
-		return notWritten(path, err)
+		return notWritten(path, renamed(err, tmp, path))
 	}
 	// Messages name the file as it will be. Files keeps tmp, for the
 	// checks of its mode and owner, which the rename keeps.
@@ -534,9 +559,29 @@ func checkNewConfig(errOut io.Writer, tmp, path string) error {
 		fmt.Fprintln(errOut, "warning:", strings.ReplaceAll(w, tmp, path))
 	}
 	if err != nil {
-		return notWritten(path, err)
+		return notWritten(path, renamed(err, tmp, path))
 	}
 	return nil
+}
+
+// renamed returns err with every mention of tmp, the temporary file that is
+// gone once init --force fails, replaced by path. A joined error stays one
+// error per problem, as problemsError prints them.
+func renamed(err error, tmp, path string) error {
+	if pe, ok := errors.AsType[problemsError](err); ok {
+		return problemsError{strings.ReplaceAll(pe.file, tmp, path), renamed(pe.err, tmp, path)}
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var errs []error
+		for _, e := range joined.Unwrap() {
+			errs = append(errs, errors.New(strings.ReplaceAll(e.Error(), tmp, path)))
+		}
+		return errors.Join(errs...)
+	}
+	if !strings.Contains(err.Error(), tmp) {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), tmp, path))
 }
 
 // notWritten is a problem of the new configuration file path, which init
