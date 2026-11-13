@@ -385,6 +385,7 @@ func setUser(in io.Reader, out, errOut io.Writer, name string, o userSetOptions)
 	if err != nil {
 		return configError{err}
 	}
+	could := c.HasLogin(name)
 	next := users[name]
 	next.From = u.From
 	c.Users[name] = next
@@ -394,8 +395,12 @@ func setUser(in io.Reader, out, errOut io.Writer, name string, o userSetOptions)
 	}
 	printUserWarnings(errOut, name, warns)
 	// Unlike user add, a disabled or expired user is no reason to refuse:
-	// set does not change that, and a disabled user may lose a mount.
-	if !c.HasLogin(name) && !o.force {
+	// set does not change that, and a disabled user may lose a mount. Nor is
+	// a user who could not log in before and whose access alone changes:
+	// set leaves the credentials as they were, and a folder must be taken
+	// from everyone before it is removed. A change that takes the login
+	// away, or a password that cannot be used, is refused.
+	if !c.HasLogin(name) && (could || ch.PasswordHash != "") && !o.force {
 		return usageError{fmt.Errorf("%s could not log in (see the warnings); pass --force to write it anyway", name)}
 	}
 	if err := writeUsersFile(u.From, data, fi.Mode().Perm(), fi, false); err != nil {

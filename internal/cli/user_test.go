@@ -261,8 +261,7 @@ func TestUserSetRefuses(t *testing.T) {
 		{[]string{"bob", "--access", "inbox"}, "", `--access "inbox": want MOUNT=PERMISSIONS`},
 		{[]string{"bob", "--access", "inbox=read", "--access", "inbox=full"}, "", `--access: mount "inbox" given twice`},
 		{[]string{"bob", "--access", "outbox=read"}, "", `users.bob.access (` + team + `): unknown mount "outbox"`},
-		{[]string{"pat", "--access", "inbox=read"}, "", "pat could not log in (see the warnings); pass --force to write it anyway"},
-		{[]string{"pat", "--password-stdin"}, "new\n", "pat could not log in"},
+		{[]string{"pat", "--password-stdin"}, "new\n", "pat could not log in (see the warnings); pass --force to write it anyway"},
 		{nil, "", "accepts 1 arg(s), received 0"},
 	} {
 		args := append([]string{"user", "set"}, tt.args...)
@@ -283,9 +282,16 @@ func TestUserSetRefuses(t *testing.T) {
 		t.Errorf("users.d holds %d entries, want 2 (no temporary files)", len(des))
 	}
 
-	// --force writes a user that cannot log in, with the warnings.
-	code, out, errOut := execute(t, "user", "set", "pat", "--access", "inbox=read", "--force", "--config", path)
+	// pat could not log in before: a change of access alone, which leaves
+	// the credentials as they were, is written, with the warnings. So a
+	// folder can be taken from everyone before it is removed.
+	code, out, errOut := execute(t, "user", "set", "pat", "--access", "inbox=read", "--config", path)
 	if code != exitOK || !strings.Contains(errOut, `warning: users.pat.password_hash (`+pat+`): ignored: auth.methods does not include "password"`) {
+		t.Errorf("access only: exit %d: %s%s", code, out, errOut)
+	}
+	// --force writes a password that cannot be used, with the warnings.
+	code, out, errOut = executeWithStdin(t, "new\n", "user", "set", "pat", "--password-stdin", "--force", "--config", path)
+	if code != exitOK || !strings.Contains(errOut, `ignored: auth.methods does not include "password"`) {
 		t.Errorf("--force: exit %d: %s%s", code, out, errOut)
 	}
 	// A disabled user is no reason to refuse: set does not change that.
