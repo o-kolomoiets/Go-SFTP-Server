@@ -15,7 +15,7 @@ The plan, rationale and acceptance criteria are in [ROADMAP.md](ROADMAP.md). Thi
 | M3b Windows | — | ⬜ | 0 / 3 |
 | M4 Multi-user and Ops | v0.4.0 | ✅ | 9 / 9 |
 | M5 Distribution | v0.5.0 | ✅ | 13 / 13 |
-| M5b Desktop GUI | v0.6.0 | 🔄 | 1 / 8 |
+| M5b Desktop GUI | v0.6.0 | 🔄 | 2 / 8 |
 | M6 v1.0 | v1.0.0 | ⬜ | 0 / 8 |
 
 ## M0: Foundation and cleanup
@@ -164,8 +164,8 @@ A desktop application, `gosftpd-gui`, for people who do not use the command line
 | ID | Task | Status |
 |---|---|---|
 | M5b-01 | ADR 0013: toolkit after a prototype of the same screen in each candidate, a separate `gosftpd-gui` binary (the server stays static and CGO-free), share a folder vs manage an installed server, security model, packaging and signing (D22) | ✅ |
-| M5b-02 | The CLI additions (`serve --print-details`, `--stop-on-stdin-eof`; `init` flags and a checked `--force`; `user set`, `--password-stdin`, `user list --json`; `config show --json`) and `gui/cmd/gosftpd-gui` with its supervisor (ADR 0013) | 🔄 |
-| M5b-03 | First run and share a folder: folders, a user with a password or key, host key, start and stop, connection details to copy | ⬜ |
+| M5b-02 | The CLI additions (`serve --print-details`, `--stop-on-stdin-eof`; `init` flags and a checked `--force`; `user set`, `--password-stdin`, `user list --json`; `config show --json`) and the `gui/` module with its supervisor, `gui/internal/supervisor` (ADR 0013); the command comes with its first screen (M5b-03) | ✅ |
+| M5b-03 | `gui/cmd/gosftpd-gui` with Qt 6 through miqt (the `gui` CI job gets Qt), first run and share a folder: folders, a user with a password or key, host key, start and stop, connection details to copy | ⬜ |
 | M5b-04 | Users and folders: add, disable, remove, permissions, `on_conflict`, applied by a reload; a restart only when the reload asks for one, and never without the person's say while someone is connected | ⬜ |
 | M5b-05 | Activity: state, sessions, latest transfers from the audit log, warnings in plain words | ⬜ |
 | M5b-06 | Manage an installed server (package, systemd, Docker): moved to row 15 of the post-1.0 backlog by ADR 0013 (Q4), to be planned after v0.6.0 | ↪ |
@@ -226,3 +226,4 @@ A desktop application, `gosftpd-gui`, for people who do not use the command line
 | 2026-11-12 | `github.com/spf13/pflag` v1.1.0 and `golang.org/x/sys` v0.50.0, as Dependabot's [o-kolomoiets/Go-SFTP-Server#48](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/48) proposed; `TestRootHelp` no longer depends on the column width of `--help` | [o-kolomoiets/Go-SFTP-Server#53](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/53) |
 | 2026-11-12 | M5b-01: ADR 0013 after a prototype of the same screen in Fyne, Gio, Wails and Qt (miqt), with the build, run, upload and AT-SPI checks of each, and three review rounds (52, 35 and 10 confirmed findings); the owner chose Qt 6 through miqt, no Apple Developer ID for now, closing the window stops sharing, and managing an installed server after v0.6.0 | [o-kolomoiets/Go-SFTP-Server#54](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/54) |
 | 2026-11-13 | M5b-02, part 1: the CLI additions of ADR 0013 for the GUI: `serve --print-details` (the connection details, or the failure, as one JSON line) and `--stop-on-stdin-eof` (a killed GUI leaves a drain and `server.stop`, not a server running unseen); `init --state-dir`, `--listen`, `--audit-output`, `--on-conflict`, `--read-only`, `--password-logins`, `--disconnect-removed-users`, `--no-user`, `--no-create` and a checked, atomic `--force`; `user set`, `--password-stdin`, `user list --json`; `config show --json`. Written in four parts in parallel, reviewed from five angles with each finding checked by a second reviewer (13 confirmed, fixed); ADR 0013 revised where the implementation found it wrong | [o-kolomoiets/Go-SFTP-Server#55](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/55) |
+| 2026-11-19 | M5b-02, part 2: the `gui/` module and its supervisor, `gui/internal/supervisor`, which knows no toolkit. It finds the gosftpd shipped with the GUI (never `PATH`) and checks its version; changes the configuration and the people only through gosftpd commands, with the lifecycle rules of ADR 0013 (password logins on while anyone has a password, a folder taken from everyone before it goes, never the last folder); runs `serve --print-details --stop-on-stdin-eof` with a cleaned environment and its own process group; reloads one at a time and reads the result from the audit log; stops, stops now, restarts; follows the audit log for who is connected and the latest transfers; one GUI per user, and no second server while a killed GUI's still drains. Tested against this commit's gosftpd with OpenSSH `sftp`, including a GUI killed with SIGKILL. A `gui` CI job, a Dependabot directory and `make` targets | [o-kolomoiets/Go-SFTP-Server#60](https://github.com/o-kolomoiets/Go-SFTP-Server/pull/60) |

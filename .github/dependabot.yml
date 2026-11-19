@@ -26,6 +26,15 @@ updates:
       tools:
         update-types: [minor, patch]
 
+  # gui/go.mod is the desktop GUI's module (ADR 0013).
+  - package-ecosystem: gomod
+    directory: /gui
+    schedule:
+      interval: weekly
+    groups:
+      gui:
+        update-types: [minor, patch]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
