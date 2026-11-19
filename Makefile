@@ -9,8 +9,9 @@ all: lint test build
 build: ## Build bin/gosftpd
 	$(GO) build -trimpath -o bin/gosftpd ./cmd/gosftpd
 
-test: ## Run unit tests with the race detector
+test: ## Run unit tests with the race detector, also of gui/
 	$(GO) test -race -shuffle=on -count=1 ./...
+	cd gui && $(GO) test -race -shuffle=on -count=1 ./...
 
 interop: ## OpenSSH sftp/scp/ssh against a fresh build
 	test/interop/run.sh
@@ -19,18 +20,21 @@ lint: ## gofmt, go vet, golangci-lint, actionlint
 	@unformatted="$$(gofmt -l .)"; if [ -n "$$unformatted" ]; then echo "$$unformatted"; exit 1; fi
 	$(GO) vet ./...
 	$(GOLANGCI_LINT) run ./...
+	cd gui && $(GO) vet ./... && $(GOLANGCI_LINT) run ./...
 	$(TOOL) actionlint
 
 fmt: ## Apply gofumpt and goimports
 	$(GOLANGCI_LINT) fmt ./...
 
-tidy: ## Tidy both modules
+tidy: ## Tidy the three modules
 	$(GO) mod tidy
 	cd tools && $(GO) mod tidy
+	cd gui && $(GO) mod tidy
 
-vuln: ## Scan both modules for known vulnerabilities
+vuln: ## Scan the three modules for known vulnerabilities
 	$(TOOL) govulncheck ./...
 	cd tools && $(GO) tool govulncheck tool
+	cd gui && $(GO) tool -modfile=../tools/go.mod govulncheck ./...
 
 staticcheck: ## Run staticcheck standalone (also runs inside golangci-lint)
 	$(TOOL) staticcheck ./...

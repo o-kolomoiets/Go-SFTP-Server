@@ -744,11 +744,40 @@ jobs:
         working-directory: tools
         run: go tool govulncheck tool
 
+  # The desktop GUI's module, gui/ (ADR 0013): a module of its own, which
+  # the jobs above do not build. The supervisor's tests build this
+  # commit's gosftpd and run it as the GUI will, with OpenSSH sftp.
+  gui:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - name: go mod tidy
+        run: go mod tidy -diff
+      - name: go vet
+        run: go vet ./...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+          working-directory: gui
+      - name: test
+        run: go test -race -shuffle=on -count=1 ./...
+      - name: govulncheck
+        run: go tool -modfile=../tools/go.mod govulncheck ./...
+
   # The only required status check: matrix jobs report as "test (…)",
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln, gui]
     runs-on: ubuntu-24.04
     permissions:
       actions: read # the jobs of this run
