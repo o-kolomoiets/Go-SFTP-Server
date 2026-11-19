@@ -559,16 +559,20 @@ install to a package, follow
 the [changelog](CHANGELOG.md#050---2026-11-03) lists everything else.
 
 Next is v0.6: `gosftpd-gui`, a desktop app for people who never open a
-terminal, first on Linux and macOS. In it they will choose the folders to
+terminal, first on Linux and macOS. In it they choose the folders to
 share, add the people who may upload, start and stop sharing, copy the
-connection details and see who uploaded what. Its design record,
-[ADR 0013](docs/adr/0013-desktop-gui.md), chose Qt 6 after the same screen
-was prototyped in four toolkits; the code is not written yet. The app
-will be a separate program with no listener of its own, not a web UI. It
-will run `gosftpd` as a child process and change the configuration only
-through gosftpd's commands, so `gosftpd` stays a single static program;
-it will gain a few command-line options the app uses (see the
-[roadmap](#roadmap)).
+connection details and see who uploaded what. Its screens are written
+and in `main`; v0.6.0 ships them once their Linux packages and macOS app
+are built and tested (see the [roadmap](#roadmap)). Its design record,
+[ADR 0013](docs/adr/0013-desktop-gui.md), chose Qt 6 after the same
+screen was prototyped in four toolkits. The app is a separate program
+with no listener of its own, not a web UI. It runs `gosftpd` as a child
+process and changes the configuration only through gosftpd's commands,
+so `gosftpd` stays a single static program.
+
+<p align="center">
+  <img src="docs/assets/gui-demo.gif" width="760" alt="Recording of gosftpd-gui on Linux, with the partner's terminal on the right. In the window, Add folder… opens the folder dialog and /home/alex/Inbox is chosen; it is listed as Inbox, People may upload. A person named partner is added with a public key, and Start sharing shows the connection details: host vm, port 2022, user partner, the SHA256 host key fingerprint, the known_hosts line and the command sftp -P 2022 partner@vm. In the terminal, the partner runs that command, with the known_hosts line checking the host key, uploads report.pdf twice and lists two files, report.pdf and report (1).pdf. The window's Activity says that it is sharing with Landlock (v5) and that partner is connected, and lists both uploads, 48.0 kB each, the second as uploaded under another name because /report.pdf existed. Finally Disable partner is pressed: the window lists partner as disabled and the terminal says Connection closed.">
+</p>
 
 ## What gosftpd is not
 
