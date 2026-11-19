@@ -42,6 +42,9 @@ type App struct {
 	// Version is the GUI's own: Start refuses a gosftpd of another
 	// version. A development build leaves it empty.
 	Version string
+	// PrefsPath is the GUI's preferences file (gosftpd-gui.conf), where
+	// Clear activity keeps its place in the audit log; "" keeps none.
+	PrefsPath string
 
 	mu       sync.Mutex
 	srv      *supervisor.Server
@@ -58,8 +61,9 @@ type App struct {
 // logEntry is a warning or error of gosftpd's operational log, numbered
 // so that a reload can tell what it logged.
 type logEntry struct {
-	seq  int
-	text string
+	seq   int
+	text  string // as gosftpd wrote it
+	plain string // in plain words, when it is a known one
 }
 
 func (a *App) admin() supervisor.Admin { return supervisor.Admin{G: a.G} }
@@ -116,6 +120,9 @@ func (a *App) Load(ctx context.Context) (Current, error) {
 	if err != nil {
 		return Current{}, err
 	}
+	// The first read of the audit log may be long: here, off the
+	// window's thread, and not at its first Poll.
+	_, _ = a.Poll()
 	return Current{Configured: true, Settings: s, Reset: reset, People: ps}, nil
 }
 
@@ -280,11 +287,6 @@ func (a *App) Start(ctx context.Context, waiting func(pid int)) (supervisor.Deta
 	if err := a.waitPrevious(ctx, waiting); err != nil {
 		return supervisor.Details{}, err
 	}
-	// Who is connected comes from the events of this server only.
-	f := supervisor.NewFollower(a.G.Layout.AuditLog())
-	if err := f.Skip(); err != nil {
-		return supervisor.Details{}, err
-	}
 	a.mu.Lock()
 	a.logTail = nil
 	a.mu.Unlock()
@@ -299,7 +301,11 @@ func (a *App) Start(ctx context.Context, waiting func(pid int)) (supervisor.Deta
 		}
 	}
 	a.mu.Lock()
-	a.srv, a.stopping, a.follower, a.activity = srv, false, f, supervisor.Activity{}
+	// Nobody is connected to a server that just started: sessions in the
+	// log before its server.start, of a server that died without
+	// server.stop, are not counted.
+	a.srv, a.stopping = srv, false
+	a.activity.Exited()
 	a.mu.Unlock()
 	return srv.Details, nil
 }
@@ -337,7 +343,7 @@ func (a *App) log(r supervisor.LogRecord) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.logSeq++
-	a.logTail = append(a.logTail, logEntry{seq: a.logSeq, text: FormatRecord(r)})
+	a.logTail = append(a.logTail, logEntry{seq: a.logSeq, text: FormatRecord(r), plain: PlainRecord(r)})
 	if len(a.logTail) > maxLogTail {
 		a.logTail = a.logTail[len(a.logTail)-maxLogTail:]
 	}
@@ -442,7 +448,7 @@ func (a *App) Exited() error {
 		a.mu.Unlock()
 		return nil
 	}
-	a.srv, a.stopping, a.follower = nil, false, nil
+	a.srv, a.stopping = nil, false
 	a.activity.Exited()
 	tail := a.logTexts()
 	a.mu.Unlock()
@@ -475,21 +481,21 @@ func stoppedBySignal(err error) bool {
 	return ok && ws.Signaled() && (ws.Signal() == syscall.SIGTERM || ws.Signal() == syscall.SIGKILL)
 }
 
-// Poll reads the audit events gosftpd wrote since the last Poll and
-// returns who is connected, the oldest first, and whether gosftpd said it
-// serves (server.start). It does nothing when the App does not share.
+// Poll reads the audit events gosftpd wrote since the last Poll, from
+// where Clear activity left the view, and returns who is connected, the
+// oldest first: nobody when the App does not share.
 func (a *App) Poll() (connected []supervisor.Session, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.follower == nil {
-		return nil, nil
-	}
-	events, reset, err := a.follower.Poll()
+	events, reset, err := a.followerLocked().Poll()
 	if reset {
 		a.activity.Reset()
 	}
 	for _, e := range events {
 		a.activity.Apply(e)
+	}
+	if a.srv == nil {
+		return nil, err
 	}
 	return a.activity.Connected(), err
 }

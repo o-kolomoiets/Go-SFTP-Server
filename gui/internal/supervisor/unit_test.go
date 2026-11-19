@@ -211,6 +211,30 @@ func TestFollower(t *testing.T) {
 	}
 }
 
+func TestFollowerResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f := NewFollower(path)
+	appendLine(t, path, `{"event":"fs.upload","path":"/a"}`+"\n"+`{"event":"fs.up`)
+	if ev, _, _ := f.Poll(); len(ev) != 1 || f.Position() == f.Offset() {
+		t.Fatalf("first poll: %+v, position %d, offset %d", ev, f.Position(), f.Offset())
+	}
+	pos := f.Position()
+	appendLine(t, path, `load","path":"/b"}`+"\n")
+
+	// A follower started later goes on from the position: /b, not /a.
+	g := NewFollower(path)
+	g.Resume(pos)
+	if ev, reset, err := g.Poll(); err != nil || reset || len(ev) != 1 || ev[0].Path != "/b" {
+		t.Errorf("after Resume: %+v, reset %v, %v", ev, reset, err)
+	}
+	// A shorter file is read from its start.
+	h := NewFollower(path)
+	h.Resume(1 << 20)
+	if ev, reset, _ := h.Poll(); !reset || len(ev) != 2 {
+		t.Errorf("Resume past the end: %d events, reset %v", len(ev), reset)
+	}
+}
+
 func TestFollowerSkip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	f := NewFollower(path)

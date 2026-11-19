@@ -23,8 +23,12 @@ type Event struct {
 	SessionID       string    `json:"session_id"`
 	User            string    `json:"user"`
 	RemoteAddr      string    `json:"remote_addr"`
+	Op              string    `json:"op"`
 	Path            string    `json:"path"`
+	TargetPath      string    `json:"target_path"`
 	FinalPath       string    `json:"final_path"`
+	VersionPath     string    `json:"version_path"`
+	Mount           string    `json:"mount"`
 	Conflict        string    `json:"conflict"`
 	Bytes           int64     `json:"bytes"`
 	Result          string    `json:"result"`
@@ -70,6 +74,18 @@ func NewFollower(path string) *Follower { return &Follower{path: path} }
 
 // Offset is how far Poll has read.
 func (f *Follower) Offset() int64 { return f.off }
+
+// Position is where the next event begins: Offset less a line still
+// being written. A follower moved there with Seek reads every event
+// after those Poll returned.
+func (f *Follower) Position() int64 { return f.off - int64(len(f.partial)) }
+
+// Resume makes Poll read from off, the Position of an earlier follower of
+// the same file. A log shorter than off, or another file, is read from
+// its start, with reset.
+func (f *Follower) Resume(off int64) {
+	f.off, f.partial, f.last = off, nil, nil
+}
 
 // Skip moves to the end of the log without reading it: Poll then returns
 // only the events written after. A log that does not exist yet is
