@@ -15,11 +15,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/o-kolomoiets/go-sftp-server/gui/internal/gosftpdtest"
 )
 
 // testBin is gosftpd built from this repository, the parent module: the
@@ -31,20 +32,13 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	code := func() int {
-		dir, err := os.MkdirTemp("", "gosftpd-gui-test-")
+		bin, clean, err := gosftpdtest.Build(filepath.Join("..", "..", ".."))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		defer os.RemoveAll(dir)
-		testBin = filepath.Join(dir, "gosftpd")
-		build := exec.CommandContext(context.Background(), "go", "build", "-o", testBin, "./cmd/gosftpd")
-		build.Dir = filepath.Join("..", "..", "..") // the repository's root
-		build.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := build.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "building gosftpd: %v\n%s", err, out)
-			return 1
-		}
+		defer clean()
+		testBin = bin
 		return m.Run()
 	}()
 	os.Exit(code)
@@ -54,9 +48,7 @@ func TestMain(m *testing.M) {
 // share. gosftpd refuses to run as root.
 func newGosftpd(t *testing.T) (Gosftpd, string) {
 	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("gosftpd refuses to run as root")
-	}
+	gosftpdtest.SkipRoot(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GOSFTPD_LISTEN", ":1") // must not reach gosftpd (childEnv)
 	dir := t.TempDir()
@@ -118,6 +110,13 @@ func TestAdmin(t *testing.T) {
 	// The first person with a password turns password logins on.
 	if _, err := a.AddWithPassword(ctx, "alice", "a\nb", map[string]string{"Inbox": "upload"}); err == nil {
 		t.Error("a password with a line break was accepted")
+	}
+	// A name gosftpd refuses leaves password logins off.
+	if _, err := a.AddWithPassword(ctx, "Bad Name", "secret", map[string]string{"Inbox": "upload"}); err == nil {
+		t.Error("gosftpd accepted the user name \"Bad Name\"")
+	}
+	if s, _, _ := a.Read(ctx); s.PasswordLogins {
+		t.Error("password logins are on after a refused add")
 	}
 	if _, err := a.AddWithPassword(ctx, "alice", "secret one", map[string]string{"Inbox": "upload", "Photos": "read"}); err != nil {
 		t.Fatal(err)
@@ -188,10 +187,30 @@ func TestAdmin(t *testing.T) {
 	if s, _, _ := a.Read(ctx); s.PasswordLogins {
 		t.Error("password logins are on with nobody who has a password")
 	}
-}
 
-func settingsEqual(a, b Settings) bool {
-	return slices.Equal(a.Folders, b.Folders) && slices.Equal(a.Listen, b.Listen) && a.OnConflict == b.OnConflict && a.PasswordLogins == b.PasswordLogins
+	// Change writes only what changed, whatever the order of the folders.
+	before, err := os.Stat(g.Layout.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Change(ctx, func(*Settings) {}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Change(ctx, func(s *Settings) { slices.Reverse(s.Folders) }); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := os.Stat(g.Layout.Config()); err != nil || !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("a Change that changes nothing wrote the configuration: %v", err)
+	}
+	if _, err := a.Change(ctx, func(s *Settings) { s.Listen = []string{"127.0.0.1:2200"} }); err != nil {
+		t.Fatal(err)
+	}
+	if s, _, err := a.Read(ctx); err != nil || !slices.Equal(s.Listen, []string{"127.0.0.1:2200"}) {
+		t.Errorf("listen after Change = %q, %v", s.Listen, err)
+	}
+	if _, err := a.Change(ctx, func(s *Settings) { s.Folders = nil }); err == nil {
+		t.Error("Change removed the last folder")
+	}
 }
 
 func peopleByName(t *testing.T, a Admin) map[string]Person {
@@ -207,30 +226,11 @@ func peopleByName(t *testing.T, a Admin) map[string]Person {
 	return out
 }
 
-var keyMu sync.Mutex
-
 // testKey returns a new authorized_keys line.
 func testKey(t *testing.T) string {
 	t.Helper()
-	_, pub := newKeyPair(t)
+	_, pub := gosftpdtest.KeyPair(t)
 	return pub
-}
-
-// newKeyPair makes an ed25519 key pair with ssh-keygen and returns the
-// private key's file and the authorized_keys line.
-func newKeyPair(t *testing.T) (file, pub string) {
-	t.Helper()
-	keyMu.Lock()
-	defer keyMu.Unlock()
-	file = filepath.Join(t.TempDir(), "id_ed25519")
-	if out, err := exec.CommandContext(t.Context(), "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", file).CombinedOutput(); err != nil {
-		t.Skipf("ssh-keygen: %v %s", err, out)
-	}
-	data, err := os.ReadFile(file + ".pub")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return file, strings.TrimSpace(string(data))
 }
 
 // shareWithKey writes a configuration that listens on listen and shares
@@ -241,7 +241,7 @@ func shareWithKey(t *testing.T, g Gosftpd, share, listen string) (key string) {
 	if _, err := a.Write(t.Context(), Settings{Folders: []Folder{{Name: "Inbox", Path: share}}, Listen: []string{listen}}); err != nil {
 		t.Fatal(err)
 	}
-	key, pub := newKeyPair(t)
+	key, pub := gosftpdtest.KeyPair(t)
 	if _, err := a.AddWithKey(t.Context(), "partner", pub, map[string]string{"Inbox": "upload"}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,22 +265,7 @@ func start(t *testing.T, g Gosftpd) (*Server, *[]LogRecord) {
 // sftpBatch runs OpenSSH sftp with the batch commands as partner.
 func sftpBatch(t *testing.T, d Details, key, batch string) string {
 	t.Helper()
-	if _, err := exec.LookPath("sftp"); err != nil {
-		t.Skip("no OpenSSH sftp")
-	}
-	known := filepath.Join(t.TempDir(), "known_hosts")
-	if err := os.WriteFile(known, []byte(d.KnownHosts+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.CommandContext(t.Context(), "sftp", "-b", "-", "-i", key, "-P", strconv.Itoa(d.Port),
-		"-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+known,
-		"-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "partner@"+d.Host)
-	cmd.Stdin = strings.NewReader(batch)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("sftp: %v\n%s", err, out)
-	}
-	return string(out)
+	return gosftpdtest.SFTP(t, d.Host, d.Port, d.KnownHosts, "partner", key, batch)
 }
 
 func TestServe(t *testing.T) {

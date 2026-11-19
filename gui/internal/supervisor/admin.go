@@ -238,7 +238,22 @@ func (a Admin) AddWithPassword(ctx context.Context, name, password string, acces
 	}
 	args := append([]string{"user", "add", name, "--password-stdin", "--write", "--config", a.config()}, accessArgs(access)...)
 	_, w2, err := a.G.run(ctx, strings.NewReader(password+"\n"), args...)
+	if err != nil {
+		// Password logins only while someone has a password: not after
+		// an add that gosftpd refused.
+		_, _ = a.syncPasswordLogins(ctx)
+	}
 	return w1 + w2, err
+}
+
+// syncPasswordLogins turns password logins on exactly while someone has a
+// password.
+func (a Admin) syncPasswordLogins(ctx context.Context) (warnings string, err error) {
+	ps, err := a.People(ctx)
+	if err != nil {
+		return "", err
+	}
+	return a.passwordLogins(ctx, anyPassword(ps))
 }
 
 // AddWithKey adds a person who logs in with key, an authorized_keys line.
@@ -294,28 +309,38 @@ func (a Admin) Remove(ctx context.Context, name string) (warnings string, err er
 	if err != nil {
 		return w1, err
 	}
-	ps, err := a.People(ctx)
-	if err != nil {
-		return w1, err
-	}
-	w2, err := a.passwordLogins(ctx, anyPassword(ps))
+	w2, err := a.syncPasswordLogins(ctx)
 	return w1 + w2, err
 }
 
-// SetFolders replaces the shared folders, keeping the other settings.
-// First it takes every folder that goes away from everyone who has it,
-// since a grant for a missing folder makes the configuration invalid. It
-// refuses to remove the last folder: a configuration needs one.
+// SetFolders replaces the shared folders, keeping the other settings, as
+// Change does.
 func (a Admin) SetFolders(ctx context.Context, folders []Folder) (warnings string, err error) {
-	if len(folders) == 0 {
-		return "", errors.New("keep at least one folder: a configuration needs one")
-	}
+	return a.Change(ctx, func(s *Settings) { s.Folders = folders })
+}
+
+// Change reads the settings, applies edit and writes them if they
+// changed. First it takes every folder that goes away from everyone who
+// has it, since a grant for a missing folder makes the configuration
+// invalid. It refuses to remove the last folder: a configuration needs
+// one.
+func (a Admin) Change(ctx context.Context, edit func(*Settings)) (warnings string, err error) {
 	s, _, err := a.Read(ctx)
 	if err != nil {
 		return "", err
 	}
+	old := s
+	old.Folders = slices.Clone(s.Folders)
+	old.Listen = slices.Clone(s.Listen)
+	edit(&s)
+	if len(s.Folders) == 0 {
+		return "", errors.New("keep at least one folder: a configuration needs one")
+	}
+	if settingsEqual(old, s) {
+		return "", nil
+	}
 	keep := map[string]bool{}
-	for _, f := range folders {
+	for _, f := range s.Folders {
 		keep[f.Name] = true
 	}
 	ps, err := a.People(ctx)
@@ -335,8 +360,25 @@ func (a Admin) SetFolders(ctx context.Context, folders []Folder) (warnings strin
 			return b.String(), fmt.Errorf("taking the removed folders from %s: %w", p.Name, err)
 		}
 	}
-	s.Folders = folders
 	w, err := a.Write(ctx, s)
 	b.WriteString(w)
 	return b.String(), err
+}
+
+// settingsEqual reports whether a and b write the same configuration.
+// The order of the folders does not matter: Read returns them by name.
+func settingsEqual(a, b Settings) bool {
+	norm := func(s Settings) Settings {
+		if len(s.Listen) == 0 {
+			s.Listen = []string{":2022"}
+		}
+		if s.OnConflict == "" {
+			s.OnConflict = "rename"
+		}
+		s.Folders = slices.SortedFunc(slices.Values(s.Folders), func(x, y Folder) int { return strings.Compare(x.Name, y.Name) })
+		return s
+	}
+	a, b = norm(a), norm(b)
+	return slices.Equal(a.Folders, b.Folders) && slices.Equal(a.Listen, b.Listen) &&
+		a.OnConflict == b.OnConflict && a.PasswordLogins == b.PasswordLogins
 }

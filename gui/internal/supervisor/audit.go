@@ -67,6 +67,22 @@ func NewFollower(path string) *Follower { return &Follower{path: path} }
 // Offset is how far Poll has read.
 func (f *Follower) Offset() int64 { return f.off }
 
+// Skip moves to the end of the log without reading it: Poll then returns
+// only the events written after. A log that does not exist yet is
+// followed from its start.
+func (f *Follower) Skip() error {
+	fi, err := os.Stat(f.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		f.off, f.partial, f.last = 0, nil, nil
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	f.off, f.partial, f.last = fi.Size(), nil, fi
+	return nil
+}
+
 // Poll returns the events written since the last Poll; a line still
 // being written waits for the next one. reset is true when the log
 // became another file or shorter (truncated, rotated, deleted): the

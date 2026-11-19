@@ -749,6 +749,10 @@ jobs:
   # commit's gosftpd and run it as the GUI will, with OpenSSH sftp.
   gui:
     runs-on: ubuntu-24.04
+    env:
+      # Compiling miqt's qt6 package peaks near 7 GiB; GOGC=50 lowers that
+      # (ADR 0013, "Costs").
+      GOGC: "50"
     defaults:
       run:
         working-directory: gui
@@ -756,10 +760,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Qt 6 Widgets of the pinned image, 6.4.2 on ubuntu-24.04, for miqt.
+      # The window's tests run on Qt's offscreen platform.
+      - name: Install Qt
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qt6-base-dev
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
+          # A cache of its own: the miqt build is about 1 GB.
+          cache-dependency-path: gui/go.sum
       - name: go mod tidy
         run: go mod tidy -diff
       - name: go vet

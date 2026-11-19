@@ -40,6 +40,21 @@ process and changes the configuration only through its commands
 - `gosftpd user list --json` and `gosftpd config show --json` print the
   users, and the part of the configuration the GUI reads, as JSON. No
   password hash, key or webhook URL is printed.
+- `gosftpd-gui` itself, in the `gui/` module, with its first screen,
+  "Share a folder" (built from source for now with `make gui`, which
+  needs the Qt 6 development files; packages come with v0.6.0):
+  - choose one or more folders, each one that people may upload to or
+    only read;
+  - add a person with a password, typed or generated and shown once, or
+    with their public key;
+  - choose the port, then start and stop sharing;
+  - copy the connection details: host, port, user, the host key
+    fingerprint, the `known_hosts` line and the `sftp` command.
+
+  The GUI runs the gosftpd shipped with it and changes the configuration
+  only through gosftpd's commands. Closing the window stops sharing,
+  after asking when someone is connected. It refuses to run as root and
+  runs only on Qt's `xcb`, `wayland` and `cocoa` platforms.
 
 ### Changed
 
