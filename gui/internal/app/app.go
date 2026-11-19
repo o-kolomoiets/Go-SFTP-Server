@@ -48,7 +48,18 @@ type App struct {
 	stopping bool
 	follower *supervisor.Follower
 	activity supervisor.Activity
-	logTail  []string
+	logTail  []logEntry
+	logSeq   int // the number of the last entry of logTail
+
+	// changeMu runs one change of the configuration at a time.
+	changeMu sync.Mutex
+}
+
+// logEntry is a warning or error of gosftpd's operational log, numbered
+// so that a reload can tell what it logged.
+type logEntry struct {
+	seq  int
+	text string
 }
 
 func (a *App) admin() supervisor.Admin { return supervisor.Admin{G: a.G} }
@@ -112,7 +123,10 @@ func (a *App) Load(ctx context.Context) (Current, error) {
 type Form struct {
 	Folders []supervisor.Folder
 	Port    int
-	Person  NewPerson
+	// OnConflict is what an upload to an existing file does, written by
+	// a first share ("rename" when empty); later, SetOnConflict changes it.
+	OnConflict string
+	Person     NewPerson
 }
 
 // NewPerson is a person to add, who may use every folder of the form:
@@ -136,6 +150,9 @@ func (f Form) Check(cur Current) error {
 	}
 	if f.Port < 1 || f.Port > 65535 {
 		return errors.New("the port must be a number from 1 to 65535")
+	}
+	if f.OnConflict != "" && !slices.Contains(OnConflict, f.OnConflict) {
+		return fmt.Errorf("on_conflict %q: want one of %s", f.OnConflict, strings.Join(OnConflict, ", "))
 	}
 	p := f.Person
 	switch {
@@ -179,6 +196,8 @@ func (a *App) Apply(ctx context.Context, cur Current, f Form) (warnings string, 
 	if err := f.Check(cur); err != nil {
 		return "", err
 	}
+	a.changeMu.Lock()
+	defer a.changeMu.Unlock()
 	var b strings.Builder
 	if !cur.Configured {
 		// Never over a configuration that was not read: init --force
@@ -192,6 +211,7 @@ func (a *App) Apply(ctx context.Context, cur Current, f Form) (warnings string, 
 		w, err := a.admin().Write(ctx, supervisor.Settings{
 			Folders:        f.Folders,
 			Listen:         []string{":" + strconv.Itoa(f.Port)},
+			OnConflict:     f.OnConflict,
 			PasswordLogins: f.Person.Password != "",
 		})
 		b.WriteString(w)
@@ -316,7 +336,8 @@ func (a *App) log(r supervisor.LogRecord) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.logTail = append(a.logTail, FormatRecord(r))
+	a.logSeq++
+	a.logTail = append(a.logTail, logEntry{seq: a.logSeq, text: FormatRecord(r)})
 	if len(a.logTail) > maxLogTail {
 		a.logTail = a.logTail[len(a.logTail)-maxLogTail:]
 	}
@@ -349,7 +370,15 @@ func FormatRecord(r supervisor.LogRecord) string {
 func (a *App) LogTail() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return slices.Clone(a.logTail)
+	return a.logTexts()
+}
+
+func (a *App) logTexts() []string {
+	out := make([]string, len(a.logTail))
+	for i, e := range a.logTail {
+		out[i] = e.text
+	}
+	return out
 }
 
 // Done is closed when the gosftpd of the last Start exits; nil when the
@@ -401,13 +430,22 @@ func (a *App) StopNow() {
 func (a *App) Exited() error {
 	a.mu.Lock()
 	srv, stopping := a.srv, a.stopping
-	a.srv, a.stopping, a.follower = nil, false, nil
-	a.activity.Exited()
-	tail := slices.Clone(a.logTail)
-	a.mu.Unlock()
 	if srv == nil {
+		a.mu.Unlock()
 		return nil
 	}
+	select {
+	case <-srv.Done():
+	default:
+		// A Restart's new server: the exit was of the one it replaced,
+		// which Restart has dealt with.
+		a.mu.Unlock()
+		return nil
+	}
+	a.srv, a.stopping, a.follower = nil, false, nil
+	a.activity.Exited()
+	tail := a.logTexts()
+	a.mu.Unlock()
 	if a.Lock != nil {
 		_ = a.Lock.ClearServer()
 	}

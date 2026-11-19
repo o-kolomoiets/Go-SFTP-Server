@@ -30,6 +30,7 @@ type Event struct {
 	Result          string    `json:"result"`
 	Reason          string    `json:"reason"`
 	RestartRequired string    `json:"restart_required"`
+	Disconnected    int       `json:"disconnected"`
 	Landlock        string    `json:"landlock"`
 }
 
@@ -41,10 +42,13 @@ type ReloadResult struct {
 	// restart; under Landlock also a new folder, or upload rights on a
 	// read-only one (ADR 0011).
 	RestartRequired []string
+	// Disconnected is how many connections the reload closed: those of
+	// the people disabled or removed (disconnect_removed_users).
+	Disconnected int
 }
 
 func (e Event) reloadResult() ReloadResult {
-	r := ReloadResult{OK: e.Result == "ok", Reason: e.Reason}
+	r := ReloadResult{OK: e.Result == "ok", Reason: e.Reason, Disconnected: e.Disconnected}
 	for k := range strings.SplitSeq(e.RestartRequired, ",") {
 		if k = strings.TrimSpace(k); k != "" {
 			r.RestartRequired = append(r.RestartRequired, k)

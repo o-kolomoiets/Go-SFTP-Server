@@ -164,12 +164,18 @@ func (a Admin) People(ctx context.Context) ([]Person, error) {
 	return ps, err
 }
 
+// maxPasswordLen is the longest password gosftpd takes (auth.MaxPasswordLen).
+const maxPasswordLen = 1024
+
 // CheckPassword refuses a password that user add --password-stdin cannot
 // take: it reads one line, so a password may hold no line break or other
 // control character.
 func CheckPassword(p string) error {
 	if p == "" {
 		return errors.New("the password is empty")
+	}
+	if len(p) > maxPasswordLen {
+		return fmt.Errorf("the password is longer than %d bytes", maxPasswordLen)
 	}
 	if strings.ContainsFunc(p, unicode.IsControl) {
 		return errors.New("the password holds a line break or another control character")
@@ -286,6 +292,11 @@ func (a Admin) SetPassword(ctx context.Context, name, password string) (warnings
 		return w1, err
 	}
 	_, w2, err := a.G.run(ctx, strings.NewReader(password+"\n"), "user", "set", name, "--password-stdin", "--config", a.config())
+	if err != nil {
+		// Password logins only while someone has a password: not after
+		// a change that gosftpd refused.
+		_, _ = a.syncPasswordLogins(ctx)
+	}
 	return w1 + w2, err
 }
 

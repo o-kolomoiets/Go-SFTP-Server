@@ -99,6 +99,8 @@ func TestFormCheck(t *testing.T) {
 		{"line break", Form{Folders: folders, Port: 2022, Person: NewPerson{Name: "bob", Password: "a\nb"}}, nobody, "line break"},
 		{"password", Form{Folders: folders, Port: 2022, Person: NewPerson{Name: "bob", Password: "pw"}}, nobody, ""},
 		{"key", Form{Folders: folders, Port: 2022, Person: NewPerson{Name: "bob", Key: "ssh-ed25519 AAAA"}}, nobody, ""},
+		{"on_conflict", Form{Folders: folders, Port: 2022, OnConflict: "keep", Person: NewPerson{Name: "bob", Key: "ssh-ed25519 AAAA"}}, nobody, "on_conflict"},
+		{"version", Form{Folders: folders, Port: 2022, OnConflict: "version", Person: NewPerson{Name: "bob", Key: "ssh-ed25519 AAAA"}}, nobody, ""},
 	} {
 		err := tc.form.Check(tc.cur)
 		if (tc.want == "") != (err == nil) || err != nil && !strings.Contains(err.Error(), tc.want) {

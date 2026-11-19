@@ -55,6 +55,25 @@ process and changes the configuration only through its commands
   only through gosftpd's commands. Closing the window stops sharing,
   after asking when someone is connected. It refuses to run as root and
   runs only on Qt's `xcb`, `wayland` and `cocoa` platforms.
+- In `gosftpd-gui`, once a folder is shared, people and folders change
+  at once, also while sharing; gosftpd reads each change at once (a
+  reload):
+  - the people are listed with how they sign in and what they may do in
+    each folder. Each has Access… (read, upload, read and write, or full,
+    per folder), Password…, Disable or Enable, and Remove;
+  - a person is added with Add person;
+  - folders are added, removed, and made read-only or open to uploads;
+    the people lose the folders that go away;
+  - what an upload with the name of an existing file does (`on_conflict`).
+
+  Disabling or removing a person ends their connections. A person
+  connected keeps their old access until they disconnect, as with a
+  reload of gosftpd. Before a change that moves a person's paths (a
+  person with one folder sees its files at the top, one with more sees a
+  directory per folder), the GUI says so. When a change applies only once gosftpd starts again
+  (under Landlock, a new folder), the GUI restarts it when nobody is
+  connected, and otherwise offers Restart now, which names the people
+  connected first.
 
 ### Changed
 
