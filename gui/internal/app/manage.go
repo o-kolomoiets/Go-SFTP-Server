@@ -107,27 +107,31 @@ func (a *App) SetOnConflict(ctx context.Context, v string) (Change, error) {
 }
 
 // change runs one change of the configuration, then, while sharing, the
-// reload that applies it. Changes run one at a time.
+// reload that applies it. Changes run one at a time. A change that fails
+// half-way may have written part of itself (Remove removes the person,
+// then fails to turn password logins off): gosftpd reads the file all
+// the same, so that it serves what the file says, and the error is
+// returned with what the reload did.
 func (a *App) change(ctx context.Context, run func(context.Context) (string, error)) (Change, error) {
 	a.changeMu.Lock()
 	defer a.changeMu.Unlock()
-	w, err := run(ctx)
-	c := Change{Warnings: w}
-	if err != nil {
-		return c, err
-	}
 	a.mu.Lock()
-	srv, stopping, mark := a.srv, a.stopping, a.logSeq
+	mark := a.logSeq
+	a.mu.Unlock()
+	w, runErr := run(ctx)
+	c := Change{Warnings: w}
+	a.mu.Lock()
+	srv, stopping := a.srv, a.stopping
 	a.mu.Unlock()
 	if srv == nil || stopping {
-		return c, nil // the next start reads it
+		return c, runErr // the next start reads it
 	}
 	r, err := srv.Reload(ctx, a.G.Layout.AuditLog())
 	if errors.Is(err, supervisor.ErrNotRunning) {
-		return c, nil // gosftpd exited meanwhile: Done tells
+		return c, runErr // gosftpd exited meanwhile: Done tells
 	}
 	if err != nil {
-		return c, fmt.Errorf("applying the change: %w", err)
+		return c, firstErr(runErr, fmt.Errorf("applying the change: %w", err))
 	}
 	c.Reloaded = r.OK
 	c.RestartRequired = r.RestartRequired
@@ -136,7 +140,16 @@ func (a *App) change(ctx context.Context, run func(context.Context) (string, err
 		c.ReloadFailed = r.Reason
 		c.ReloadDetail = a.logSince(ctx, mark)
 	}
-	return c, nil
+	return c, runErr
+}
+
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // logSince returns the warnings and errors gosftpd logged after mark,

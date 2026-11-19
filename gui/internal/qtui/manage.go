@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 
@@ -66,6 +67,22 @@ func narrows(before, after map[string]string) bool {
 		}
 	}
 	return false
+}
+
+// pathsMove says how the person's paths change when their folders go
+// from before to after, "" when they do not: gosftpd shows a person with
+// one folder its files at the top, and a person with more each folder as
+// a directory (ADR 0013, "Lifecycle").
+func pathsMove(name string, before, after map[string]string) string {
+	if len(before) == 0 || len(after) == 0 || (len(before) == 1) == (len(after) == 1) {
+		return ""
+	}
+	if len(before) == 1 {
+		folder := slices.Collect(maps.Keys(before))[0]
+		return fmt.Sprintf("%s's files in %s move from the top to a directory: /report.pdf becomes /%s/report.pdf. Tell them, or their programs will not find the old paths.", name, folder, folder)
+	}
+	folder := slices.Collect(maps.Keys(after))[0]
+	return fmt.Sprintf("%s keeps only %s, whose files move to the top: /%s/report.pdf becomes /report.pdf. Tell them, or their programs will not find the old paths.", name, folder, folder)
 }
 
 // onConflictChoices are the values of on_conflict in the order of their
@@ -209,6 +226,9 @@ func (w *Window) applyAccess(p supervisor.Person, access map[string]string) {
 	if maps.Equal(access, p.Access) {
 		return
 	}
+	if move := pathsMove(p.Name, p.Access, access); move != "" && !w.confirm("Change the paths of "+p.Name+"?", move) {
+		return
+	}
 	var narrowed []string
 	if narrows(p.Access, access) {
 		narrowed = []string{p.Name}
@@ -350,14 +370,20 @@ func (w *Window) folderAccessChanged(r *folderRow) {
 // removeSharedFolder stops sharing a folder of the configuration, after
 // asking when people have it.
 func (w *Window) removeSharedFolder(r *folderRow) {
-	var who []string
+	var who, moves []string
 	for _, p := range w.cur.People {
 		if _, ok := p.Access[r.folder.Name]; ok {
 			who = append(who, p.Name)
+			after := maps.Clone(p.Access)
+			delete(after, r.folder.Name)
+			if move := pathsMove(p.Name, p.Access, after); move != "" {
+				moves = append(moves, move)
+			}
 		}
 	}
 	if len(who) > 0 && !w.confirm("Stop sharing "+r.folder.Name+"?",
-		fmt.Sprintf("%s lose%s access to %s. Its files stay where they are.", strings.Join(who, ", "), map[bool]string{true: "s"}[len(who) == 1], r.folder.Name)) {
+		strings.Join(append([]string{fmt.Sprintf("%s lose%s access to %s. Its files stay where they are.",
+			strings.Join(who, ", "), map[bool]string{true: "s"}[len(who) == 1], r.folder.Name)}, moves...), " ")) {
 		return
 	}
 	var folders []supervisor.Folder
@@ -393,6 +419,7 @@ func (w *Window) change(done string, narrowed []string, job func(context.Context
 // changeThen is change, calling then once the change succeeded.
 func (w *Window) changeThen(done string, narrowed []string, job func(context.Context) (app.Change, error), then func()) {
 	w.busy = true
+	wasSharing := w.state == sharing
 	w.updateEnabled()
 	w.setStatus("Saving…")
 	w.run(func(ctx context.Context) func() {
@@ -404,21 +431,56 @@ func (w *Window) changeThen(done string, narrowed []string, job func(context.Con
 				w.cur = cur
 				w.showFolders()
 				w.showPeople()
+				w.refreshUser()
 			}
 			if err == nil && then != nil {
 				then()
 			}
-			w.changed(done, narrowed, c, firstError(err, loadErr))
+			w.changed(done, narrowed, c, firstError(err, loadErr), wasSharing)
+			w.afterChange()
 		}
 	})
 }
 
+// afterChange closes the window if it was closed while the change ran.
+func (w *Window) afterChange() {
+	if !w.quitDone {
+		return
+	}
+	switch w.state {
+	case sharing:
+		w.stopSharing(false) // gosftpd's exit quits
+	case idle:
+		w.setState(idle) // quits
+	case loading, working, stopping, restarting, broken:
+		// A start, stop or restart under way quits when it ends.
+	}
+}
+
 // changed shows what a change did: an error, a reload gosftpd refused, a
-// restart it needs, or the people who keep their old access.
-func (w *Window) changed(done string, narrowed []string, c app.Change, err error) {
+// restart it needs, or the people who keep their old access. wasSharing
+// is whether gosftpd shared when the change began.
+func (w *Window) changed(done string, narrowed []string, c app.Change, err error, wasSharing bool) {
 	w.updateEnabled()
+	if wasSharing && w.state != sharing {
+		// gosftpd stopped, or stops, during the change: the status says
+		// so, and stays.
+		note := "Saved meanwhile: " + done + " It applies when sharing starts again."
+		if err != nil {
+			note = "The change made meanwhile failed: " + err.Error()
+		}
+		w.appendMore(joinNonEmpty(note, c.Warnings))
+		return
+	}
 	if err != nil {
-		w.fail(err.Error(), c.Warnings)
+		summary := err.Error()
+		switch {
+		case c.Reloaded:
+			summary += " gosftpd read what was saved before the error, and uses it already."
+		case c.ReloadFailed != "":
+			summary += fmt.Sprintf(" gosftpd also refused to read the configuration (%s) and keeps sharing as before.", c.ReloadFailed)
+		}
+		w.fail(summary, joinNonEmpty(c.Warnings, c.ReloadDetail))
 		return
 	}
 	w.showMore(c.Warnings)
@@ -431,6 +493,13 @@ func (w *Window) changed(done string, narrowed []string, c app.Change, err error
 	if c.Disconnected > 0 {
 		msg += fmt.Sprintf(" %d connection(s) of theirs ended.", c.Disconnected)
 	}
+	if w.state != sharing {
+		w.setStatus(msg)
+		return
+	}
+	// Who is connected now, not at the last poll: a restart without
+	// asking only with nobody connected.
+	w.pollActivity()
 	var keep []string
 	for _, n := range narrowed {
 		if slices.Contains(w.who, n) {
@@ -455,6 +524,20 @@ func (w *Window) changed(done string, narrowed []string, c app.Change, err error
 	w.updateEnabled()
 }
 
+// refreshUser shows the connection details for another person when the
+// one shown was removed or disabled.
+func (w *Window) refreshUser() {
+	if w.state != sharing || w.user == "" {
+		return
+	}
+	if slices.ContainsFunc(w.cur.People, func(p supervisor.Person) bool { return p.Name == w.user && p.Status != "disabled" }) {
+		return
+	}
+	w.user = userFor(app.Form{}, w.cur)
+	w.fields["user"].SetText(w.user)
+	w.fields["command"].SetText(w.shown.SFTPCommand(w.user))
+}
+
 // restart stops gosftpd and starts it again (Restart now). ask is true
 // when the person pressed the button: with people connected, it asks
 // first and names them.
@@ -464,6 +547,9 @@ func (w *Window) restart(ask bool) {
 	}
 	if ask && len(w.who) > 0 && !w.confirm("Restart now?",
 		isAre(w.who)+" connected. The server waits up to 30 s for them to finish, then cuts their transfers.") {
+		return
+	}
+	if w.state != sharing { // gosftpd exited while the question was open
 		return
 	}
 	w.offerRestart = false
@@ -477,11 +563,15 @@ func (w *Window) restart(ask bool) {
 				w.poll.Stop()
 				w.who = nil
 				w.setState(idle)
-				w.fail("The server stopped and could not start again.", err.Error())
+				fmt.Fprintln(os.Stderr, "gosftpd-gui: restart:", err)
+				w.startFailed(err, "")
+				w.setStatus("Error: the server stopped to restart and did not start again. " + strings.TrimPrefix(w.status.Text(), "Error: "))
 				return
 			}
 			w.started(d, user)
-			w.setStatus("The server started again with the changes.")
+			if !w.quitDone {
+				w.setStatus("The server started again with the changes.")
+			}
 		}
 	})
 }

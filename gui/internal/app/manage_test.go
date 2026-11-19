@@ -189,3 +189,35 @@ func TestLogSince(t *testing.T) {
 		t.Errorf("LogTail = %q", got)
 	}
 }
+
+// A change that fails half-way is still read by gosftpd, or the window
+// learns that gosftpd refused it: never a file that says one thing and a
+// server that does another, unseen.
+func TestHalfDoneChange(t *testing.T) {
+	a, inbox, docs := newApp(t)
+	ctx := t.Context()
+	if _, err := a.Apply(ctx, Current{}, Form{
+		Folders: []supervisor.Folder{{Name: "Inbox", Path: inbox}, {Name: "Docs", Path: docs}},
+		Port:    gosftpdtest.FreePort(t),
+		Person:  NewPerson{Name: "bob", Password: "correct horse"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Start(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.StopNow(); <-a.Done(); _ = a.Exited() })
+	if err := os.Rename(docs, docs+".gone"); err != nil {
+		t.Fatal(err)
+	}
+	// Removing bob, who has the only password, then fails to turn
+	// password logins off: init refuses the missing Docs.
+	c, err := a.Remove(ctx, "bob")
+	if err == nil {
+		t.Fatal("Remove succeeded with a folder missing")
+	}
+	if !c.Reloaded && c.ReloadFailed == "" {
+		t.Errorf("no reload after a half-done change: %+v", c)
+	}
+	t.Logf("change: %+v, err: %v", c, err)
+}

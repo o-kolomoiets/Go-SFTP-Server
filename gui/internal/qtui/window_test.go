@@ -71,7 +71,7 @@ func newWindow(t *testing.T, opts Options) (*Window, *app.App, string) {
 		t.Fatal(err)
 	}
 	a := &app.App{G: supervisor.Gosftpd{Bin: testBin, Layout: supervisor.Layout{Dir: filepath.Join(dir, "state")}}}
-	w := on(func() *Window { w := New(a, opts); w.Show(); return w })
+	w := on(func() *Window { w := New(a, opts); w.quit = func() {}; w.Show(); return w })
 	t.Cleanup(func() {
 		if a.Sharing() {
 			a.StopNow()

@@ -111,6 +111,20 @@ func TestAdmin(t *testing.T) {
 	if _, err := a.AddWithPassword(ctx, "alice", "a\nb", map[string]string{"Inbox": "upload"}); err == nil {
 		t.Error("a password with a line break was accepted")
 	}
+	// A password gosftpd refuses for a person with a key leaves password
+	// logins off.
+	if _, err := a.AddWithKey(ctx, "keyonly", testKey(t), map[string]string{"Inbox": "upload"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetPassword(ctx, "nobody-such", "secret"); err == nil {
+		t.Error("a password was set for a person who does not exist")
+	}
+	if s, _, _ := a.Read(ctx); s.PasswordLogins {
+		t.Error("password logins are on after a refused SetPassword")
+	}
+	if _, err := a.Remove(ctx, "keyonly"); err != nil {
+		t.Fatal(err)
+	}
 	// A name gosftpd refuses leaves password logins off.
 	if _, err := a.AddWithPassword(ctx, "Bad Name", "secret", map[string]string{"Inbox": "upload"}); err == nil {
 		t.Error("gosftpd accepted the user name \"Bad Name\"")

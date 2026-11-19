@@ -15,6 +15,7 @@ import (
 
 	"github.com/mappu/miqt/qt6/mainthread"
 
+	"github.com/o-kolomoiets/go-sftp-server/gui/internal/app"
 	"github.com/o-kolomoiets/go-sftp-server/gui/internal/gosftpdtest"
 	"github.com/o-kolomoiets/go-sftp-server/gui/internal/supervisor"
 )
@@ -92,9 +93,14 @@ func TestManageWhileSharing(t *testing.T) {
 		if w.name.Text() != "" || w.password.Text() != "" {
 			t.Error("the form keeps the person added")
 		}
+		// The details show bob: disabling him shows partner instead.
+		w.user = "bob"
 		w.toggle(r.p)
 	})
 	idle("bob to be disabled")
+	if got := on(func() string { return w.fields["user"].Text() }); got != "partner" {
+		t.Errorf("the details show %q after bob was disabled", got)
+	}
 	if s := status(); !strings.Contains(s, "bob may no longer log in") {
 		t.Errorf("status after Disable: %q", s)
 	}
@@ -169,4 +175,85 @@ func TestManageWhileSharing(t *testing.T) {
 			t.Errorf("Docs: %+v (status %q)", w.cur.Settings.Folders[0], w.status.Text())
 		}
 	})
+}
+
+func TestPathsMove(t *testing.T) {
+	for _, tc := range []struct {
+		before, after map[string]string
+		want          string // "" for no move
+	}{
+		{map[string]string{"Inbox": "upload"}, map[string]string{"Inbox": "upload", "Docs": "read"}, "/Inbox/report.pdf"},
+		{map[string]string{"Inbox": "upload", "Docs": "read"}, map[string]string{"Docs": "read"}, "/Docs/report.pdf becomes /report.pdf"},
+		{map[string]string{"Inbox": "upload"}, map[string]string{"Inbox": "read"}, ""},
+		{map[string]string{"Inbox": "upload", "Docs": "read"}, map[string]string{"Inbox": "read", "Docs": "full"}, ""},
+		{map[string]string{}, map[string]string{"Inbox": "upload"}, ""},
+		{map[string]string{"Inbox": "upload"}, map[string]string{}, ""},
+	} {
+		got := pathsMove("partner", tc.before, tc.after)
+		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("pathsMove(%v, %v) = %q, want %q", tc.before, tc.after, got, tc.want)
+		}
+	}
+}
+
+// A change that ends after gosftpd stopped leaves the stop's message,
+// and offers no restart.
+func TestChangedAfterExit(t *testing.T) {
+	w, _, _ := newWindow(t, Options{})
+	mainthread.Wait(func() {
+		w.state = idle
+		w.setStatus("Error: gosftpd stopped unexpectedly: signal: killed")
+		w.changed("Uploads to an existing file: refuse the upload.", nil, app.Change{Reloaded: true, RestartRequired: []string{"mounts.Docs.path"}}, nil, true)
+		if s := w.status.Text(); s != "Error: gosftpd stopped unexpectedly: signal: killed" || w.offerRestart || w.state != idle {
+			t.Errorf("status %q, offer restart %v, state %d", s, w.offerRestart, w.state)
+		}
+		if !strings.Contains(w.more.ToPlainText(), "applies when sharing starts again") {
+			t.Errorf("details: %q", w.more.ToPlainText())
+		}
+	})
+}
+
+// Restart now does nothing when gosftpd exited while its question was
+// open.
+func TestRestartAfterQuestion(t *testing.T) {
+	w, _, _ := newWindow(t, Options{})
+	mainthread.Wait(func() {
+		w.state, w.who = sharing, []string{"partner"}
+		w.confirm = func(string, string) bool { w.state = idle; return true }
+		w.restart(true)
+		if w.state != idle {
+			t.Errorf("state %d after the question", w.state)
+		}
+	})
+}
+
+// Closing the window during a change closes it once the change is done,
+// not half-way through.
+func TestCloseDuringChange(t *testing.T) {
+	w, _, share := newWindow(t, Options{})
+	_, pub := gosftpdtest.KeyPair(t)
+	port := gosftpdtest.FreePort(t)
+	mainthread.Wait(func() {
+		w.AddFolder(share)
+		w.name.SetText("partner")
+		w.useKey.SetChecked(true)
+		w.key.SetText(pub)
+		w.port.SetValue(port)
+		w.start.Click()
+	})
+	waitFor(t, "sharing", func() bool { return w.state == sharing })
+	mainthread.Wait(func() { w.stop.Click() })
+	waitFor(t, "the stop", func() bool { return w.state == idle })
+	quits := 0
+	mainthread.Wait(func() {
+		w.quit = func() { quits++ }
+		w.setOnConflict(2)
+		if !w.busy || w.win.Close() {
+			t.Error("the window closed during a change")
+		}
+	})
+	waitFor(t, "the change and the quit", func() bool { return !w.busy && quits > 0 })
+	if got := on(func() string { return w.cur.Settings.OnConflict }); got != "overwrite" {
+		t.Errorf("on_conflict = %q", got)
+	}
 }

@@ -93,13 +93,15 @@ func TestRuntimeDir(t *testing.T) {
 }
 
 func TestPasswords(t *testing.T) {
-	for _, p := range []string{"", "a\nb", "a\rb", "tab\there", "\x00"} {
+	for _, p := range []string{"", "a\nb", "a\rb", "tab\there", "\x00", strings.Repeat("x", 1025)} {
 		if CheckPassword(p) == nil {
 			t.Errorf("CheckPassword(%q) accepted", p)
 		}
 	}
-	if err := CheckPassword("correct horse ☃"); err != nil {
-		t.Error(err)
+	for _, p := range []string{"correct horse ☃", strings.Repeat("x", 1024)} {
+		if err := CheckPassword(p); err != nil {
+			t.Error(err)
+		}
 	}
 	re := regexp.MustCompile(`^[A-Za-z0-9_-]{16}$`)
 	a, b := GeneratePassword(), GeneratePassword()

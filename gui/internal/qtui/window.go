@@ -84,9 +84,10 @@ type Window struct {
 
 	cur      app.Current
 	state    state
-	user     string   // the user of the connection details
-	who      []string // who is connected, as last shown
-	quitDone bool     // quit once gosftpd has exited
+	user     string             // the user of the connection details
+	shown    supervisor.Details // the connection details shown
+	who      []string           // who is connected, as last shown
+	quitDone bool               // quit once gosftpd has exited
 	// closing is set when the window is closed while a start is under
 	// way, for the job off the main thread not to start gosftpd.
 	closing atomic.Bool
@@ -97,6 +98,8 @@ type Window struct {
 	offerRestart bool
 	// confirm asks a yes or no question (askYesNo; tests replace it).
 	confirm func(title, text string) bool
+	// quit ends the program (tests replace it).
+	quit func()
 }
 
 // folderRow is a shared folder in the list.
@@ -131,6 +134,7 @@ var detailLines = []detail{
 func New(a *app.App, opts Options) *Window {
 	w := &Window{app: a, opts: opts, fields: map[string]*qt.QLineEdit{}}
 	w.confirm = w.askYesNo
+	w.quit = qt.QCoreApplication_Quit
 	w.win = qt.NewQMainWindow2()
 	w.win.SetWindowTitle("gosftpd: share a folder")
 	central := qt.NewQWidget2()
@@ -198,7 +202,7 @@ func (w *Window) buildFolders() *qt.QGroupBox {
 	l.AddWidget(w.noFolder.QWidget)
 	w.folderRows = qt.NewQVBoxLayout2()
 	l.AddLayout(w.folderRows.QLayout)
-	hint := qt.NewQLabel3("With one folder, people see its files at the top. With more, each folder is a directory with the name shown.")
+	hint := qt.NewQLabel3("A person with one folder sees its files at the top. A person with more sees each folder as a directory with the name shown.")
 	hint.SetWordWrap(true)
 	l.AddWidget(hint.QWidget)
 	w.addFolder = qt.NewQPushButton3("Add folder…")
@@ -633,7 +637,7 @@ func joinNonEmpty(parts ...string) string {
 // are shown only when one fails: those of an init that wrote a
 // configuration without the person added next would mislead.
 func (w *Window) started(d supervisor.Details, user string) {
-	w.user = user
+	w.user, w.shown = user, d
 	w.fields["host"].SetText(d.Host)
 	w.fields["port"].SetText(strconv.Itoa(d.Port))
 	w.fields["user"].SetText(user)
@@ -741,6 +745,14 @@ func (w *Window) closeEvent(super func(*qt.QCloseEvent), ev *qt.QCloseEvent) {
 		// gosftpd may have exited while the question was open: the
 		// state is looked at again below.
 	}
+	if w.busy {
+		// A change runs gosftpd commands: close once it is done
+		// (afterChange), not half-way through.
+		w.quitDone = true
+		w.setStatus("Closing once the change is saved…")
+		ev.Ignore()
+		return
+	}
 	switch w.state {
 	case idle, loading, broken:
 		super(ev)
@@ -773,8 +785,8 @@ func isAre(names []string) string {
 func (w *Window) setState(s state) {
 	w.state = s
 	w.updateEnabled()
-	if s == idle && w.quitDone && !w.app.Sharing() {
-		mainthread.Start(qt.QCoreApplication_Quit)
+	if s == idle && w.quitDone && !w.busy && !w.app.Sharing() {
+		mainthread.Start(w.quit)
 	}
 }
 
@@ -827,6 +839,11 @@ func (w *Window) setStatus(text string) {
 func (w *Window) fail(summary, more string) {
 	w.setStatus("Error: " + summary)
 	w.showMore(more)
+}
+
+// appendMore adds text to the details pane, keeping what it shows.
+func (w *Window) appendMore(text string) {
+	w.showMore(joinNonEmpty(w.more.ToPlainText(), text))
 }
 
 func (w *Window) showMore(text string) {
