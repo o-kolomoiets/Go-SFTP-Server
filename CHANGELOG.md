@@ -56,6 +56,16 @@ process and changes the configuration only through its commands
   are given as before; an invalid value such as `--read-only=yes` now says
   that it must be true or false.
 
+- Dependencies: `golang.org/x/crypto` v0.59.0, `golang.org/x/term`
+  v0.48.0 and `github.com/landlock-lsm/go-landlock` v0.11.2. With x/crypto
+  v0.59, keys that a client offers and the server refuses, as an SSH agent
+  tries its keys, count toward `limits.max_auth_tries` only once there
+  have been that many of them, so a client with several keys is cut off
+  later than before. A user certificate without principals, or with only
+  an empty one, is still refused with its reason (`cert_principal`,
+  `cert_invalid`), although x/crypto no longer verifies the signature of
+  such a certificate itself.
+
 ## [0.5.0] - 2026-11-03
 
 Distribution: a container image, deb, rpm and Arch packages, FreeBSD

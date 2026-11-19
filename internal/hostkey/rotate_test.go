@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/o-kolomoiets/go-sftp-server/internal/testutil"
 )
 
 func mustLoad(t *testing.T, path string) ssh.Signer {
@@ -433,7 +435,7 @@ func hostCertFor(t *testing.T, ca, key ssh.Signer, edit func(*ssh.Certificate)) 
 	if edit != nil {
 		edit(c)
 	}
-	if err := c.SignCert(rand.Reader, ca); err != nil {
+	if err := testutil.SignCert(c, rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
 	return ssh.MarshalAuthorizedKey(c)

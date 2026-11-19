@@ -67,7 +67,12 @@ give no reason, as a wrong key; later steps record one.
    verified certificates so that alternating queries cannot make it verify
    again and again. The signature is checked with `CheckCert`, with its
    other checks neutralized, so that x/crypto's handling of security-key
-   CAs applies.
+   CAs applies. Since x/crypto v0.59.0 `CheckCert` refuses a certificate
+   without a principal it can be given (none, or only an empty one); the
+   signature of such a certificate is verified directly, so that it is
+   still refused with its reason below. A security-key CA's signature then
+   needs its user-presence flag; without it the certificate fails as one
+   from an untrusted CA does.
 3. `key_revoked`: the certified key or the CA is in the revocation list.
 4. `disabled`, `expired`: the account.
 5. `cert_invalid`: the CA signed with `ssh-rsa` (SHA-1); a critical option

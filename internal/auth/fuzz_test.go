@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/o-kolomoiets/go-sftp-server/internal/testutil"
 )
 
 // FuzzAuthorizedKeys (ROADMAP §8.3): parsing never panics, every line is
@@ -102,6 +104,18 @@ func FuzzAuthorizedKeys(f *testing.F) {
 	})
 }
 
+// signedBy verifies the signature of cert with ca directly, apart from
+// the code under test.
+func signedBy(cert *ssh.Certificate, ca ssh.PublicKey) bool {
+	if cert.Signature == nil || !bytes.Equal(cert.SignatureKey.Marshal(), ca.Marshal()) {
+		return false
+	}
+	c := *cert
+	c.Signature = nil
+	signed := c.Marshal()
+	return ca.Verify(signed[:len(signed)-4], cert.Signature) == nil
+}
+
 // FuzzCertificate: arbitrary bytes offered as a certificate. A login is
 // accepted, and a refusal reason recorded, only for a certificate whose CA
 // signature verifies. An accepted one carries a principal the user allows,
@@ -123,7 +137,7 @@ func FuzzCertificate(f *testing.F) {
 			ValidAfter: uint64(now.Add(-time.Hour).Unix()), ValidBefore: uint64(now.Add(time.Hour).Unix()),
 		}
 		edit(c)
-		if err := c.SignCert(bytes.NewReader(make([]byte, 64)), ca); err != nil {
+		if err := testutil.SignCert(c, bytes.NewReader(make([]byte, 64)), ca); err != nil {
 			f.Fatal(err)
 		}
 		return c.Marshal()
@@ -162,7 +176,7 @@ func FuzzCertificate(f *testing.F) {
 			conn := fakeConn{user: name, addr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 1}}
 			perms, err := a.KnownKey(conn, cert)
 			_, refused := errors.AsType[*RefusedError](err)
-			if (err == nil || refused) && (!verifySignature(cert) || cert.CertType != ssh.UserCert) {
+			if (err == nil || refused) && (!signedBy(cert, ca.PublicKey()) || cert.CertType != ssh.UserCert) {
 				t.Fatalf("%s: accepted or refused with a reason (%v), but the CA signature does not verify", name, err)
 			}
 			if err != nil {

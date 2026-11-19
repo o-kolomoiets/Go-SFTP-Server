@@ -419,6 +419,37 @@ func TestUnknownKeyRejected(t *testing.T) {
 	}
 }
 
+// Keys that a client offers and the server refuses count toward
+// MaxAuthTries only once there have been MaxAuthTries of them, as x/crypto
+// does from v0.59.0 (docs/configuration.md, limits.max_auth_tries).
+func TestMaxAuthTriesKeyOffers(t *testing.T) {
+	t.Parallel()
+
+	e := startWith(t, startOpts{policy: vfs.ConflictRename, tweak: func(c *Config) { c.MaxAuthTries = 2 }})
+	login := func(refused int) error {
+		keys := make([]ssh.Signer, 0, refused+1)
+		for range refused {
+			keys = append(keys, signer(t))
+		}
+		conn, err := ssh.Dial("tcp", e.addr, &ssh.ClientConfig{
+			User:            "alice",
+			Auth:            []ssh.AuthMethod{ssh.PublicKeys(append(keys, e.userKey)...)},
+			HostKeyCallback: ssh.FixedHostKey(e.hostKey),
+			Timeout:         10 * time.Second,
+		})
+		if err == nil {
+			conn.Close()
+		}
+		return err
+	}
+	if err := login(3); err != nil {
+		t.Errorf("3 refused keys, then the right one: %v", err)
+	}
+	if err := login(4); err == nil {
+		t.Error("4 refused keys, then the right one: logged in, want cut off")
+	}
+}
+
 func TestOnlySFTPSubsystem(t *testing.T) {
 	t.Parallel()
 
