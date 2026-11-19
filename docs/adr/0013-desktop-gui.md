@@ -713,12 +713,20 @@ In all four:
     (6.4 or newer) and `qt6-qpa-plugins`. Debian lists the X11 plugin
     package only as a recommendation, so without this dependency the GUI
     would not start.
-  - The rpm's GUI binary is compiled in EL 9's container against EL 9's
-    own Qt 6; it then also runs on current Fedora. If EL 9's Qt is older
-    than miqt needs, it is compiled on Fedora and EL 9 is left out.
-    M5b-07 checks this first.
-  - The images are pinned by digest, and their Qt packages by version
-    from snapshot.debian.org and the EL 9 vault, so a rebuild can fetch
+  - EL 9 has no Qt 6 of its own: Qt 6 is in EPEL only (M5b-07 found it,
+    at 6.10.3). So there are two rpms (Q5), each GUI binary compiled
+    against its distribution's Qt; both depend on `qt6-qtbase` and
+    `qt6-qtbase-gui` 6.10 or newer:
+    - `….fc44.x86_64.rpm`, in Fedora 44's container against Fedora 44's
+      Qt (6.10.2): Fedora 44 and later;
+    - `….el9.x86_64.rpm`, in EL 9's container against EPEL's Qt (6.10.3):
+      EL 9 with EPEL enabled (`dnf install epel-release`).
+    miqt v0.15.0 builds against both, with GCC 16 and 11.
+  - The images are pinned by digest. Debian's packages come from
+    snapshot.debian.org at a fixed time, Fedora's from the release
+    repository of Fedora 44, which never changes after the release, EL 9's
+    from the Rocky vault's copy of 9.8, and EPEL's Qt from Koji by version
+    and digest (EPEL keeps only its latest build), so a rebuild can fetch
     them. Both are written once, in the script that `make gui-packages`
     runs.
     - That command builds the Linux GUI binaries, gosftpd and the
@@ -850,6 +858,12 @@ On 2026-11-12 the owner decided:
     planned after v0.6.0.
   - If it is planned before 1.0, it leaves that table for a milestone of
     its own.
+
+On 2026-11-19, when M5b-07 found that EL 9 has Qt 6 only in EPEL:
+
+- **Q5, the rpm:** both an rpm for Fedora and one for EL 9 with EPEL (the
+  alternatives were Fedora only, as this record planned for an EL 9
+  without the Qt miqt needs, or EL 9 with EPEL only).
 
 ### Definition of Done (amended)
 

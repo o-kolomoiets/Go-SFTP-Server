@@ -687,7 +687,7 @@ flowchart LR
 - [x] Users and folders: list, add, disable, remove, change permissions and `on_conflict`, with the same checks and messages as the CLI. A reload applies the changes. A restart happens only when the reload asks for one, and never without the person's say while someone is connected.
 - [x] Activity: the server's state, who is connected and the latest finished uploads and downloads from the audit log, with a filter; errors and warnings of the log in plain words.
 - [ ] Packaging and signing in the release pipeline (ADR 0013):
-  - deb, rpm and Arch packages for amd64 that carry their own gosftpd, built in Debian 12 and EL 9 images (arm64 when someone asks);
+  - deb, rpm and Arch packages for amd64 that carry their own gosftpd (arm64 when someone asks): the deb and the Arch package built in Debian 12, an rpm for Fedora 44 built in Fedora 44 and one for EL 9 with EPEL, whose Qt 6 only EPEL has (Q5). `make gui-packages` builds them from pinned images and versions; CI builds them twice, compares them and installs each on a fresh system of its kind; the release workflow is next;
   - a macOS `.app` for Apple silicon in a `.dmg`, ad-hoc signed and not notarized (D22);
   - all in `checksums.txt`, signed with cosign, with SBOMs of the binaries and build provenance;
   - Windows only after M3b.

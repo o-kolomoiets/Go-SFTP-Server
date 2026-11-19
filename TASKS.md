@@ -169,7 +169,7 @@ A desktop application, `gosftpd-gui`, for people who do not use the command line
 | M5b-04 | Users and folders: add, disable, remove, permissions, `on_conflict`, applied by a reload; a restart only when the reload asks for one, and never without the person's say while someone is connected | ✅ |
 | M5b-05 | Activity: state, sessions, latest transfers from the audit log, warnings in plain words | ✅ |
 | M5b-06 | Manage an installed server (package, systemd, Docker): moved to row 15 of the post-1.0 backlog by ADR 0013 (Q4), to be planned after v0.6.0 | ↪ |
-| M5b-07 | Packaging and signing in the release pipeline: deb, rpm and Arch packages for amd64 with their own gosftpd (Debian 12 and EL 9 images), the macOS `.app` in a `.dmg`, ad-hoc signed and not notarized (D22); Windows after M3b | ⬜ |
+| M5b-07 | Packaging and signing in the release pipeline: deb, rpm and Arch packages for amd64 with their own gosftpd (the deb and the Arch package built in Debian 12, an rpm for Fedora 44 and one for EL 9 with EPEL, Q5), the macOS `.app` in a `.dmg`, ad-hoc signed and not notarized (D22); Windows after M3b | 🔄 |
 | M5b-08 | Tests: unit, an end-to-end run on Linux through the accessibility tree (upload with OpenSSH `sftp`), the packages in four distribution containers, a macOS smoke test; `docs/gui.md` with screenshots, README, quickstart | ⬜ |
 | M5b-09 | M5b DoD and `v0.6.0` | ⬜ |
 

@@ -2,7 +2,7 @@ GO            ?= go
 GOLANGCI_LINT ?= golangci-lint
 TOOL          := $(GO) tool -modfile=tools/go.mod
 
-.PHONY: all build gui test interop lint fmt tidy vuln staticcheck generate clean
+.PHONY: all build gui gui-packages test interop lint fmt tidy vuln staticcheck generate clean
 
 all: lint test build
 
@@ -14,6 +14,13 @@ build: ## Build bin/gosftpd
 # minutes. Run it with --gosftpd bin/gosftpd.
 gui: build ## Build bin/gosftpd-gui, the desktop GUI (ADR 0013)
 	cd gui && GOGC=50 $(GO) build -trimpath -o ../bin/gosftpd-gui ./cmd/gosftpd-gui
+
+# The deb, rpm (Fedora, EL 9 with EPEL) and Arch packages of gosftpd-gui,
+# into out/gui: built from a clean clone of HEAD in pinned containers, as
+# a release builds them (ADR 0013). Needs docker; a cold run takes half an
+# hour.
+gui-packages: ## Build the GUI's Linux packages into out/gui
+	packaging/gui/build.sh
 
 test: ## Run unit tests with the race detector, also of gui/
 	$(GO) test -race -shuffle=on -count=1 ./...

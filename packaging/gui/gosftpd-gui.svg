@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>gosftpd</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+  <!-- A folder -->
+  <path d="M24 44a8 8 0 0 1 8-8h18l8 8h38a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H32a8 8 0 0 1-8-8z" fill="#ffffff"/>
+  <path d="M24 56h80v36a8 8 0 0 1-8 8H32a8 8 0 0 1-8-8z" fill="#dbeafe"/>
+  <!-- An arrow into it: an upload -->
+  <path d="M64 92V66" stroke="#1d4ed8" stroke-width="8" stroke-linecap="round"/>
+  <path d="M51 78l13 14 13-14" fill="none" stroke="#1d4ed8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

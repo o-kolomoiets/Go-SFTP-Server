@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=gosftpd
+GenericName=Folder sharing over SFTP
+Comment=Share folders on this computer with people you choose, over SFTP
+Exec=gosftpd-gui
+Icon=gosftpd-gui
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=sftp;ssh;share;upload;folder;server;
+StartupNotify=true
+StartupWMClass=gosftpd-gui
