@@ -60,8 +60,10 @@ got=$(gosftpd-gui --version)
 got=$("$gosftpd" version)
 case $got in "gosftpd $version"*) ;; *) fail "$gosftpd version: $got, want gosftpd $version" ;; esac
 for b in /usr/bin/gosftpd-gui "$gosftpd"; do
-	if ldd "$b" 2>&1 | grep -q 'not found'; then
-		ldd "$b" >&2
+	# ldd exits 0 with a library missing; for the static gosftpd, 1.
+	libs=$(ldd "$b" 2>&1 || true)
+	if grep -q 'not found' <<<"$libs"; then
+		echo "$libs" >&2
 		fail "$b: a library is missing"
 	fi
 done

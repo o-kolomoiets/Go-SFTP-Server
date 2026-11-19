@@ -338,6 +338,14 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
+      # The gosftpd that the GUI's packages carry is built by
+      # packaging/gui/build.sh as GoReleaser builds it, and the release
+      # compares the two byte for byte (ADR 0013): checked here on every
+      # change, with the version GoReleaser gave the snapshot.
+      - name: packaging/gui/build.sh builds gosftpd as GoReleaser does
+        run: |
+          VERSION="$(jq -r .tag dist/metadata.json)" GOSFTPD_ONLY=1 packaging/gui/build.sh
+          cmp dist/gosftpd_linux_amd64_v1/gosftpd out/gui/gosftpd
       # go-licenses exits 0 for a module it cannot classify (make generate
       # fails on "License: Unknown"), and the template prints psx only
       # under BSD-3-Clause. Every module of the Linux binary needs an entry,
@@ -807,7 +815,7 @@ jobs:
         run: |
           build=true
           if [ -n "$BASE" ] && ! git diff --name-only "$BASE" HEAD |
-            grep -qE '^(gui/|packaging/(gui/|third_party_licenses\.tpl$)|test/packages/gui\.sh$|\.github/workflows/ci\.yml$|Makefile$|(tools/)?go\.(mod|sum)$)'; then
+            grep -qE '^(gui/|packaging/(gui/|third_party_licenses\.tpl$)|test/packages/(gui\.sh|[^/]+\.Dockerfile)$|internal/version/|\.github/workflows/ci\.yml$|Makefile$|(tools/)?go\.(mod|sum)$)'; then
             build=false
           fi
           echo "build=$build" >>"$GITHUB_OUTPUT"
@@ -875,7 +883,7 @@ jobs:
           CI: "true"
         run: |
           dir=$RUNNER_TEMP/gui/gui-packages-a
-          version=$(git describe --tags --always)
+          version=$(git describe --tags --always --abbrev=12)
           from() { sed -n 's/^FROM //p' "test/packages/$1.Dockerfile"; }
           fedora=$(sed -n 's/^FEDORA_IMAGE=//p' packaging/gui/build.sh)
           run() { # IMAGE FORMAT FILE [SETUP]

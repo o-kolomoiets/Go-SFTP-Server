@@ -22,7 +22,10 @@
 # dl.fedoraproject.org, dl.rockylinux.org and kojipkgs.fedoraproject.org.
 #
 # usage: packaging/gui/build.sh [REF]
-# VERSION overrides the version (default: the tag of REF, or git describe).
+# VERSION overrides the version (default: the tag of REF, or git describe
+# --abbrev=12). The release passes the tag it builds, GORELEASER_CURRENT_TAG,
+# which is also gosftpd's version in dist/. GOSFTPD_ONLY=1 builds only
+# gosftpd, into out/gui/gosftpd: CI compares it with GoReleaser's.
 set -euo pipefail
 
 # Pins. Dependabot does not see them: the release checklist lists them, and
@@ -31,10 +34,13 @@ DEBIAN_IMAGE=docker.io/library/debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4
 DEBIAN_SNAPSHOT=20261119T000000Z # snapshot.debian.org: the archive as it was then
 DEBIAN_QT=6.4.2+dfsg-10
 FEDORA_IMAGE=docker.io/library/fedora:44@sha256:15da97ed9aa94dd3d92c3925eb89520f6c80e07ea7ee24cba848d1f8b6912b3e
-FEDORA_RELEASE=44 # its release repository, which never changes after the release: Qt 6.10.2-2.fc44
+FEDORA_RELEASE=44 # its release repository, which never changes (in the archive after its end of life): Qt 6.10.2-2.fc44
 FEDORA_QT=6.10.2-2.fc44
 EL9_IMAGE=docker.io/rockylinux/rockylinux:9-ubi-init@sha256:535cbdf9607fba5db5678d368193661ef3012c35d06782fdb4ed0e27af4af0b4
-ROCKY_RELEASE=9.8 # the vault's copy of the minor release, which never changes
+ROCKY_RELEASE=9.8 # the vault's copy of the minor release, which takes its updates until 9.9 ships:
+EL9_GCC=11.5.0-14.el9 # so the compiler, its C++ library and the linker are pinned (and glibc's headers to
+EL9_BINUTILS=2.35.2-72.el9 # the image's glibc); the vault keeps every build of the minor release
+EL9_KERNEL_HEADERS=5.14.0-687.10.1.el9_8.0.1
 EPEL_QT=6.10.3-1.el9 # from Koji, by digest: EPEL keeps only its latest build
 EPEL_QT_SHA256="
 539a50dfea7fe1eedeeea7c41ee4afdf9ddeb4e41da7499c934d2674d7de5d1d  qt6-qtbase-6.10.3-1.el9.x86_64.rpm
@@ -56,21 +62,29 @@ git clone --quiet --no-checkout "$root" "$tmp/src"
 git -C "$tmp/src" checkout --quiet --detach "$commit"
 src=$tmp/src
 tag=$(git -C "$src" describe --tags --exact-match 2>/dev/null || true)
-version=${VERSION:-${tag:-$(git -C "$src" describe --tags --always)}}
+version=${VERSION:-${tag:-$(git -C "$src" describe --tags --always --abbrev=12)}}
 epoch=$(git -C "$src" log -1 --format=%ct)
 # GoReleaser's .CommitDate: the commit time in UTC, RFC 3339.
 commit_date=$(TZ=UTC0 git -C "$src" log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)
 
 goroot=$(go env GOROOT)
 gomod=$(go env GOMODCACHE)
-(cd "$src" && go mod download) && (cd "$src/gui" && go mod download) && (cd "$src/tools" && go mod download)
+for m in . gui tools; do
+	(cd "$src/$m" && go mod download)
+done
 
 echo "== gosftpd $version, as GoReleaser builds it"
 mkdir -p "$tmp/bin"
-# .goreleaser.yaml's builds: env, flags and ldflags, joined as it joins them.
-(cd "$src" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS= go build -trimpath \
+# .goreleaser.yaml's builds: env, flags and ldflags, joined as it joins
+# them, and the GOAMD64 GoReleaser sets; GOFLAGS as the environment has it,
+# as GoReleaser takes it.
+(cd "$src" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -trimpath \
 	-ldflags="-s -w -X github.com/o-kolomoiets/go-sftp-server/internal/version.Version=$version -X github.com/o-kolomoiets/go-sftp-server/internal/version.Commit=$commit -X github.com/o-kolomoiets/go-sftp-server/internal/version.Date=$commit_date" \
 	-o "$tmp/bin/gosftpd" ./cmd/gosftpd)
+if [ -n "${GOSFTPD_ONLY:-}" ]; then
+	rm -rf "$out" && mkdir -p "$out" && cp "$tmp/bin/gosftpd" "$out/gosftpd"
+	exit 0
+fi
 (cd "$src" && SOURCE_DATE_EPOCH=$epoch make --no-print-directory generate >/dev/null)
 
 # gui_build IMAGE NAME SETUP: compiles gosftpd-gui in IMAGE after SETUP,
@@ -131,6 +145,9 @@ DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
 cd /src/gui
 GOROOT=/goroot go tool -modfile=../tools/go.mod go-licenses report ./cmd/gosftpd-gui \
 	--ignore github.com/o-kolomoiets/go-sftp-server --template=../packaging/third_party_licenses.tpl >/out/THIRD_PARTY_LICENSES
+# The template is gosftpd's: its first line names the program.
+sed -i '1s/^gosftpd is licensed /gosftpd-gui is licensed /' /out/THIRD_PARTY_LICENSES
+grep -q '^gosftpd-gui is licensed ' /out/THIRD_PARTY_LICENSES
 "
 
 gui_build "$FEDORA_IMAGE" fedora "
@@ -139,7 +156,7 @@ rm -f /etc/yum.repos.d/*.repo
 cat >/etc/yum.repos.d/fedora.repo <<'R'
 [fedora]
 name=Fedora $FEDORA_RELEASE
-baseurl=https://dl.fedoraproject.org/pub/fedora/linux/releases/$FEDORA_RELEASE/Everything/x86_64/os/
+baseurl=https://dl.fedoraproject.org/pub/fedora/linux/releases/$FEDORA_RELEASE/Everything/x86_64/os/,https://dl.fedoraproject.org/pub/archive/fedora/linux/releases/$FEDORA_RELEASE/Everything/x86_64/os/
 gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$FEDORA_RELEASE-x86_64
 R
@@ -153,7 +170,8 @@ rm -f /etc/yum.repos.d/*.repo
 for r in BaseOS AppStream CRB; do
 	printf '[%s]\nname=Rocky %s %s\nbaseurl=https://dl.rockylinux.org/vault/rocky/$ROCKY_RELEASE/%s/x86_64/os/\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9\n' \"\$r\" $ROCKY_RELEASE \"\$r\" \"\$r\" >>/etc/yum.repos.d/rocky.repo
 done
-# Qt's other dependencies come from EPEL as it is.
+# Qt's other dependencies come from the vault and EPEL as they are; the
+# compiler, the linker and the headers they build with are pinned below.
 printf '[epel]\nname=EPEL 9\nbaseurl=https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/\ngpgcheck=1\ngpgkey=https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9\n' >>/etc/yum.repos.d/rocky.repo
 $proxy_dnf
 cd /tmp
@@ -165,7 +183,12 @@ awk 'NF {print \$2}' qt.sha256 | while read -r f; do
 	curl -fsSLO https://kojipkgs.fedoraproject.org/packages/qt6-qtbase/${EPEL_QT%-*}/${EPEL_QT##*-}/\$a/\$f
 done
 sha256sum --check --strict --quiet qt.sha256
-dnf -q -y --setopt=install_weak_deps=False install ./qt6-qtbase*.rpm gcc-c++ pkgconf-pkg-config git >/dev/null
+glibc=\$(rpm -q --qf '%{VERSION}-%{RELEASE}' glibc)
+dnf -q -y --setopt=install_weak_deps=False install gcc-c++-$EL9_GCC gcc-$EL9_GCC cpp-$EL9_GCC libstdc++-devel-$EL9_GCC \
+	binutils-$EL9_BINUTILS glibc-devel-\$glibc glibc-headers-\$glibc kernel-headers-$EL9_KERNEL_HEADERS >/dev/null
+dnf -q -y --setopt=install_weak_deps=False install ./qt6-qtbase*.rpm pkgconf-pkg-config git >/dev/null
+# Still the pinned ones after Qt's install.
+rpm -q gcc-c++-$EL9_GCC binutils-$EL9_BINUTILS glibc-devel-\$glibc kernel-headers-$EL9_KERNEL_HEADERS
 " ""
 
 echo "== packages"
@@ -200,4 +223,4 @@ package deb debian 1
 package archlinux debian 1
 package rpm fedora 1.fc$FEDORA_RELEASE
 package rpm el9 1.el9
-(cd "$out" && sha256sum -- * | tee SHA256SUMS)
+(cd "$out" && files=(*) && sha256sum -- "${files[@]}" | tee SHA256SUMS)

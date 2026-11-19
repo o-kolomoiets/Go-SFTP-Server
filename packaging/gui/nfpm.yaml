@@ -49,17 +49,17 @@ archlinux:
   packager: gosftpd maintainers
 overrides:
   deb:
-    # Qt 6.4 or later, as Debian 12 has it. On Ubuntu 24.04 and Debian 13
-    # libqt6core6t64 provides libqt6core6 with its version. Debian only
-    # recommends the X11 platform plugins, without which the GUI does not
-    # start.
+    # The libraries the binary names (glibc 2.34 is the newest symbol
+    # version it uses), with Qt 6.4 or later, as Debian 12 has it. On Ubuntu
+    # 24.04 and Debian 13 libqt6core6t64 provides libqt6core6 with its
+    # version. Debian only recommends the X11 platform plugins, without
+    # which the GUI does not start.
     depends:
       - libc6 (>= 2.34)
       - libstdc++6
       - libqt6core6 (>= 6.4)
       - libqt6gui6 (>= 6.4)
       - libqt6widgets6 (>= 6.4)
-      - libqt6dbus6 (>= 6.4)
       - qt6-qpa-plugins (>= 6.4)
   rpm:
     # The same names on Fedora and in EPEL; the binaries are compiled
