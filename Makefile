@@ -2,12 +2,18 @@ GO            ?= go
 GOLANGCI_LINT ?= golangci-lint
 TOOL          := $(GO) tool -modfile=tools/go.mod
 
-.PHONY: all build test interop lint fmt tidy vuln staticcheck generate clean
+.PHONY: all build gui test interop lint fmt tidy vuln staticcheck generate clean
 
 all: lint test build
 
 build: ## Build bin/gosftpd
 	$(GO) build -trimpath -o bin/gosftpd ./cmd/gosftpd
+
+# gosftpd-gui needs CGO and the Qt 6 development files (qt6-base-dev on
+# Debian and Ubuntu, qt6-qtbase-devel on Fedora); its first build takes
+# minutes. Run it with --gosftpd bin/gosftpd.
+gui: build ## Build bin/gosftpd-gui, the desktop GUI (ADR 0013)
+	cd gui && GOGC=50 $(GO) build -trimpath -o ../bin/gosftpd-gui ./cmd/gosftpd-gui
 
 test: ## Run unit tests with the race detector, also of gui/
 	$(GO) test -race -shuffle=on -count=1 ./...

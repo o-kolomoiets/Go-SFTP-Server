@@ -208,6 +208,22 @@ func TestFollower(t *testing.T) {
 	}
 }
 
+func TestFollowerSkip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f := NewFollower(path)
+	if err := f.Skip(); err != nil || f.Offset() != 0 {
+		t.Fatalf("missing file: offset %d, %v", f.Offset(), err)
+	}
+	appendLine(t, path, `{"event":"server.start"}`+"\n"+`{"event":"server.stop"}`+"\n")
+	if err := f.Skip(); err != nil {
+		t.Fatal(err)
+	}
+	appendLine(t, path, `{"event":"server.start","landlock":"off"}`+"\n")
+	if ev, reset, err := f.Poll(); err != nil || reset || !slices.Equal(names(ev), []string{"server.start"}) {
+		t.Errorf("after Skip: %+v, reset %v, %v", ev, reset, err)
+	}
+}
+
 func TestActivity(t *testing.T) {
 	t0 := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	var a Activity

@@ -436,6 +436,10 @@ Otherwise the environment could:
   - It accepts only the `xcb`, `wayland` and `cocoa` platform plugins and
     ignores other `QT_QPA_PLATFORM` values. Qt's `vnc` plugin, for
     example, opens a network listener.
+  - It loads no generic plugin and drops `QT_QPA_GENERIC_PLUGINS`: Qt's
+    `tuiotouch` listens on UDP port 3333 of every interface. Qt gets only
+    the program's name as its arguments, so `-platform` and `-plugin`
+    cannot be given either.
 - **Never root.** The GUI refuses to start as root, as gosftpd does. It
   and the gosftpd it starts run as the desktop user.
 - **The server is confined where the system allows it.**
