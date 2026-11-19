@@ -46,9 +46,9 @@ rpm)
 archlinux)
 	# A full upgrade first: Arch supports no partial upgrade, and the
 	# image's libraries may be older than the ones Qt 6 is built against.
-	pacman -Sy --noconfirm --needed -q archlinux-keyring >/dev/null
-	pacman -Su --noconfirm -q >/dev/null
-	pacman -U --noconfirm -q "$file" >/dev/null
+	pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null
+	pacman -Su --noconfirm >/dev/null
+	pacman -U --noconfirm "$file" >/dev/null
 	gosftpd=/usr/lib/gosftpd-gui/gosftpd
 	;;
 esac
@@ -88,7 +88,7 @@ echo "== remove"
 case $format in
 deb) DEBIAN_FRONTEND=noninteractive apt-get -qq purge -y gosftpd-gui >/dev/null ;;
 rpm) dnf -q -y remove gosftpd-gui >/dev/null ;;
-archlinux) pacman -R --noconfirm -q gosftpd-gui >/dev/null ;;
+archlinux) pacman -R --noconfirm gosftpd-gui >/dev/null ;;
 esac
 for p in /usr/bin/gosftpd-gui "$gosftpd" "$(dirname "$gosftpd")" "$desktop" /usr/share/doc/gosftpd-gui; do
 	[ ! -e "$p" ] || fail "$p is left after the removal"
