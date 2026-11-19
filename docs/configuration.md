@@ -7,6 +7,7 @@ its default, and `gosftpd init` writes a commented starting point.
 ```sh
 gosftpd config validate --check-fs   # every problem at once, exit code 2 if invalid
 gosftpd config show                  # the effective configuration with all defaults
+gosftpd config show --json           # part of it as one JSON object, for scripts and the GUI
 ```
 
 Unknown keys are an error, and keys are case-sensitive (`Path` is not
@@ -1129,18 +1130,82 @@ examples of atmoz's README, the flags and what differs from atmoz are in
 
 | Command | What it does |
 |---|---|
-| `gosftpd init` | Writes `./gosftpd.toml` (0600), a host key and an empty `users.d/` next to the file, for `user add --write`; never overwrites without `--force`. |
+| `gosftpd init` | Writes `./gosftpd.toml` (0600), a host key in `--state-dir` (default `<user config dir>/gosftpd`) and an empty `users.d/` next to the file, for `user add --write`. The user from `--user` gets full access to every `--dir`; `--no-user` adds none (it needs a `--dir`, and refuses one whose part before `=` is not a valid mount name). `--listen` (repeatable), `--on-conflict`, `--read-only MOUNT` (repeatable), `--no-create` (`create = false`; each directory must exist), `--password-logins` (`auth.methods = ["publickey", "password"]`), `--disconnect-removed-users` and `--audit-output FILE` (a missing directory of the file is created with mode 0700) set the matching keys. Never overwrites without `--force`. With `--force` it checks the new file with the files it includes, as `config validate --check-fs` does, writes it only if it is valid, through a temporary file and a rename, and keeps `users.d/` and the host key; a user without keys and a symbolic link at `--out` are refused. |
 | `gosftpd config validate [--check-fs]` | Checks the configuration; with `--check-fs` also paths, keys and file permissions, and on Linux it prints the warnings serve gives when it applies Landlock (files that need a restart once replaced by rename, an audit log that cannot be rotated by rename). |
-| `gosftpd config show` | Prints the effective configuration. |
+| `gosftpd config show [--json]` | Prints the effective configuration. With `--json` it prints part of it as one JSON object instead; see [`config show --json`](#config-show---json). |
 | `gosftpd config example [--full]` | Prints an example. |
-| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, `--expires` an expiry (`720h` or a date). `--principal` sets `principals`. With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name), and the `ssh-keygen` command to sign a certificate when CAs are trusted. A user that could not log in (disabled, expired, no key, password or certificate principal that `auth.methods` allows) is refused unless `--force`; with trusted CAs, a user needs no key. |
+| `gosftpd user add NAME --key FILE\|KEY --access MOUNT=PERMISSIONS…` | Prints a `[users.NAME]` block to append. `--password-hash` adds a password, or `--password-stdin` reads it from the first line of standard input and stores its argon2id hash (neither the password nor its hash is then an argument). `--expires` adds an expiry (`720h` or a date). `--principal` sets `principals`. With `--write` it checks the configuration with the new user, writes `users.d/NAME.toml` (the directory of an `include` pattern; mode and group like the configuration file) and prints the connection details for the user: host, port, host key fingerprint, `sftp` command (`--host` sets the host name), and the `ssh-keygen` command to sign a certificate when CAs are trusted. A user that could not log in (disabled, expired, no key, password or certificate principal that `auth.methods` allows) is refused unless `--force`; with trusted CAs, a user needs no key. |
+| `gosftpd user set NAME --access MOUNT=PERMISSIONS…\|--no-access\|--password-stdin` | Changes a user defined in an included file, keeping the rest of the file and its comments. `--access` replaces the user's whole access, `--no-access` leaves none (the user can log in but sees nothing), and `--password-stdin` sets the password from the first line of standard input, hashed as `hash-password` does. It checks the configuration with the change and writes through a temporary file and a rename. Unless `--force`, it refuses a change that leaves a user who could log in without a key, password or certificate principal that `auth.methods` allows, and a password the user cannot use; a change of access alone is written, with the warnings, for a user who could not log in before. The main configuration file is never rewritten. A reload applies the change; open connections keep the access they had. |
 | `gosftpd user disable\|enable\|remove NAME` | Changes a user defined in an included file, keeping the rest of the file and its comments; `remove` deletes a file left without users. The main configuration file is never rewritten. A reload applies the change. |
 | `gosftpd user hash-password [--stdin]` | Asks for a password twice (or reads one line with `--stdin`) and prints its argon2id hash. |
-| `gosftpd user list` | Lists users with access, key count, certificate principals for trusted CAs, password, expiry and status (`off` when `auth.methods` leaves the method out). |
+| `gosftpd user list [--json]` | Lists users with access, key count, certificate principals for trusted CAs, password, expiry and status (`off` when `auth.methods` leaves the method out). `--json` prints a JSON array with the same information, one object per user: `name`, `access` (mount to permissions), `keys`, `keys_unreadable`, `keys_off`, `principals`, `principals_off`, `password`, `password_off`, `expires` (RFC 3339 or `null`) and `status`. |
 | `gosftpd hostkey generate [--type ed25519\|ecdsa\|rsa]` | Creates a host key; never overwrites. |
 | `gosftpd hostkey show [--config FILE] [--known-hosts HOST:PORT]` | Prints the fingerprint, public key and `known_hosts` line of the host key (`--host-key`, `--state-dir`) or, with `--config`, of every configured one; then its next and previous keys and the certificate files that exist. The first lines describe the current key. |
 | `gosftpd hostkey rotate [--type T] \| --finish \| --rollback \| --retire \| --abort` | Rotates a host key in steps, see [Rotation](#rotation). Selects the key like `show`; with `--config`, `--host-key` picks one of several. |
 | `gosftpd healthcheck [--config FILE] [--address HOST:PORT \| --url URL] [--ready] [--timeout 5s]` | Checks that the server answers, for container health checks; see [metrics.md](metrics.md#gosftpd-healthcheck). |
+| `gosftpd serve --print-details` | For a program that starts gosftpd, such as gosftpd-gui ([ADR 0013](adr/0013-desktop-gui.md)). Once it serves, prints the connection details as one JSON line on stdout, instead of the banner on stderr: `host`, `port`, `host_key_fingerprint`, `known_hosts`, `pid` and `version`, named as with `--ephemeral` and describing the first listener and the first host key; then `listen` (every listener), `host_keys` (`[{"type": …, "fingerprint": …}]`) and `addresses` (the addresses of the network interfaces that another machine can connect to: neither loopback nor link-local). For an unspecified listen address such as `:2022`, `host` is this machine's name, as in the banner, and `known_hosts` names it and every address (`[vm]:2022,[192.0.2.10]:2022 ssh-ed25519 …`). A start that fails after the command line is parsed prints `{"error": TEXT, "kind": "listen"\|"config"\|"sandbox"\|"other", "address": ADDR}` instead, with the same exit status, and the error on stderr as usual; `address` is the address that could not be listened on, empty for the other kinds. An argument gosftpd cannot parse ends it with exit status 2 and no line. The audit log must go to a file other than stdout: `audit.output = "stdout"`, also by default, or a path that is stdout's file such as `/dev/stdout`, is refused at start and fails a reload, and `--ephemeral` cannot be used with it. Later versions may add fields, never remove or rename one. |
+| `gosftpd serve --stop-on-stdin-eof` | Stops as on SIGTERM (it drains and writes `server.stop`) when its stdin reaches end of file: the program that started gosftpd holds the other end, and gosftpd stops when that program exits, even when it is killed. A SIGTERM after that ends gosftpd at once, as a second one does. Stdin must be a pipe or a socket (exit status 2 otherwise); what is written to it is discarded. Like `--ephemeral`, it catches SIGPIPE, so a write to a stdout or stderr whose reader has gone fails instead of killing gosftpd. |
 
 Exit codes: 0 success, 1 runtime error, 2 invalid usage or configuration.
 `gosftpd healthcheck` exits with 0 or 1 only: Docker reserves 2.
+
+### `config show --json`
+
+`gosftpd config show --json` prints one JSON object, indented, with a
+newline after it, for the desktop GUI and for scripts. It shows what
+`config show` would print, defaults and environment variables included,
+and each field has the name and value of its key:
+
+| Field | Value |
+|---|---|
+| `file` | The configuration file, as an absolute path. |
+| `server.listen` | The listen addresses, after `$GOSFTPD_LISTEN`. |
+| `server.host_keys` | The host key files, as absolute paths. |
+| `auth.methods` | `publickey`, `password` or both. |
+| `defaults.on_conflict` | `rename`, `reject`, `overwrite` or `version`. |
+| `mounts` | One member per mount, under its name in `[mounts.NAME]`: `path`, `read_only`, `create` and `on_conflict`. `on_conflict` is the mount's own value, which is `defaults.on_conflict` unless the mount sets it. |
+| `audit.output` | `stdout`, or the absolute path of the audit log. |
+| `reload.disconnect_removed_users` | `true` or `false`. |
+
+Users and hooks are not included, so no password hash, key,
+`allow_from`, webhook URL or exec argument is printed; `gosftpd user list
+--json` lists the users. Later versions may add fields, never remove or
+rename one. An invalid configuration gives the same error as without
+`--json`, on stderr with exit code 2, and prints nothing on stdout.
+
+```json
+{
+  "file": "/home/alice/.config/gosftpd-gui/config.toml",
+  "server": {
+    "listen": [
+      ":2022"
+    ],
+    "host_keys": [
+      "/home/alice/.config/gosftpd-gui/ssh_host_ed25519_key"
+    ]
+  },
+  "auth": {
+    "methods": [
+      "publickey",
+      "password"
+    ]
+  },
+  "defaults": {
+    "on_conflict": "rename"
+  },
+  "mounts": {
+    "Photos": {
+      "path": "/home/alice/Photos",
+      "read_only": true,
+      "create": false,
+      "on_conflict": "rename"
+    }
+  },
+  "audit": {
+    "output": "/home/alice/.config/gosftpd-gui/audit/audit.jsonl"
+  },
+  "reload": {
+    "disconnect_removed_users": true
+  }
+}
+```

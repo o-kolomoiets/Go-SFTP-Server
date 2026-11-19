@@ -27,7 +27,9 @@ type adminListener struct {
 // name a loopback host (DNS rebinding).
 func listenAdmin(ctx context.Context, addr string, m *obs.Metrics, h *obs.Health, pprof *atomic.Bool, log *slog.Logger) (*adminListener, error) {
 	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", addr)
+	// Not ctx: a stop asked for while starting would fail the lookup of a
+	// host name as a listen error.
+	ln, err := lc.Listen(context.WithoutCancel(ctx), "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("metrics.listen: %w", err)
 	}

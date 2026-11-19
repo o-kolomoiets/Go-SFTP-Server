@@ -8,7 +8,47 @@ Incompatible changes are prefixed with **BREAKING:**.
 
 ## [Unreleased]
 
+### Added
+
+For the coming desktop GUI, `gosftpd-gui`, which runs gosftpd as a child
+process and changes the configuration only through its commands
+([ADR 0013](docs/adr/0013-desktop-gui.md)):
+
+- `gosftpd serve --print-details` prints the connection details as one
+  JSON line on stdout once it serves, instead of the banner: `host`,
+  `port`, `host_key_fingerprint`, `known_hosts`, `pid` and `version` as
+  with `--ephemeral`, plus `listen`, `host_keys` and `addresses`. For a
+  server listening on all interfaces, `host` is the machine's name, and
+  `known_hosts` names it and every address. A start that fails prints
+  `{"error", "kind", "address"}` instead, where `kind` is `listen` (such
+  as a port in use), `config`, `sandbox` or `other`. The audit log must
+  then go to a file.
+- `gosftpd serve --stop-on-stdin-eof` stops as SIGTERM does when its
+  stdin, a pipe or a socket, reaches end of file. When the program that
+  started gosftpd exits, even when killed, gosftpd drains and writes
+  `server.stop` instead of serving on unseen.
+- `gosftpd init` takes `--state-dir`, `--listen` (repeatable),
+  `--on-conflict`, `--audit-output` (it creates the file's directory,
+  mode 0700), `--read-only MOUNT`, `--password-logins`,
+  `--disconnect-removed-users`, `--no-user` and `--no-create`.
+- `gosftpd user set NAME --access MOUNT=PERMISSIONS… | --no-access`
+  replaces a user's access in its included file, keeping comments, after
+  checking the configuration. `user add` and `user set` take
+  `--password-stdin` (the first line of standard input, hashed as
+  `hash-password` does), so neither the password nor its hash is an
+  argument.
+- `gosftpd user list --json` and `gosftpd config show --json` print the
+  users, and the part of the configuration the GUI reads, as JSON. No
+  password hash, key or webhook URL is printed.
+
 ### Changed
+
+- `gosftpd init --force` checks the new file with the users it includes,
+  as `config validate --check-fs` does, and writes it only if it is
+  valid; otherwise it prints the problems, exits with 2 and leaves the
+  old file as it was. It replaces the old file through a temporary file
+  and a rename instead of truncating it. With `--force`, a user without
+  an authorized_keys file and a symbolic link at `--out` are refused.
 
 - Dependencies: `github.com/spf13/pflag` v1.1.0 and `golang.org/x/sys`
   v0.50.0. With pflag 1.1, `--help` shows a boolean flag as

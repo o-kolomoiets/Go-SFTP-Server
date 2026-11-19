@@ -1,6 +1,8 @@
 # ADR 0013: Desktop GUI: a Qt front end that supervises gosftpd
 
-- **Status:** accepted, 2026-11-12. Amends:
+- **Status:** accepted, 2026-11-12; revised with M5b-02's CLI additions
+  (2026-11-13), where the implementation and its review found the text
+  wrong or short. Amends:
   - ROADMAP §1.4 (the GUI paragraph);
   - ROADMAP §5: the M5b rows of the table, and M5b's items,
     Definition of Done, estimate and risks;
@@ -160,20 +162,27 @@ server grows by a few kilobytes.
   - Added fields:
     - `listen`: every address;
     - `host_keys`: an array of `{type, fingerprint}`;
-    - `addresses`: the non-loopback addresses of the interfaces.
+    - `addresses`: the addresses of the interfaces that another machine
+      can connect to: neither loopback nor link-local.
   - For an unspecified listen address such as `:2022`, `host` is this
     machine's name, as in the banner. `--ephemeral` says `127.0.0.1`,
     which is no use to a person on another machine. `known_hosts` then
     names the host and every address (`[vm]:2022,[192.0.2.10]:2022
     ssh-ed25519 ...`), so the line works whichever one the person types.
-  - A start that fails prints one JSON line instead, with the exit status
-    it has today: `{"error": TEXT, "kind": "listen" | "config" |
-    "sandbox" | "other", "address": ADDR}`. The GUI tells a port in use
-    from other failures by `kind`, not by wording.
-  - With `--print-details` the banner is not printed, so every line on
-    stderr is a JSON log line (with `--log-format json`).
-  - `audit.output = "stdout"` is refused, as `--audit-output stdout` is
-    with `--ephemeral`.
+  - A start that fails after the command line is parsed prints one JSON
+    line instead, with the exit status it has today: `{"error": TEXT,
+    "kind": "listen" | "config" | "sandbox" | "other", "address":
+    ADDR}`. The GUI tells a port in use from other failures by `kind`,
+    not by wording. An argument gosftpd cannot parse ends it with exit
+    status 2 and no line; when stdout ends without a line, the GUI shows
+    stderr.
+  - With `--print-details` the banner is not printed, so while it serves
+    every line on stderr is a JSON log line (with `--log-format json`). A
+    start that fails also writes its error as text (`Error: ...`), after
+    the JSON line on stdout, which is the one to read.
+  - `audit.output = "stdout"`, set or by default, is refused at start and
+    fails a reload, as `--audit-output stdout` is with `--ephemeral`; so
+    is an audit path that is stdout's file, such as `/dev/stdout`.
 
   The prototypes parsed the human banner on stderr instead. That works,
   but any rewording of the banner would break the GUI.
@@ -232,16 +241,27 @@ server grows by a few kilobytes.
     created again at the old path.
   - With `--force`, `init` checks the new file together with its
     includes, as `config validate --check-fs` does, and refuses to write
-    an invalid one. It writes through a temporary file and a rename, as
-    `user add --write` does; today it truncates the file in place.
-    `init --force` keeps `users.d/` and the host key.
+    an invalid one. It loads or generates the host key, then replaces
+    the file through a temporary file and a rename, as `user add --write`
+    does; today it truncates the file in place. So exit status 2 always
+    leaves the old file as it was. `init --force` keeps `users.d/` and
+    the host key.
+    - The check does not cover files that do not exist yet: the audit
+      log, and Landlock's view of a file it has not seen. In the state
+      directory, which the GUI owns, neither can fail.
 - **`user`.**
   - `user set PERSON --access FOLDER=PERMISSIONS...` replaces the
     person's whole access in `users.d/PERSON.toml` with the folders
     given; `--no-access` leaves them none, which validation accepts with
-    its warning ("the user can log in but sees nothing"). It checks the
-    whole configuration first and writes through a temporary file, as
-    `disable` does.
+    its warning ("the user can log in but sees nothing").
+    - It checks the whole configuration with the change, as `user add
+      --write` does (without the file checks of `--check-fs`).
+    - It writes through a temporary file and a rename, as `disable`
+      does, in the included file that defines the person.
+    - Without `--force` it refuses a change that leaves the person unable
+      to log in when they could before, and a password they cannot use.
+      A change of access alone, for a person who could not log in
+      before, is written with the warnings.
     - Today no command changes access. Removing a person and adding them
       again would need their password or key.
     - Before the GUI removes a folder, it removes the folder from
@@ -250,13 +270,21 @@ server grows by a few kilobytes.
   - `user add` and `user set` gain `--password-stdin`: the first line of
     stdin, hashed as `hash-password` does. The GUI then passes neither
     the password nor its hash as an argument (see the security model).
-  - `user list --json`: the same fields as the table, for the People
-    screen.
-- **`config show --json`.** The effective configuration as JSON: the
-  folders (path, `read_only`, `create`), `server.listen`, `auth.methods`
-  and `defaults.on_conflict`. The Folders screen reads it, and the GUI
-  builds the next `init --force` from it, so `config.toml` stays the only
-  record of the GUI's settings.
+  - `user list --json`: the same information as the table, one object
+    per person (`name`, `access`, `keys`, `password`, `expires`,
+    `status` and the `_off` flags), for the People screen.
+- **`config show --json`.** The part of the effective configuration the
+  GUI reads, as JSON, with the names of the keys: `file`,
+  `server.listen`, `server.host_keys`, `auth.methods`,
+  `defaults.on_conflict`, the `mounts` (path, `read_only`, `create`,
+  `on_conflict`), `audit.output` and `reload.disconnect_removed_users`.
+  No user, hook or secret is in it. The Folders screen reads it, and the
+  GUI builds the next `init --force` from it, so `config.toml` stays the
+  only record of the GUI's settings.
+  - `init` has no per-folder `on_conflict` and only an all-or-nothing
+    `--no-create`. A folder whose `on_conflict` or `create` differs from
+    the others, by a hand edit, would be reset by the next `init
+    --force`; the GUI says so before it rebuilds.
 
 ### The state directory
 
@@ -300,7 +328,7 @@ Otherwise the environment could:
 | shares a folder for the first time | `init --force --no-user --no-create --disconnect-removed-users --dir FOLDER=PATH [--read-only FOLDER] --listen :2022 --audit-output STATE/audit/audit.jsonl [--password-logins]` |
 | adds a person with a password, or gives a password to a person who has none | if nobody has a password yet, `init --force ... --password-logins` with the current settings; then `user add PERSON --password-stdin --access FOLDER=upload\|read --write`, or `user set PERSON --password-stdin` |
 | adds a person with a public key | `user add PERSON --key KEY --access FOLDER=... --write` |
-| changes what a person may do | `user set PERSON --access ...` |
+| changes what a person may do | `user set PERSON --access ...`. A person with exactly one folder sees it as `/` (`flatten`, the default), so going to or from one folder changes their paths (`/report.pdf` becomes `/Inbox/report.pdf`); the GUI says so before it applies the change. |
 | disables or enables a person | `user disable\|enable PERSON`. Password logins stay on while anyone has a password, enabled or not, so an enabled person can always log in. |
 | removes a person | `user remove PERSON`; when nobody with a password is left, `init --force` without `--password-logins` |
 | adds or removes a folder, or changes read-only | `user set` for the people who lose the folder, then `init --force` with the new folders. The GUI never removes the last folder: a configuration needs one. |
@@ -348,6 +376,10 @@ Otherwise the environment could:
   - Stop sends SIGTERM. The window says "Stopping: waiting up to 30 s for
     partner to disconnect" and offers "Stop now", which sends the second
     SIGTERM that ends gosftpd at once.
+  - "Stop now", like any SIGTERM after end of file on stdin, writes
+    neither `session.end` nor `server.stop`. So the GUI clears its list
+    of connected people when the child exits, and counts only sessions
+    after the last `server.start`.
   - The GUI quits when the child has exited.
   - There is no tray icon and no background mode in v0.6.0.
 - **Activity.** The GUI follows the audit log (JSON lines):
