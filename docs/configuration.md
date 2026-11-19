@@ -135,7 +135,7 @@ where it cannot, raise `max_connections_per_ip` and add it to
 | `max_preauth_connections` | `64` | Connections that have not logged in yet (1–10000), like sshd's `MaxStartups`. |
 | `max_sessions_per_conn` | `4` | SFTP sessions (channels) per SSH connection (1–64). |
 | `max_open_handles` | `64` | Open files and directories per SFTP session (1–4096). |
-| `max_auth_tries` | `6` | Authentication attempts per connection (1–20). Lower values break SSH agents that offer many keys. |
+| `max_auth_tries` | `6` | Authentication attempts per connection (1–20). Keys that a client offers and the server refuses, as an SSH agent tries its keys, count only once there have been this many of them; lower values still cut off agents that offer many keys. |
 
 ## `[auth]`
 

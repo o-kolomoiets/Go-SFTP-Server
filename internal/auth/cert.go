@@ -375,18 +375,33 @@ func (c *certCache) check(cert *ssh.Certificate) bool {
 // verifySignature verifies the CA signature of cert with CheckCert, so
 // that x/crypto's handling of security-key CAs applies, with its other
 // checks neutralized: they are made by certRefusal, which records why.
+// CheckCert refuses a certificate without a principal it can be given (no
+// principals, or only an empty one); the signature of such a certificate
+// is verified directly, so that certRefusal still says why it is refused.
+// A security-key CA's signature then needs its user-presence flag: one
+// made without touch fails like an untrusted certificate, refused as well.
 func verifySignature(cert *ssh.Certificate) bool {
 	after, before := cert.ValidAfter, cert.ValidBefore
 	if after > math.MaxInt64 || before != ssh.CertTimeInfinity && (before > math.MaxInt64 || after >= before) {
 		return false // valid at no time: CheckCert cannot verify it, and it could never log in
 	}
+	principal := ""
+	if i := slices.IndexFunc(cert.ValidPrincipals, func(p string) bool { return p != "" }); i >= 0 {
+		principal = cert.ValidPrincipals[i]
+	}
+	if principal == "" {
+		if cert.Signature == nil {
+			return false
+		}
+		c := *cert
+		c.Signature = nil
+		signed := c.Marshal()
+		signed = signed[:len(signed)-4] // the length of the missing signature, as CheckCert leaves out
+		return cert.SignatureKey.Verify(signed, cert.Signature) == nil
+	}
 	opts := make([]string, 0, len(cert.CriticalOptions))
 	for n := range cert.CriticalOptions {
 		opts = append(opts, n)
-	}
-	principal := ""
-	if len(cert.ValidPrincipals) > 0 {
-		principal = cert.ValidPrincipals[0]
 	}
 	cc := ssh.CertChecker{
 		SupportedCriticalOptions: opts,

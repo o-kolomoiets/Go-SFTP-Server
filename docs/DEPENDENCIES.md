@@ -8,14 +8,14 @@ A new dependency requires removing another one or revisiting this rule.
 | Module                           | Version  | Purpose                                  | Since |
 |----------------------------------|----------|------------------------------------------|-------|
 | `github.com/spf13/cobra`         | v1.10.2  | CLI                                      | M0    |
-| `golang.org/x/crypto`            | v0.58.0  | `ssh`; later `argon2`, `bcrypt`          | M1    |
+| `golang.org/x/crypto`            | v0.59.0  | `ssh`; later `argon2`, `bcrypt`          | M1    |
 | `github.com/pkg/sftp`            | v1.13.12 | SFTP `RequestServer`                     | M1    |
 | `golang.org/x/sys`               | v0.50.0  | `unix.Renameat2` (atomic no-replace rename); later `unix.Fstatfs` | M1    |
 | `github.com/BurntSushi/toml`     | v1.6.0   | configuration                            | M2    |
 | `github.com/spf13/pflag`         | v1.1.0   | flags of `serve` that override the file  | M2    |
-| `golang.org/x/term`              | v0.47.0  | password input without echo              | M3    |
+| `golang.org/x/term`              | v0.48.0  | password input without echo              | M3    |
 | `github.com/pires/go-proxyproto` | v0.16.0  | PROXY protocol v1 and v2 header parser (Apache-2.0); it requires Go 1.26.9 | M4    |
-| `github.com/landlock-lsm/go-landlock` | v0.11.0 | Landlock on Linux ([below](#go-landlock-and-psx)) | M4 |
+| `github.com/landlock-lsm/go-landlock` | v0.11.2 | Landlock on Linux ([below](#go-landlock-and-psx)) | M4 |
 
 Planned later (see ROADMAP.md §4.5):
 `golang.org/x/time` for bandwidth limits, if they come.
@@ -27,7 +27,7 @@ Metrics need no library: gosftpd writes the Prometheus text format itself
 `github.com/landlock-lsm/go-landlock` (MIT) applies the Landlock ruleset that
 gosftpd computes from its configuration, on Linux only
 ([ADR 0011](adr/0011-proxy-systemd-landlock.md)). It brings
-`kernel.org/pub/linux/libs/security/libcap/psx` v1.2.77 (BSD-3-Clause or
+`kernel.org/pub/linux/libs/security/libcap/psx` v1.2.78 (BSD-3-Clause or
 GPL-2.0-only; gosftpd uses it under BSD-3-Clause), which makes one system
 call on every thread of the process: the kernel applies a ruleset, and the
 ambient capabilities that gosftpd clears, per thread. Release binaries

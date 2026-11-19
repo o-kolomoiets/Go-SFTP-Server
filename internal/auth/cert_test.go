@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/o-kolomoiets/go-sftp-server/internal/testutil"
 )
 
 var certNow = time.Date(2027, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -48,7 +50,7 @@ func issue(t *testing.T, ca ssh.Signer, key ssh.PublicKey, edit func(*ssh.Certif
 	if edit != nil {
 		edit(c)
 	}
-	if err := c.SignCert(rand.Reader, ca); err != nil {
+	if err := testutil.SignCert(c, rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
 	return c
@@ -141,6 +143,10 @@ func TestCertificateChecks(t *testing.T) {
 		{"host certificate", nil, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) { c.CertType = ssh.HostCert }), fakeConn{user: "alice"}, "denied"},
 		{"forged signature", nil, nil, nil, forge(issue(t, ca, key, nil)), fakeConn{user: "alice"}, "denied"},
 		{"forged and expired", nil, nil, nil, forge(issue(t, ca, key, func(c *ssh.Certificate) { c.ValidBefore = uint64(certNow.Add(-time.Minute).Unix()) })), fakeConn{user: "alice"}, "denied"},
+		{"forged, no principals", nil, nil, nil, forge(issue(t, ca, key, func(c *ssh.Certificate) { c.ValidPrincipals = nil })), fakeConn{user: "alice"}, "denied"},
+		{"forged, empty principal", nil, nil, nil, forge(issue(t, ca, key, func(c *ssh.Certificate) { c.ValidPrincipals = []string{""} })), fakeConn{user: "alice"}, "denied"},
+		{"only an empty principal", nil, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidPrincipals = []string{""} }), fakeConn{user: "alice"}, ReasonCertInvalid},
+		{"no principals, SHA-1 CA", nil, nil, nil, issue(t, rsaCA, key, func(c *ssh.Certificate) { c.ValidPrincipals = nil }), fakeConn{user: "alice"}, ReasonCertInvalid},
 		{"unknown user", nil, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidPrincipals = []string{"mallory"} }), fakeConn{user: "mallory"}, "denied"},
 		{"expired", nil, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidBefore = uint64(certNow.Unix()) }), fakeConn{user: "alice"}, ReasonCertExpired},
 		{"not yet valid", nil, nil, nil, issue(t, ca, key, func(c *ssh.Certificate) { c.ValidAfter = uint64(certNow.Add(time.Minute).Unix()) }), fakeConn{user: "alice"}, ReasonCertNotYetValid},
@@ -247,7 +253,11 @@ func TestCertificateRefusalDetail(t *testing.T) {
 		a := trusting(users, cas, rev)
 		_, err := a.KnownKey(fakeConn{user: "alice", addr: tcp("192.0.2.9")}, tt.cert)
 		re, ok := errors.AsType[*RefusedError](err)
-		if !ok || !strings.Contains(re.Detail, tt.detail) || re.Cert == nil || re.Key == nil {
+		if !ok {
+			t.Errorf("%s: %v, want a refusal with detail %q", tt.name, err, tt.detail)
+			continue
+		}
+		if !strings.Contains(re.Detail, tt.detail) || re.Cert == nil || re.Key == nil {
 			t.Errorf("%s: %v (detail %q), want detail with %q", tt.name, err, re.Detail, tt.detail)
 		}
 	}
