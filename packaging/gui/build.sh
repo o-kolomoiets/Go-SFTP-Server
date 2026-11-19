@@ -214,9 +214,9 @@ cp "$src/packaging/gui/nfpm.yaml" "$tmp/nfpm.yaml"
 grep -qx 'description: Share folders over SFTP from a window' "$tmp/nfpm-archlinux.yaml"
 # package FORMAT BINARY_DIR RELEASE
 package() {
-	local config=$tmp/nfpm.yaml
-	[ "$1" != archlinux ] || config=$tmp/nfpm-archlinux.yaml
-	(cd "$src" && GUI_VERSION=$version GUI_BINARY=$tmp/$2/gosftpd-gui GOSFTPD=$tmp/bin/gosftpd PKG=$tmp/pkg \
+	local config=$tmp/nfpm.yaml docdir=/usr/share/doc/gosftpd-gui
+	[ "$1" != archlinux ] || config=$tmp/nfpm-archlinux.yaml docdir=/usr/share/licenses/gosftpd-gui
+	(cd "$src" && GUI_VERSION=$version GUI_BINARY=$tmp/$2/gosftpd-gui GOSFTPD=$tmp/bin/gosftpd PKG=$tmp/pkg DOCDIR=$docdir \
 		GUI_RELEASE=$3 SOURCE_DATE_EPOCH=$epoch $nfpm package --config "$config" --packager "$1" --target "$out/")
 }
 package deb debian 1

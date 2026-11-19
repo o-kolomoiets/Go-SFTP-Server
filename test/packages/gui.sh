@@ -37,11 +37,11 @@ case $format in
 deb)
 	apt-get -qq update
 	DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends "$file" >/dev/null
-	gosftpd=/usr/libexec/gosftpd-gui/gosftpd
+	gosftpd=/usr/libexec/gosftpd-gui/gosftpd docdir=/usr/share/doc/gosftpd-gui
 	;;
 rpm)
 	dnf -q -y install "$file" >/dev/null
-	gosftpd=/usr/libexec/gosftpd-gui/gosftpd
+	gosftpd=/usr/libexec/gosftpd-gui/gosftpd docdir=/usr/share/doc/gosftpd-gui
 	;;
 archlinux)
 	# A full upgrade first: Arch supports no partial upgrade, and the
@@ -49,7 +49,7 @@ archlinux)
 	pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null
 	pacman -Su --noconfirm >/dev/null
 	pacman -U --noconfirm "$file" >/dev/null
-	gosftpd=/usr/lib/gosftpd-gui/gosftpd
+	gosftpd=/usr/lib/gosftpd-gui/gosftpd docdir=/usr/share/licenses/gosftpd-gui
 	;;
 esac
 
@@ -77,11 +77,11 @@ grep -qx 'Exec=gosftpd-gui' "$desktop" || fail "$desktop: no Exec=gosftpd-gui"
 grep -qx 'Icon=gosftpd-gui' "$desktop" || fail "$desktop: no Icon=gosftpd-gui"
 [ -f /usr/share/icons/hicolor/scalable/apps/gosftpd-gui.svg ] || fail "no icon"
 for f in NOTICE LGPL-3.0 GPL-3.0 LICENSE THIRD_PARTY_LICENSES THIRD_PARTY_LICENSES.gosftpd; do
-	[ -s "/usr/share/doc/gosftpd-gui/$f" ] || fail "/usr/share/doc/gosftpd-gui/$f is missing or empty"
+	[ -s "$docdir/$f" ] || fail "$docdir/$f is missing or empty"
 done
-grep -q 'github.com/mappu/miqt' /usr/share/doc/gosftpd-gui/THIRD_PARTY_LICENSES || fail "THIRD_PARTY_LICENSES does not name miqt"
+grep -q 'github.com/mappu/miqt' "$docdir/THIRD_PARTY_LICENSES" || fail "THIRD_PARTY_LICENSES does not name miqt"
 if [ "$format" = deb ]; then
-	cmp -s /usr/share/doc/gosftpd-gui/copyright /usr/share/doc/gosftpd-gui/NOTICE || fail "the deb's copyright file is not the NOTICE"
+	cmp -s "$docdir/copyright" "$docdir/NOTICE" || fail "the deb's copyright file is not the NOTICE"
 fi
 
 echo "== remove"
@@ -90,7 +90,7 @@ deb) DEBIAN_FRONTEND=noninteractive apt-get -qq purge -y gosftpd-gui >/dev/null 
 rpm) dnf -q -y remove gosftpd-gui >/dev/null ;;
 archlinux) pacman -R --noconfirm gosftpd-gui >/dev/null ;;
 esac
-for p in /usr/bin/gosftpd-gui "$gosftpd" "$(dirname "$gosftpd")" "$desktop" /usr/share/doc/gosftpd-gui; do
+for p in /usr/bin/gosftpd-gui "$gosftpd" "$(dirname "$gosftpd")" "$desktop" "$docdir"; do
 	[ ! -e "$p" ] || fail "$p is left after the removal"
 done
 echo "ok: $(basename "$file")"

@@ -32,17 +32,20 @@ contents:
   - { dst: /usr/lib/gosftpd-gui, type: dir, packager: archlinux, file_info: { mode: 0755 } }
   - { src: packaging/gui/gosftpd-gui.desktop, dst: /usr/share/applications/gosftpd-gui.desktop, file_info: { mode: 0644 } }
   - { src: packaging/gui/gosftpd-gui.svg, dst: /usr/share/icons/hicolor/scalable/apps/gosftpd-gui.svg, file_info: { mode: 0644 } }
-  # The notices of ADR 0013, "LGPLv3".
-  - { dst: /usr/share/doc/gosftpd-gui, type: dir, file_info: { mode: 0755 } }
-  - { src: packaging/gui/NOTICE, dst: /usr/share/doc/gosftpd-gui/NOTICE, file_info: { mode: 0644 } }
+  # The notices of ADR 0013, "LGPLv3", in DOCDIR: /usr/share/doc/gosftpd-gui,
+  # and on Arch /usr/share/licenses/gosftpd-gui, the place Arch gives them,
+  # which its image does not drop (its pacman.conf leaves out
+  # /usr/share/doc).
+  - { dst: "${DOCDIR}", type: dir, expand: true, file_info: { mode: 0755 } }
+  - { src: packaging/gui/NOTICE, dst: "${DOCDIR}/NOTICE", expand: true, file_info: { mode: 0644 } }
   # Debian's place for it, which a minimized system keeps (Debian Policy
   # 12.5); the LGPL-3 text is in /usr/share/common-licenses there too.
   - { src: packaging/gui/NOTICE, dst: /usr/share/doc/gosftpd-gui/copyright, packager: deb, file_info: { mode: 0644 } }
-  - { src: packaging/gui/licenses/LGPL-3.0, dst: /usr/share/doc/gosftpd-gui/LGPL-3.0, file_info: { mode: 0644 } }
-  - { src: packaging/gui/licenses/GPL-3.0, dst: /usr/share/doc/gosftpd-gui/GPL-3.0, file_info: { mode: 0644 } }
-  - { src: "${PKG}/LICENSE", dst: /usr/share/doc/gosftpd-gui/LICENSE, expand: true, file_info: { mode: 0644 } }
-  - { src: "${PKG}/THIRD_PARTY_LICENSES", dst: /usr/share/doc/gosftpd-gui/THIRD_PARTY_LICENSES, expand: true, file_info: { mode: 0644 } }
-  - { src: "${PKG}/THIRD_PARTY_LICENSES.gosftpd", dst: /usr/share/doc/gosftpd-gui/THIRD_PARTY_LICENSES.gosftpd, expand: true, file_info: { mode: 0644 } }
+  - { src: packaging/gui/licenses/LGPL-3.0, dst: "${DOCDIR}/LGPL-3.0", expand: true, file_info: { mode: 0644 } }
+  - { src: packaging/gui/licenses/GPL-3.0, dst: "${DOCDIR}/GPL-3.0", expand: true, file_info: { mode: 0644 } }
+  - { src: "${PKG}/LICENSE", dst: "${DOCDIR}/LICENSE", expand: true, file_info: { mode: 0644 } }
+  - { src: "${PKG}/THIRD_PARTY_LICENSES", dst: "${DOCDIR}/THIRD_PARTY_LICENSES", expand: true, file_info: { mode: 0644 } }
+  - { src: "${PKG}/THIRD_PARTY_LICENSES.gosftpd", dst: "${DOCDIR}/THIRD_PARTY_LICENSES.gosftpd", expand: true, file_info: { mode: 0644 } }
 rpm:
   buildhost: gosftpd # nfpm takes the host name otherwise
 archlinux:

@@ -90,7 +90,8 @@ process and changes the configuration only through its commands
   Fedora 44 and later, an rpm for EL 9 with EPEL (where its Qt 6 comes
   from) and an Arch package. They depend on the system's Qt 6, which the
   GUI links dynamically (LGPL-3.0; the notices are in
-  `/usr/share/doc/gosftpd-gui`). The build images and versions are
+  `/usr/share/doc/gosftpd-gui`, on Arch in `/usr/share/licenses/gosftpd-gui`).
+  The build images and versions are
   pinned, and two builds of a commit give the same packages. The release
   ships them from v0.6.0.
 

@@ -599,7 +599,9 @@ In all four:
   default, and the GUI does not modify Qt.
   - **Linux:** the binary contains code from Qt's headers (inline
     functions and templates), so each package installs, in
-    `/usr/share/doc/gosftpd-gui/`:
+    `/usr/share/doc/gosftpd-gui/` (on Arch `/usr/share/licenses/gosftpd-gui/`,
+    Arch's place for them, which its container image keeps; the deb also
+    has the notice as Debian's `copyright` file):
     - a notice that the GUI uses Qt under the LGPLv3;
     - the GPLv3 and LGPLv3 texts;
     - the project's LICENSE;
