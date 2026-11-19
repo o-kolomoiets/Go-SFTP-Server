@@ -177,7 +177,8 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
     release archive, capture the banner, the partner-inbox `sftp`
     transcript and its audit event again, and record `docs/assets/demo.gif`
     again with `docs/assets/record-demo.py` and `agg`, as its docstring
-    says.
+    says. When the GUI's screens changed, record `docs/assets/gui-demo.gif`
+    again with `docs/assets/record-gui-demo.py`, as its docstring says.
 14. Update `TASKS.md` (and `ROADMAP.md` if the plan changed).
 
 ## When something goes wrong
