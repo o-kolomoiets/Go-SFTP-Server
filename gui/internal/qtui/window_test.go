@@ -149,11 +149,13 @@ func TestShareAndStop(t *testing.T) {
 		if !strings.HasPrefix(w.fields["fingerprint"].Text(), "SHA256:") || !strings.Contains(w.fields["command"].Text(), "partner@") {
 			t.Errorf("details: %q, %q", w.fields["fingerprint"].Text(), w.fields["command"].Text())
 		}
-		if w.name.Text() != "" || w.key.Text() != "" || w.name.IsEnabled() || !w.stop.IsEnabled() || w.start.IsEnabled() {
-			t.Error("the form is not cleared and locked while sharing")
+		// The person added is listed, the form cleared; people and
+		// folders may change while sharing, the port may not.
+		if w.name.Text() != "" || w.key.Text() != "" || !w.name.IsEnabled() || w.port.IsEnabled() || !w.stop.IsEnabled() || w.start.IsEnabled() {
+			t.Error("the form is not cleared, or not as it should be while sharing")
 		}
-		if !strings.Contains(w.people.Text(), "partner (public key)") {
-			t.Errorf("people: %q", w.people.Text())
+		if r := person(w, "partner"); r == nil || !strings.HasPrefix(personText(r.p), "partner (public key). Inbox: upload") {
+			t.Errorf("people: %+v", w.cur.People)
 		}
 		// Not the warning of the init that ran before partner was added.
 		if more := w.more.ToPlainText(); strings.Contains(more, "no users") {
@@ -210,24 +212,40 @@ func TestStartSharingAtLaunch(t *testing.T) {
 		t.Errorf("status after Stop now: %q", s)
 	}
 
-	// A shared folder removed and added again keeps its name; another
-	// folder never takes the name of one in the configuration.
+	// Once shared, folders change at once. Another folder never takes the
+	// name of one in the configuration; the last folder cannot go.
 	other := filepath.Join(t.TempDir(), "Inbox")
 	if err := os.Mkdir(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	mainthread.Wait(func() {
-		again.folders[0].remove.Click()
+		again.confirm = func(string, string) bool { return true }
 		again.AddFolder(other)
-		again.AddFolder(share)
-		var names []string
-		for _, r := range again.folders {
-			names = append(names, r.folder.Name)
+	})
+	waitFor(t, "the folder to be added", func() bool { return !again.busy })
+	mainthread.Wait(func() {
+		if got := folderNames(again); got != "Inbox,Inbox 2" || again.folders[0].access.CurrentIndex() != accessRead {
+			t.Errorf("folders after adding another Inbox: %q", got)
 		}
-		if strings.Join(names, ",") != "Inbox 2,Inbox" || again.folders[1].access.CurrentIndex() != accessRead {
-			t.Errorf("folders after remove and add: %q", names)
+		again.folders[0].remove.Click()
+	})
+	waitFor(t, "the folder to be removed", func() bool { return !again.busy })
+	mainthread.Wait(func() {
+		if got := folderNames(again); got != "Inbox 2" || again.folders[0].remove.IsEnabled() {
+			t.Errorf("folders after removing Inbox: %q, Remove enabled %v", got, again.folders[0].remove.IsEnabled())
+		}
+		if again.fields["user"].Text() != "partner" || len(again.peopleRows) != 1 || len(again.cur.People[0].Access) != 0 {
+			t.Errorf("partner kept a removed folder: %+v", again.cur.People)
 		}
 	})
+}
+
+func folderNames(w *Window) string {
+	var names []string
+	for _, r := range w.folders {
+		names = append(names, r.folder.Name)
+	}
+	return strings.Join(names, ",")
 }
 
 // A configuration that cannot be read leaves the window unable to change

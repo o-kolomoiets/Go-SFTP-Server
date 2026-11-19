@@ -31,12 +31,13 @@ import (
 type state int
 
 const (
-	loading  state = iota // reading the configuration
-	idle                  // not sharing
-	working               // writing the configuration, starting gosftpd
-	sharing               // gosftpd serves
-	stopping              // gosftpd stops
-	broken                // the configuration could not be read: nothing may change it
+	loading    state = iota // reading the configuration
+	idle                    // not sharing
+	working                 // writing the configuration, starting gosftpd
+	sharing                 // gosftpd serves
+	stopping                // gosftpd stops
+	restarting              // gosftpd stops and starts again (Restart now)
+	broken                  // the configuration could not be read: nothing may change it
 )
 
 // Options are the window's command-line options.
@@ -57,6 +58,9 @@ type Window struct {
 	noFolder    *qt.QLabel
 	addFolder   *qt.QPushButton
 	people      *qt.QLabel
+	peopleBox   *qt.QVBoxLayout
+	peopleRows  []*personRow
+	addPersonB  *qt.QPushButton
 	name        *qt.QLineEdit
 	usePassword *qt.QRadioButton
 	useKey      *qt.QRadioButton
@@ -64,10 +68,12 @@ type Window struct {
 	generate    *qt.QPushButton
 	key         *qt.QLineEdit
 	port        *qt.QSpinBox
+	onConflict  *qt.QComboBox
 
-	start   *qt.QPushButton
-	stop    *qt.QPushButton
-	stopNow *qt.QPushButton
+	start      *qt.QPushButton
+	stop       *qt.QPushButton
+	stopNow    *qt.QPushButton
+	restartNow *qt.QPushButton
 
 	details   *qt.QGroupBox
 	fields    map[string]*qt.QLineEdit
@@ -84,6 +90,13 @@ type Window struct {
 	// closing is set when the window is closed while a start is under
 	// way, for the job off the main thread not to start gosftpd.
 	closing atomic.Bool
+	// busy is set while a change of people or folders runs.
+	busy bool
+	// offerRestart shows Restart now: a change applies only once gosftpd
+	// starts again, or people connected keep their old access.
+	offerRestart bool
+	// confirm asks a yes or no question (askYesNo; tests replace it).
+	confirm func(title, text string) bool
 }
 
 // folderRow is a shared folder in the list.
@@ -117,12 +130,16 @@ var detailLines = []detail{
 // shown.
 func New(a *app.App, opts Options) *Window {
 	w := &Window{app: a, opts: opts, fields: map[string]*qt.QLineEdit{}}
+	w.confirm = w.askYesNo
 	w.win = qt.NewQMainWindow2()
 	w.win.SetWindowTitle("gosftpd: share a folder")
 	central := qt.NewQWidget2()
 	page := qt.NewQVBoxLayout2()
 	central.SetLayout(page.QLayout)
-	w.win.SetCentralWidget(central)
+	scroll := qt.NewQScrollArea2()
+	scroll.SetWidgetResizable(true)
+	scroll.SetWidget(central)
+	w.win.SetCentralWidget(scroll.QWidget)
 
 	intro := qt.NewQLabel3("Share folders on this computer with people you choose. " +
 		"They connect with an SFTP program, such as FileZilla, WinSCP or sftp, using the details shown once sharing starts.")
@@ -141,9 +158,13 @@ func New(a *app.App, opts Options) *Window {
 	w.stopNow = qt.NewQPushButton3("Stop now")
 	w.stopNow.SetAccessibleDescription("Ends the connections still open")
 	w.stopNow.OnClicked(func() { w.stopSharing(true) })
+	w.restartNow = qt.NewQPushButton3("Restart now")
+	w.restartNow.SetAccessibleDescription("Starts the server again to apply the last change")
+	w.restartNow.OnClicked(func() { w.restart(true) })
 	buttons.AddWidget(w.start.QWidget)
 	buttons.AddWidget(w.stop.QWidget)
 	buttons.AddWidget(w.stopNow.QWidget)
+	buttons.AddWidget(w.restartNow.QWidget)
 	buttons.AddStretch()
 	page.AddLayout(buttons.QLayout)
 
@@ -196,6 +217,8 @@ func (w *Window) buildPeople() *qt.QGroupBox {
 	w.people = qt.NewQLabel2()
 	w.people.SetWordWrap(true)
 	l.AddWidget(w.people.QWidget)
+	w.peopleBox = qt.NewQVBoxLayout2()
+	l.AddLayout(w.peopleBox.QLayout)
 
 	form := qt.NewQFormLayout2()
 	w.name = qt.NewQLineEdit2()
@@ -229,6 +252,13 @@ func (w *Window) buildPeople() *qt.QGroupBox {
 	w.key.SetPlaceholderText("ssh-ed25519 AAAA… (their public key, never a private key)")
 	form.AddRow3("Public key:", w.key.QWidget)
 	l.AddLayout(form.QLayout)
+	w.addPersonB = qt.NewQPushButton3("Add person")
+	w.addPersonB.SetAccessibleDescription("Adds the person at once, with access to every folder")
+	w.addPersonB.OnClicked(w.addPerson)
+	row := qt.NewQHBoxLayout2()
+	row.AddWidget(w.addPersonB.QWidget)
+	row.AddStretch()
+	l.AddLayout(row.QLayout)
 	return box
 }
 
@@ -242,6 +272,13 @@ func (w *Window) buildServer() *qt.QGroupBox {
 	w.port.SetAccessibleName("Port")
 	w.port.SetMaximumWidth(120)
 	form.AddRow3("Port:", w.port.QWidget)
+	w.onConflict = qt.NewQComboBox2()
+	for _, ch := range onConflictChoices {
+		w.onConflict.AddItem(ch.label)
+	}
+	w.onConflict.SetAccessibleName("When an upload has the name of an existing file")
+	w.onConflict.OnActivated(w.setOnConflict)
+	form.AddRow3("When an upload has the name of an existing file:", w.onConflict.QWidget)
 	return box
 }
 
@@ -326,38 +363,26 @@ func (w *Window) run(job func(ctx context.Context) func()) {
 // loaded shows the configuration that was read.
 func (w *Window) loaded(cur app.Current) {
 	w.cur = cur
-	for _, r := range w.folders {
-		r.w.Hide()
-		r.w.DeleteLater()
-	}
-	w.folders = nil
-	for _, f := range cur.Settings.Folders {
-		w.addRow(f)
-	}
+	w.showFolders()
 	if cur.Configured {
 		w.port.SetValue(cur.Port())
 	}
 	w.showPeople()
 }
 
-func (w *Window) showPeople() {
-	if len(w.cur.People) == 0 {
-		w.people.SetText("Add the person who may connect.")
-		return
+// showFolders lists the folders of the configuration, and shows its
+// on_conflict.
+func (w *Window) showFolders() {
+	for _, r := range w.folders {
+		r.w.Hide()
+		r.w.DeleteLater()
 	}
-	var names []string
-	for _, p := range w.cur.People {
-		how := "password"
-		if !p.Password {
-			how = "public key"
-		}
-		s := fmt.Sprintf("%s (%s)", p.Name, how)
-		if p.Status == "disabled" {
-			s = fmt.Sprintf("%s (%s, disabled)", p.Name, how)
-		}
-		names = append(names, s)
+	w.folders = nil
+	for _, f := range w.cur.Settings.Folders {
+		w.addRow(f)
 	}
-	w.people.SetText("May connect: " + strings.Join(names, ", ") + ". Add someone else below, or leave the fields empty.")
+	i := slices.IndexFunc(onConflictChoices, func(c permChoice) bool { return c.value == w.cur.Settings.OnConflict })
+	w.onConflict.SetCurrentIndex(max(i, 0))
 }
 
 // chooseFolder asks for a folder to share.
@@ -393,6 +418,14 @@ func (w *Window) AddFolder(path string) {
 		names = append(names, f.Name)
 	}
 	f := supervisor.Folder{Name: app.FolderName(path, names), Path: path}
+	if w.cur.Configured {
+		done := fmt.Sprintf("Shared %s as %s.", path, f.Name)
+		if len(w.cur.People) > 0 {
+			done += " Give people access to it with Access…."
+		}
+		w.setFolders(append(w.listedFolders(), f), done, nil)
+		return
+	}
 	w.addRow(f)
 	w.setStatus(fmt.Sprintf("Added %s as %s.", path, f.Name))
 }
@@ -412,10 +445,17 @@ func (w *Window) addRow(f supervisor.Folder) {
 		r.access.SetCurrentIndex(accessRead)
 	}
 	r.access.SetAccessibleName("Access to " + f.Name)
+	r.access.OnActivated(func(int) { w.folderAccessChanged(r) })
 	l.AddWidget(r.access.QWidget)
 	r.remove = qt.NewQPushButton3("Remove")
 	r.remove.SetAccessibleName("Remove " + f.Name)
-	r.remove.OnClicked(func() { w.removeRow(r) })
+	r.remove.OnClicked(func() {
+		if w.cur.Configured {
+			w.removeSharedFolder(r)
+		} else {
+			w.removeRow(r)
+		}
+	})
 	l.AddWidget(r.remove.QWidget)
 	w.folderRows.AddWidget(r.w)
 	w.folders = append(w.folders, r)
@@ -430,11 +470,7 @@ func (w *Window) removeRow(r *folderRow) {
 	w.folders = slices.Delete(w.folders, i, i+1)
 	r.w.Hide()
 	r.w.DeleteLater()
-	if slices.ContainsFunc(w.cur.Settings.Folders, func(f supervisor.Folder) bool { return f.Path == r.folder.Path }) {
-		w.setStatus(fmt.Sprintf("Removed %s from the list: it is no longer shared once you start sharing.", r.folder.Name))
-	} else {
-		w.setStatus(fmt.Sprintf("Removed %s.", r.folder.Name))
-	}
+	w.setStatus(fmt.Sprintf("Removed %s.", r.folder.Name))
 	w.updateEnabled()
 	w.addFolder.SetFocus()
 }
@@ -450,23 +486,12 @@ func (w *Window) generatePassword() {
 	if who == "" {
 		who = "the person"
 	}
-	box := qt.NewQMessageBox6(qt.QMessageBox__Information, "Generated password",
-		fmt.Sprintf("The password for %s is:\n\n%s\n\nSend it to them in a safe way. It is shown only now: gosftpd keeps only a hash of it.", who, p),
-		qt.QMessageBox__Close, w.win.QWidget)
-	box.SetTextInteractionFlags(qt.TextSelectableByMouse | qt.TextSelectableByKeyboard)
-	box.SetInformativeText("Other programs can read what you copy.")
-	copyButton := box.AddButton2("Copy password", qt.QMessageBox__ActionRole)
-	box.Exec()
-	if box.ClickedButton() != nil && box.ClickedButton().UnsafePointer() == copyButton.QAbstractButton.UnsafePointer() {
-		qt.QGuiApplication_Clipboard().SetText(p)
-		w.setStatus("Copied the password. Other programs can read what you copy.")
-	}
-	box.DeleteLater()
+	w.showGenerated(who, p)
 }
 
 // form is what the person filled in.
 func (w *Window) form() app.Form {
-	f := app.Form{Port: w.port.Value()}
+	f := app.Form{Port: w.port.Value(), OnConflict: onConflictChoices[max(w.onConflict.CurrentIndex(), 0)].value}
 	for _, r := range w.folders {
 		fo := r.folder
 		fo.ReadOnly = r.access.CurrentIndex() == accessRead
@@ -619,6 +644,7 @@ func (w *Window) started(d supervisor.Details, user string) {
 		f.SetCursorPosition(0)
 	}
 	w.who = nil
+	w.offerRestart = false
 	w.connected.SetText("Nobody is connected.")
 	w.setState(sharing)
 	msg := fmt.Sprintf("Sharing on port %d.", d.Port)
@@ -684,7 +710,11 @@ func (w *Window) stopSharing(now bool) {
 
 // exited is gosftpd's exit.
 func (w *Window) exited() {
+	if w.state == restarting {
+		return // the exit of the server Restart replaces: restart reports
+	}
 	w.poll.Stop()
+	w.offerRestart = false
 	err := w.app.Exited()
 	w.who = nil
 	w.details.SetVisible(false)
@@ -704,10 +734,7 @@ func (w *Window) exited() {
 // asking first when someone is connected.
 func (w *Window) closeEvent(super func(*qt.QCloseEvent), ev *qt.QCloseEvent) {
 	if w.state == sharing && len(w.who) > 0 {
-		answer := qt.QMessageBox_Question2(w.win.QWidget, "Stop sharing?",
-			isAre(w.who)+" connected. Closing the window stops sharing and may cut their transfers.",
-			qt.QMessageBox__Yes, qt.QMessageBox__No)
-		if answer != int(qt.QMessageBox__Yes) {
+		if !w.confirm("Stop sharing?", isAre(w.who)+" connected. Closing the window stops sharing and may cut their transfers.") {
 			ev.Ignore()
 			return
 		}
@@ -727,7 +754,9 @@ func (w *Window) closeEvent(super func(*qt.QCloseEvent), ev *qt.QCloseEvent) {
 	case sharing:
 		w.quitDone = true
 		w.stopSharing(false)
-	case stopping:
+	case stopping, restarting:
+		// Quit once gosftpd has exited; a restart's new server is
+		// stopped as soon as it serves (started).
 		w.quitDone = true
 	}
 	ev.Ignore()
@@ -749,25 +778,42 @@ func (w *Window) setState(s state) {
 	}
 }
 
+// updateEnabled enables what the person may change now. Before a first
+// share the form is written by Start sharing; once a folder was shared,
+// people and folders change at once, also while sharing (a reload), but
+// not while a change, a start or a stop runs.
 func (w *Window) updateEnabled() {
-	editable := w.state == idle
+	configured := w.cur.Configured
+	editable := !w.busy && (w.state == idle || configured && w.state == sharing)
 	for _, r := range w.folders {
 		r.access.SetEnabled(editable)
-		r.remove.SetEnabled(editable)
+		// A configuration needs a folder: the last one cannot go.
+		r.remove.SetEnabled(editable && (!configured || len(w.folders) > 1))
 	}
 	w.noFolder.SetVisible(len(w.folders) == 0)
 	w.addFolder.SetEnabled(editable)
-	for _, c := range []*qt.QWidget{w.name.QWidget, w.usePassword.QWidget, w.useKey.QWidget, w.port.QWidget} {
+	for _, r := range w.peopleRows {
+		for _, b := range []*qt.QPushButton{r.access, r.password, r.toggle, r.remove} {
+			b.SetEnabled(editable)
+		}
+	}
+	for _, c := range []*qt.QWidget{w.name.QWidget, w.usePassword.QWidget, w.useKey.QWidget, w.onConflict.QWidget} {
 		c.SetEnabled(editable)
 	}
 	pw := editable && w.usePassword.IsChecked()
 	w.password.SetEnabled(pw)
 	w.generate.SetEnabled(pw)
 	w.key.SetEnabled(editable && !w.usePassword.IsChecked())
-	w.start.SetEnabled(editable)
+	w.addPersonB.SetVisible(configured)
+	w.addPersonB.SetEnabled(editable)
+	// The port changes when sharing starts.
+	w.port.SetEnabled(!w.busy && w.state == idle)
+	w.start.SetEnabled(!w.busy && w.state == idle)
 	w.stop.SetEnabled(w.state == sharing)
 	w.stopNow.SetEnabled(w.state == sharing || w.state == stopping)
-	w.details.SetVisible(w.state == sharing || w.state == stopping)
+	w.restartNow.SetVisible(w.offerRestart && w.state == sharing)
+	w.restartNow.SetEnabled(!w.busy)
+	w.details.SetVisible(w.state == sharing || w.state == stopping || w.state == restarting)
 }
 
 // setStatus shows a message in the status line and announces it.

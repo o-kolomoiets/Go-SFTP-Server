@@ -684,7 +684,7 @@ flowchart LR
   - the version check of the shipped gosftpd;
   - the configuration and the people only through gosftpd commands, the audit log read for the activity, one GUI per user.
 - [x] `gui/cmd/gosftpd-gui` (Qt 6 through miqt), first run and **share a folder**: pick one or more folders, read-only or upload, add a person with a password or a public key, generate or reuse the host key, start and stop; the connection details (host, port, user, fingerprint, the `known_hosts` line, the `sftp` command) ready to copy.
-- [ ] Users and folders: list, add, disable, remove, change permissions and `on_conflict`, with the same checks and messages as the CLI. A reload applies the changes. A restart happens only when the reload asks for one, and never without the person's say while someone is connected.
+- [x] Users and folders: list, add, disable, remove, change permissions and `on_conflict`, with the same checks and messages as the CLI. A reload applies the changes. A restart happens only when the reload asks for one, and never without the person's say while someone is connected.
 - [ ] Activity: the server's state, who is connected and the latest finished uploads and downloads from the audit log, with a filter; errors and warnings of the log in plain words.
 - [ ] Packaging and signing in the release pipeline (ADR 0013):
   - deb, rpm and Arch packages for amd64 that carry their own gosftpd, built in Debian 12 and EL 9 images (arm64 when someone asks);
