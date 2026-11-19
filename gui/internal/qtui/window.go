@@ -87,6 +87,7 @@ type Window struct {
 	actWarnLabel *qt.QLabel
 	snap         app.Snapshot // the activity, as last read
 	actShown     string       // which entries the table shows (entriesKey)
+	actStateBare string       // the state shown, without who is connected
 
 	connected *qt.QLabel
 	status    *qt.QLabel
@@ -818,6 +819,9 @@ func (w *Window) updateEnabled() {
 	w.stop.SetEnabled(w.state == sharing)
 	w.stopNow.SetEnabled(w.state == sharing || w.state == stopping)
 	w.restartNow.SetVisible(w.offerRestart && w.state == sharing)
+	// Clear activity once the first read of the log is done, off the
+	// window's thread.
+	w.actClear.SetEnabled(w.state != loading)
 	w.restartNow.SetEnabled(!w.busy)
 	w.details.SetVisible(w.state == sharing || w.state == stopping || w.state == restarting)
 }

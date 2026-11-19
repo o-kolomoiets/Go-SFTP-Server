@@ -5,7 +5,10 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -79,10 +82,32 @@ func Describe(e supervisor.Event) Entry {
 		en.What = e.Name
 	}
 	if e.Result != "" && e.Result != "ok" && e.Name != "fs.denied" {
-		en.What += " (failed: " + strings.ReplaceAll(e.Result, "_", " ") + ")"
-		en.Failed = true
+		noun, ok := failedNouns[e.Name]
+		if !ok {
+			noun = e.Name
+		}
+		en.What, en.Failed = noun+" failed: "+plainResult(e.Result), true
 	}
 	return en
+}
+
+// failedNouns name an operation that failed.
+var failedNouns = map[string]string{
+	"fs.upload": "Upload", "fs.download": "Download", "fs.rename": "Rename", "fs.remove": "Delete",
+	"fs.mkdir": "Creating a folder", "fs.rmdir": "Removing a folder", "fs.setstat": "Changing times or permissions",
+}
+
+// plainResult says a result other than ok in plain words.
+func plainResult(r string) string {
+	switch r {
+	case "aborted":
+		return "cut off before the end"
+	case "denied":
+		return "refused"
+	case "error":
+		return "an error"
+	}
+	return strings.ReplaceAll(r, "_", " ")
 }
 
 // opVerbs say what a refused operation (fs.denied's op) would have done.
@@ -150,12 +175,57 @@ func (a *App) ClearActivity() error {
 	if a.PrefsPath == "" {
 		return nil
 	}
-	p, err := LoadPrefs(a.PrefsPath)
+	path := a.G.Layout.AuditLog()
+	sum, err := tailSum(path, pos)
 	if err != nil {
 		return err
 	}
-	p.ActivityFrom, p.ActivityLog = pos, fileID(a.G.Layout.AuditLog())
+	// A broken preferences file is written anew.
+	p, _ := LoadPrefs(a.PrefsPath)
+	p.ActivityFrom, p.ActivityLog, p.ActivityTail = pos, fileID(path), sum
 	return SavePrefs(a.PrefsPath, p)
+}
+
+// forgetCleared drops the place Clear activity kept: the log it was a
+// place in was truncated, deleted or rotated. a.mu is held.
+func (a *App) forgetClearedLocked() {
+	if a.PrefsPath == "" {
+		return
+	}
+	if p, err := LoadPrefs(a.PrefsPath); err == nil && p.ActivityFrom != 0 {
+		p.ActivityFrom, p.ActivityLog, p.ActivityTail = 0, "", ""
+		_ = SavePrefs(a.PrefsPath, p)
+	}
+}
+
+// maxActivityRead is how much of the audit log the GUI reads when it
+// starts: the activity keeps the latest transfers only, and a log of
+// years would take long to read.
+const maxActivityRead = 4 << 20
+
+// tailLen is how many bytes before the place Clear activity kept must be
+// the same for a later GUI to go on from it.
+const tailLen = 256
+
+// tailSum is a digest of the bytes of the file at path just before off:
+// the same file, also after a copytruncate or a delete that brought back
+// its inode, has them only if it is the log Clear activity saw.
+func tailSum(path string, off int64) (string, error) {
+	if off <= 0 {
+		return "", nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	start := max(off-tailLen, 0)
+	buf := make([]byte, off-start)
+	if _, err := f.ReadAt(buf, start); err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(buf)
+	return hex.EncodeToString(h[:]), nil
 }
 
 // followerLocked returns the follower of the audit log, made on first
@@ -166,12 +236,34 @@ func (a *App) followerLocked() *supervisor.Follower {
 	}
 	path := a.G.Layout.AuditLog()
 	a.follower = supervisor.NewFollower(path)
-	if a.PrefsPath != "" {
-		if p, err := LoadPrefs(a.PrefsPath); err == nil && p.ActivityFrom > 0 && p.ActivityLog == fileID(path) {
-			a.follower.Resume(p.ActivityFrom)
-		}
+	if a.resumable(path) {
+		return a.follower
+	}
+	if err := a.follower.Last(maxActivityRead); err != nil {
+		a.follower = supervisor.NewFollower(path)
 	}
 	return a.follower
+}
+
+// resumable moves the follower to the place Clear activity kept, if it
+// is a place in this log and not too far back.
+func (a *App) resumable(path string) bool {
+	if a.PrefsPath == "" {
+		return false
+	}
+	p, err := LoadPrefs(a.PrefsPath)
+	if err != nil || p.ActivityFrom <= 0 || p.ActivityLog != fileID(path) {
+		return false
+	}
+	if sum, err := tailSum(path, p.ActivityFrom); err != nil || sum != p.ActivityTail {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size()-p.ActivityFrom > maxActivityRead {
+		return false
+	}
+	a.follower.Resume(p.ActivityFrom)
+	return true
 }
 
 // plainWarnings say known warnings and errors of gosftpd's operational
@@ -185,7 +277,7 @@ var plainWarnings = []struct{ prefix, text string }{
 	{"banning source after repeated login failures", "An address is blocked for a while after repeated failed logins"},
 	{"closed connections that did not finish in time", "Stopping cut connections that did not finish in time."},
 	{"landlock: not available", "This system cannot confine gosftpd with Landlock: it shares without that protection."},
-	{"landlock: failed", "Confining gosftpd with Landlock failed: it shares without that protection."},
+	{"landlock: failed", "gosftpd could not confine itself with Landlock, and did not start."},
 	{"accept failed, retrying", "gosftpd could not accept a connection, and tries again."},
 	{"this setting changes only at restart", "A changed setting applies only once sharing starts again."},
 	{"host keys cannot be used", "The changed host key cannot be used: the one in use stays."},

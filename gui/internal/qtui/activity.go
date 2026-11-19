@@ -98,11 +98,21 @@ func (w *Window) showActivity(force bool) {
 	s := w.snap
 	state := stateText(s)
 	if state != w.actState.Text() {
+		// Who connects is announced by the connection details: here only
+		// a change of the state itself.
+		quiet := s
+		quiet.Connected = nil
+		changed := stateText(quiet) != w.actStateBare
+		w.actStateBare = stateText(quiet)
 		w.actState.SetText(state)
-		announce(w.actState.QObject)
+		if changed {
+			announce(w.actState.QObject)
+		}
 	}
 	entries := app.Filter(s.Entries, w.actFilter.Text())
-	key := entriesKey(entries)
+	// The day is part of the key: past midnight, yesterday's entries
+	// show their date.
+	key := time.Now().Format("2006-01-02 ") + entriesKey(entries)
 	if force || key != w.actShown {
 		w.actShown = key
 		w.actTable.SetRowCount(len(entries))
@@ -131,6 +141,9 @@ func (w *Window) showActivity(force bool) {
 	text := strings.Join(warnings, "\n")
 	if text != w.actWarnings.ToPlainText() {
 		w.actWarnings.SetPlainText(text)
+		if text != "" {
+			announce(w.actWarnings.QObject)
+		}
 	}
 	w.actWarnings.SetVisible(text != "")
 	w.actWarnLabel.SetVisible(text != "")

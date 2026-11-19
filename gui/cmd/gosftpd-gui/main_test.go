@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,5 +64,24 @@ func TestRunFlags(t *testing.T) {
 	errOut.Reset()
 	if code := run([]string{"--no-such-flag"}, &out, &errOut); code != 2 {
 		t.Errorf("an unknown flag: %d %q", code, errOut.String())
+	}
+}
+
+// setup finds the state directory, the preferences and the lock.
+func TestSetup(t *testing.T) {
+	config, rt := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	bin := filepath.Join(t.TempDir(), "gosftpd")
+	a, lock, err := setup(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Release() }()
+	if a.PrefsPath != filepath.Join(config, "gosftpd-gui.conf") || a.G.Layout.Dir != filepath.Join(config, "gosftpd-gui") || a.G.Bin != bin {
+		t.Errorf("setup: prefs %q, state %q, gosftpd %q", a.PrefsPath, a.G.Layout.Dir, a.G.Bin)
+	}
+	if _, _, err := setup(bin); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Errorf("a second setup: %v", err)
 	}
 }

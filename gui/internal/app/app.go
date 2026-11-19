@@ -101,6 +101,9 @@ func (c Current) Port() int {
 // their grants would go to new folders that happen to have the names of
 // their old ones.
 func (a *App) Load(ctx context.Context) (Current, error) {
+	// The first read of the audit log may take a moment: here, off the
+	// window's thread, and not at its first Poll.
+	_, _ = a.Poll()
 	if !a.G.Layout.Exists() {
 		files, err := filepath.Glob(filepath.Join(a.G.Layout.UsersDir(), "*.toml"))
 		if err != nil {
@@ -120,9 +123,6 @@ func (a *App) Load(ctx context.Context) (Current, error) {
 	if err != nil {
 		return Current{}, err
 	}
-	// The first read of the audit log may be long: here, off the
-	// window's thread, and not at its first Poll.
-	_, _ = a.Poll()
 	return Current{Configured: true, Settings: s, Reset: reset, People: ps}, nil
 }
 
@@ -287,8 +287,14 @@ func (a *App) Start(ctx context.Context, waiting func(pid int)) (supervisor.Deta
 	if err := a.waitPrevious(ctx, waiting); err != nil {
 		return supervisor.Details{}, err
 	}
+	// Nobody is connected to a server that has not started: the log is
+	// read to its end, and its sessions, of a server that died without
+	// server.stop, do not count. The new server's server.start and
+	// sessions follow, and may come before Start returns.
 	a.mu.Lock()
 	a.logTail = nil
+	_, _, _ = a.followerLocked().Poll()
+	a.activity.Exited()
 	a.mu.Unlock()
 	srv, err := a.G.Start(ctx, a.log)
 	if err != nil {
@@ -301,11 +307,7 @@ func (a *App) Start(ctx context.Context, waiting func(pid int)) (supervisor.Deta
 		}
 	}
 	a.mu.Lock()
-	// Nobody is connected to a server that just started: sessions in the
-	// log before its server.start, of a server that died without
-	// server.stop, are not counted.
 	a.srv, a.stopping = srv, false
-	a.activity.Exited()
 	a.mu.Unlock()
 	return srv.Details, nil
 }
@@ -490,6 +492,7 @@ func (a *App) Poll() (connected []supervisor.Session, err error) {
 	events, reset, err := a.followerLocked().Poll()
 	if reset {
 		a.activity.Reset()
+		a.forgetClearedLocked()
 	}
 	for _, e := range events {
 		a.activity.Apply(e)

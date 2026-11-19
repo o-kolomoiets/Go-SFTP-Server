@@ -70,17 +70,18 @@ process and changes the configuration only through its commands
   connected keeps their old access until they disconnect, as with a
   reload of gosftpd. Before a change that moves a person's paths (a
   person with one folder sees its files at the top, one with more sees a
-  directory per folder), the GUI says so. When a change applies only once gosftpd starts again
-  (under Landlock, a new folder), the GUI restarts it when nobody is
-  connected, and otherwise offers Restart now, which names the people
-  connected first.
+  directory per folder), the GUI says so. When a change applies only
+  once gosftpd starts again (under Landlock, a new folder), the GUI
+  restarts it when nobody is connected, and otherwise offers Restart
+  now, which names the people connected first.
 - An Activity section in `gosftpd-gui`, also while not sharing: whether
   gosftpd shares and whether Landlock confines it, who is connected and
   since when, and the latest finished uploads, downloads and changes of
   the audit log (time, person, what happened in plain words, size,
   file), with a filter. Clear activity hides what is listed, also for
   later runs of the GUI: the place in the audit log is kept in
-  `gosftpd-gui.conf`, and a log rotated since is shown from its start.
+  `gosftpd-gui.conf`, and a log rotated or truncated since is shown from
+  its start. At launch the GUI reads the last 4 MiB of the log at most.
   The audit log itself is never changed. Known warnings of gosftpd's
   operational log are shown in plain words, others as gosftpd wrote them.
 

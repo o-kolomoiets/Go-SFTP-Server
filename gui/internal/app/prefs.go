@@ -24,6 +24,9 @@ type Prefs struct {
 	// from its start.
 	ActivityFrom int64  `json:"activity_from,omitempty"`
 	ActivityLog  string `json:"activity_log,omitempty"`
+	// ActivityTail is a digest of the bytes before ActivityFrom: a log
+	// truncated or made anew with the same inode does not match it.
+	ActivityTail string `json:"activity_tail,omitempty"`
 }
 
 // DefaultPrefsPath is <user config dir>/gosftpd-gui.conf.

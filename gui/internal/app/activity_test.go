@@ -7,6 +7,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,7 +25,9 @@ func TestDescribe(t *testing.T) {
 		{supervisor.Event{Name: "fs.upload", Path: "/r.pdf", FinalPath: "/r.pdf", Bytes: 7, Result: "ok"}, "Uploaded", "/r.pdf", false},
 		{supervisor.Event{Name: "fs.upload", Path: "/r.pdf", FinalPath: "/r (1).pdf", Conflict: "renamed", Result: "ok"}, "Uploaded under another name: /r.pdf existed", "/r (1).pdf", false},
 		{supervisor.Event{Name: "fs.upload", Path: "/r.pdf", Conflict: "overwritten", Result: "ok"}, "Uploaded, replacing the file", "/r.pdf", false},
-		{supervisor.Event{Name: "fs.upload", Path: "/r.pdf", Result: "eof"}, "Uploaded (failed: eof)", "/r.pdf", true},
+		{supervisor.Event{Name: "fs.upload", Path: "/r.pdf", Result: "aborted"}, "Upload failed: cut off before the end", "/r.pdf", true},
+		{supervisor.Event{Name: "fs.upload", Path: "/r.pdf", Conflict: "overwritten", Result: "denied"}, "Upload failed: refused", "/r.pdf", true},
+		{supervisor.Event{Name: "fs.rename", Path: "/a", TargetPath: "/b", Result: "some_error"}, "Rename failed: some error", "/a → /b", true},
 		{supervisor.Event{Name: "fs.download", Path: "/d.txt", Result: "ok"}, "Downloaded", "/d.txt", false},
 		{supervisor.Event{Name: "fs.rename", Path: "/a.tmp", TargetPath: "/a", FinalPath: "/a", Result: "ok"}, "Renamed", "/a.tmp → /a", false},
 		{supervisor.Event{Name: "fs.remove", Path: "/x", Result: "ok"}, "Deleted", "/x", false},
@@ -59,6 +62,9 @@ func TestPlainRecord(t *testing.T) {
 	}
 	if got := PlainRecord(supervisor.LogRecord{Level: "WARN", Msg: "banning source after repeated login failures", Attrs: map[string]any{"source": "192.0.2.7"}}); !strings.HasSuffix(got, "repeated failed logins: 192.0.2.7.") {
 		t.Errorf("ban: %q", got)
+	}
+	if got := PlainRecord(supervisor.LogRecord{Level: "ERROR", Msg: "landlock: failed"}); !strings.Contains(got, "did not start") {
+		t.Errorf("landlock failed: %q", got)
 	}
 	if got := PlainRecord(supervisor.LogRecord{Level: "WARN", Msg: "something new", Attrs: map[string]any{"k": "v"}}); got != "WARN something new k=v" {
 		t.Errorf("unknown: %q", got)
@@ -152,6 +158,25 @@ func TestActivity(t *testing.T) {
 	if s, err := next.Activity(); err != nil || len(s.Entries) != 1 || s.Entries[0].File != "/two.pdf" {
 		t.Errorf("the next GUI: %+v, %v", s.Entries, err)
 	}
+	// A log truncated in place (copytruncate) keeps its inode, but not
+	// the bytes before the place kept: the next GUI shows it from its
+	// start, and forgets the place.
+	if err := a.ClearActivity(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(a.G.Layout.AuditLog(), 0); err != nil {
+		t.Fatal(err)
+	}
+	upload("after-truncate.pdf")
+	for i := range 3 {
+		upload("filler" + strconv.Itoa(i) + ".pdf")
+	}
+	truncated := &App{G: a.G, PrefsPath: a.PrefsPath}
+	waitFor(t, "the truncated log from its start", func() bool {
+		s, _ := truncated.Activity()
+		return len(s.Entries) == 4 && s.Entries[3].File == "/after-truncate.pdf"
+	})
+
 	// A log rotated by rename, which a reload makes gosftpd open anew
 	// (docs/audit-log.md), is shown from its start.
 	if err := os.Rename(a.G.Layout.AuditLog(), a.G.Layout.AuditLog()+".1"); err != nil {
