@@ -5,6 +5,7 @@ package supervisor
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -208,6 +209,58 @@ func TestFollower(t *testing.T) {
 	}
 	if _, reset, _ := f.Poll(); !reset {
 		t.Error("deletion: no reset")
+	}
+}
+
+func TestFollowerResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f := NewFollower(path)
+	appendLine(t, path, `{"event":"fs.upload","path":"/a"}`+"\n"+`{"event":"fs.up`)
+	if ev, _, _ := f.Poll(); len(ev) != 1 || f.Position() == f.Offset() {
+		t.Fatalf("first poll: %+v, position %d, offset %d", ev, f.Position(), f.Offset())
+	}
+	pos := f.Position()
+	appendLine(t, path, `load","path":"/b"}`+"\n")
+
+	// A follower started later goes on from the position: /b, not /a.
+	g := NewFollower(path)
+	g.Resume(pos)
+	if ev, reset, err := g.Poll(); err != nil || reset || len(ev) != 1 || ev[0].Path != "/b" {
+		t.Errorf("after Resume: %+v, reset %v, %v", ev, reset, err)
+	}
+	// A shorter file is read from its start.
+	h := NewFollower(path)
+	h.Resume(1 << 20)
+	if ev, reset, _ := h.Poll(); !reset || len(ev) != 2 {
+		t.Errorf("Resume past the end: %d events, reset %v", len(ev), reset)
+	}
+}
+
+func TestFollowerLast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	f := NewFollower(path)
+	if err := f.Last(100); err != nil || f.Offset() != 0 {
+		t.Fatalf("missing file: %d, %v", f.Offset(), err)
+	}
+	var b strings.Builder
+	for i := range 100 {
+		fmt.Fprintf(&b, `{"event":"fs.upload","path":"/%02d"}`+"\n", i)
+	}
+	appendLine(t, path, b.String())
+	if err := f.Last(100); err != nil {
+		t.Fatal(err)
+	}
+	ev, reset, err := f.Poll()
+	if err != nil || reset || len(ev) == 0 || len(ev) > 3 || ev[len(ev)-1].Path != "/99" {
+		t.Errorf("the last 100 bytes: %d events (%+v), reset %v, %v", len(ev), ev, reset, err)
+	}
+	// A short log is read whole.
+	g := NewFollower(path)
+	if err := g.Last(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if ev, _, _ := g.Poll(); len(ev) != 100 {
+		t.Errorf("a short log: %d events", len(ev))
 	}
 }
 

@@ -122,6 +122,10 @@ func setup(gosftpd string) (*app.App, *supervisor.Lock, error) {
 	if version != "dev" {
 		a.Version = version
 	}
+	// Without it, Clear activity holds only until the GUI quits.
+	if p, err := app.DefaultPrefsPath(); err == nil {
+		a.PrefsPath = p
+	}
 	return a, lock, nil
 }
 

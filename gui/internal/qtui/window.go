@@ -75,8 +75,20 @@ type Window struct {
 	stopNow    *qt.QPushButton
 	restartNow *qt.QPushButton
 
-	details   *qt.QGroupBox
-	fields    map[string]*qt.QLineEdit
+	details *qt.QGroupBox
+	fields  map[string]*qt.QLineEdit
+
+	actState     *qt.QLabel
+	actFilter    *qt.QLineEdit
+	actClear     *qt.QPushButton
+	actTable     *qt.QTableWidget
+	actEmpty     *qt.QLabel
+	actWarnings  *qt.QPlainTextEdit
+	actWarnLabel *qt.QLabel
+	snap         app.Snapshot // the activity, as last read
+	actShown     string       // which entries the table shows (entriesKey)
+	actStateBare string       // the state shown, without who is connected
+
 	connected *qt.QLabel
 	status    *qt.QLabel
 	more      *qt.QPlainTextEdit
@@ -173,6 +185,7 @@ func New(a *app.App, opts Options) *Window {
 	page.AddLayout(buttons.QLayout)
 
 	page.AddWidget(w.buildDetails().QWidget)
+	page.AddWidget(w.buildActivity().QWidget)
 
 	w.status = qt.NewQLabel2()
 	w.status.SetWordWrap(true)
@@ -336,6 +349,9 @@ func (w *Window) Show() {
 			}
 			w.loaded(cur)
 			w.setState(idle)
+			// The activity, also while not sharing: what the log says.
+			w.pollActivity()
+			w.poll.Start(500)
 			if len(cur.Reset) > 0 {
 				w.showMore(fmt.Sprintf("The configuration gives %s settings of their own (on_conflict or create), set by hand. "+
 					"Changing the folders or the port here writes the configuration again with the settings of the other folders.",
@@ -669,26 +685,6 @@ func (w *Window) started(d supervisor.Details, user string) {
 	}
 }
 
-// pollActivity follows who is connected.
-func (w *Window) pollActivity() {
-	sessions, err := w.app.Poll()
-	if err != nil {
-		w.showMore("Reading the audit log: " + err.Error())
-		return
-	}
-	who := app.Names(sessions)
-	if slices.Equal(who, w.who) {
-		return
-	}
-	w.who = who
-	text := "Nobody is connected."
-	if len(who) > 0 {
-		text = "Connected now: " + strings.Join(who, ", ") + "."
-	}
-	w.connected.SetText(text)
-	announce(w.connected.QObject)
-}
-
 // stopSharing stops gosftpd: at once with now, else after the open
 // connections end, for up to 30 s.
 func (w *Window) stopSharing(now bool) {
@@ -717,7 +713,6 @@ func (w *Window) exited() {
 	if w.state == restarting {
 		return // the exit of the server Restart replaces: restart reports
 	}
-	w.poll.Stop()
 	w.offerRestart = false
 	err := w.app.Exited()
 	w.who = nil
@@ -824,6 +819,9 @@ func (w *Window) updateEnabled() {
 	w.stop.SetEnabled(w.state == sharing)
 	w.stopNow.SetEnabled(w.state == sharing || w.state == stopping)
 	w.restartNow.SetVisible(w.offerRestart && w.state == sharing)
+	// Clear activity once the first read of the log is done, off the
+	// window's thread.
+	w.actClear.SetEnabled(w.state != loading)
 	w.restartNow.SetEnabled(!w.busy)
 	w.details.SetVisible(w.state == sharing || w.state == stopping || w.state == restarting)
 }

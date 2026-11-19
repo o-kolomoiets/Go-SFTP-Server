@@ -560,7 +560,6 @@ func (w *Window) restart(ask bool) {
 		d, err := w.app.Restart(ctx)
 		return func() {
 			if err != nil {
-				w.poll.Stop()
 				w.who = nil
 				w.setState(idle)
 				fmt.Fprintln(os.Stderr, "gosftpd-gui: restart:", err)

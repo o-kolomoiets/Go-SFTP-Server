@@ -202,7 +202,7 @@ func (a *App) Restart(ctx context.Context) (supervisor.Details, error) {
 	}
 	a.mu.Lock()
 	if a.srv == old {
-		a.srv, a.stopping, a.follower = nil, false, nil
+		a.srv, a.stopping = nil, false
 		a.activity.Exited()
 	}
 	a.mu.Unlock()
