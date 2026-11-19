@@ -67,18 +67,26 @@ func newGosftpd(t *testing.T) (Gosftpd, string) {
 	return Gosftpd{Bin: testBin, Layout: Layout{Dir: filepath.Join(dir, "gosftpd-gui")}}, share
 }
 
+// testVersion is what gosftpd version --json says of testBin: "dev", or
+// a pseudo-version when the build stamped this checkout's commit.
+func testVersion(t *testing.T, g Gosftpd) string {
+	t.Helper()
+	v, err := g.Version(t.Context())
+	if err != nil || v == "" {
+		t.Fatalf("Version = %q, %v", v, err)
+	}
+	return v
+}
+
 func TestVersion(t *testing.T) {
 	g, _ := newGosftpd(t)
 	ctx := t.Context()
-	v, err := g.Version(ctx)
-	if err != nil || v != "dev" {
-		t.Fatalf("Version = %q, %v", v, err)
-	}
-	if err := g.CheckVersion(ctx, "dev"); err != nil {
+	v := testVersion(t, g)
+	if err := g.CheckVersion(ctx, v); err != nil {
 		t.Error(err)
 	}
 	var ve *VersionError
-	if err := g.CheckVersion(ctx, "v9.9.9"); !errors.As(err, &ve) || ve.Found != "dev" || !strings.Contains(err.Error(), "needs gosftpd v9.9.9") {
+	if err := g.CheckVersion(ctx, "v9.9.9"); !errors.As(err, &ve) || ve.Found != v || !strings.Contains(err.Error(), "needs gosftpd v9.9.9") {
 		t.Errorf("CheckVersion(v9.9.9) = %v", err)
 	}
 }
@@ -280,7 +288,7 @@ func TestServe(t *testing.T) {
 	key := shareWithKey(t, g, share, "127.0.0.1:0")
 	s, _ := start(t, g)
 	d := s.Details
-	if d.Host != "127.0.0.1" || d.Port == 0 || d.Version != "dev" || len(d.HostKeys) != 1 || !strings.HasPrefix(d.HostKeyFingerprint, "SHA256:") || d.PID != s.cmd.Process.Pid {
+	if d.Host != "127.0.0.1" || d.Port == 0 || d.Version != testVersion(t, g) || len(d.HostKeys) != 1 || !strings.HasPrefix(d.HostKeyFingerprint, "SHA256:") || d.PID != s.cmd.Process.Pid {
 		t.Fatalf("details: %+v", d)
 	}
 	// known_hosts checks the host key: StrictHostKeyChecking=yes.
