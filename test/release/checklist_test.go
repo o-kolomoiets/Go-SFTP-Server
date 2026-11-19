@@ -19,8 +19,8 @@ import (
 // updates the uses: lines and the FROM lines of Dockerfiles, not these, so
 // a pin missing from the table is never updated. packaging/gui/build.sh
 // is read too: its build images by digest, and the versions it pins by
-// name (the Debian snapshot, Qt, the Fedora and Rocky releases, nfpm;
-// ADR 0013), which the table must name by value.
+// name (the Debian snapshot, Qt, the Fedora and Rocky releases, EL 9's
+// toolchain, nfpm; ADR 0013), which the table must name by value.
 func TestChecklistPins(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join(root, "docs", "release-checklist.md"))
@@ -50,7 +50,7 @@ func TestChecklistPins(t *testing.T) {
 	guiScript := filepath.Join(root, "packaging", "gui", "build.sh")
 	files = append(files, filepath.Join(root, ".goreleaser.yaml"), guiScript)
 	input := regexp.MustCompile(`^\s+(version|cosign-release|syft-version): v[0-9]`)
-	guiPin := regexp.MustCompile(`^(DEBIAN_SNAPSHOT|DEBIAN_QT|FEDORA_RELEASE|FEDORA_QT|ROCKY_RELEASE|EPEL_QT|NFPM)=([^\s#]+)`)
+	guiPin := regexp.MustCompile(`^(DEBIAN_SNAPSHOT|DEBIAN_QT|FEDORA_RELEASE|FEDORA_QT|ROCKY_RELEASE|EL9_GCC|EL9_BINUTILS|EL9_KERNEL_HEADERS|EPEL_QT|NFPM)=([^\s#]+)`)
 	guiPins := map[string]bool{}
 	image := regexp.MustCompile(`([a-z0-9][a-z0-9._/-]*):[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}`)
 	found := map[string][]string{} // what the table must name: the files that pin it
@@ -82,7 +82,7 @@ func TestChecklistPins(t *testing.T) {
 			t.Errorf("no workflow or packaging/gui/build.sh pins %s any more: update this test and the table", want)
 		}
 	}
-	for _, want := range []string{"DEBIAN_SNAPSHOT", "DEBIAN_QT", "FEDORA_RELEASE", "FEDORA_QT", "ROCKY_RELEASE", "EPEL_QT", "NFPM"} {
+	for _, want := range []string{"DEBIAN_SNAPSHOT", "DEBIAN_QT", "FEDORA_RELEASE", "FEDORA_QT", "ROCKY_RELEASE", "EL9_GCC", "EL9_BINUTILS", "EL9_KERNEL_HEADERS", "EPEL_QT", "NFPM"} {
 		if !guiPins[want] {
 			t.Errorf("packaging/gui/build.sh pins no %s any more: update this test and the table", want)
 		}
