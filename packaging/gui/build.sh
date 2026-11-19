@@ -181,7 +181,14 @@ cp "$tmp/debian/THIRD_PARTY_LICENSES" "$tmp/pkg/THIRD_PARTY_LICENSES"
 rm -rf "$out" && mkdir -p "$out"
 nfpm="go run github.com/goreleaser/nfpm/v2/cmd/nfpm@$NFPM"
 cp "$src/packaging/gui/nfpm.yaml" "$tmp/nfpm.yaml"
-{ cat "$src/packaging/gui/nfpm.yaml" && echo 'epoch: "0"'; } >"$tmp/nfpm-archlinux.yaml"
+# Arch's: with an epoch (see nfpm.yaml), and its pkgdesc one line, the
+# description's first.
+{ awk 'd == 1 { print "description: " substr($0, 3); d = 2; next }
+	d == 2 && /^  / { next }
+	{ d = 0 }
+	/^description: [|]-$/ { d = 1; next }
+	{ print }' "$src/packaging/gui/nfpm.yaml" && echo 'epoch: "0"'; } >"$tmp/nfpm-archlinux.yaml"
+grep -qx 'description: Share folders over SFTP from a window' "$tmp/nfpm-archlinux.yaml"
 # package FORMAT BINARY_DIR RELEASE
 package() {
 	local config=$tmp/nfpm.yaml

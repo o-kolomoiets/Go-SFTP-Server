@@ -78,6 +78,9 @@ for f in NOTICE LGPL-3.0 GPL-3.0 LICENSE THIRD_PARTY_LICENSES THIRD_PARTY_LICENS
 	[ -s "/usr/share/doc/gosftpd-gui/$f" ] || fail "/usr/share/doc/gosftpd-gui/$f is missing or empty"
 done
 grep -q 'github.com/mappu/miqt' /usr/share/doc/gosftpd-gui/THIRD_PARTY_LICENSES || fail "THIRD_PARTY_LICENSES does not name miqt"
+if [ "$format" = deb ]; then
+	cmp -s /usr/share/doc/gosftpd-gui/copyright /usr/share/doc/gosftpd-gui/NOTICE || fail "the deb's copyright file is not the NOTICE"
+fi
 
 echo "== remove"
 case $format in
