@@ -84,6 +84,16 @@ process and changes the configuration only through its commands
   its start. At launch the GUI reads the last 4 MiB of the log at most.
   The audit log itself is never changed. Known warnings of gosftpd's
   operational log are shown in plain words, others as gosftpd wrote them.
+- `make gui-packages` builds the Linux packages of `gosftpd-gui` for
+  amd64 into `out/gui`, each with its own gosftpd, built as the release
+  builds it: a deb for Debian 12 and later and Ubuntu 24.04, an rpm for
+  Fedora 44 and later, an rpm for EL 9 with EPEL (where its Qt 6 comes
+  from) and an Arch package. They depend on the system's Qt 6, which the
+  GUI links dynamically (LGPL-3.0; the notices are in
+  `/usr/share/doc/gosftpd-gui`, on Arch in `/usr/share/licenses/gosftpd-gui`).
+  The build images and versions are
+  pinned, and two builds of a commit give the same packages. The release
+  ships them from v0.6.0.
 
 ### Changed
 

@@ -338,6 +338,14 @@ jobs:
       - name: The Linux binary runs and reports its version
         run: |
           ./dist/gosftpd_linux_amd64_v1/gosftpd version
+      # The gosftpd that the GUI's packages carry is built by
+      # packaging/gui/build.sh as GoReleaser builds it, and the release
+      # compares the two byte for byte (ADR 0013): checked here on every
+      # change, with the version GoReleaser gave the snapshot.
+      - name: packaging/gui/build.sh builds gosftpd as GoReleaser does
+        run: |
+          VERSION="$(jq -r .tag dist/metadata.json)" GOSFTPD_ONLY=1 packaging/gui/build.sh
+          cmp dist/gosftpd_linux_amd64_v1/gosftpd out/gui/gosftpd
       # go-licenses exits 0 for a module it cannot classify (make generate
       # fails on "License: Unknown"), and the template prints psx only
       # under BSD-3-Clause. Every module of the Linux binary needs an entry,
@@ -786,11 +794,119 @@ jobs:
       - name: govulncheck
         run: go tool -modfile=../tools/go.mod govulncheck ./...
 
+  # The GUI's Linux packages (ADR 0013), only when the GUI, its packaging
+  # or this workflow changed, or on main: a cold build takes about half an
+  # hour. make gui-packages runs twice, cold, from two checkouts (the
+  # second cloned under umask 002 at another path), and both must give the
+  # same packages; then each package is installed on a fresh system of its
+  # kind (test/packages/gui.sh).
+  gui-changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.changes.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          build=true
+          if [ -n "$BASE" ] && ! git diff --name-only "$BASE" HEAD |
+            grep -qE '^(gui/|packaging/(gui/|third_party_licenses\.tpl$)|test/packages/(gui\.sh|[^/]+\.Dockerfile)$|internal/version/|\.github/workflows/ci\.yml$|Makefile$|(tools/)?go\.(mod|sum)$)'; then
+            build=false
+          fi
+          echo "build=$build" >>"$GITHUB_OUTPUT"
+          echo "build the GUI's packages: $build"
+
+  gui-packages-build:
+    needs: gui-changes
+    if: needs.gui-changes.outputs.build == 'true'
+    strategy:
+      matrix:
+        copy: [a, b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: a
+      # No build cache: the release builds cold (ADR 0013).
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+      - name: make gui-packages
+        env:
+          COPY: ${{ matrix.copy }}
+        run: |
+          dir=a
+          if [ "$COPY" = b ]; then
+            umask 002
+            git -c advice.detachedHead=false clone --quiet --no-local a "$RUNNER_TEMP/b"
+            dir=$RUNNER_TEMP/b
+          fi
+          make -C "$dir" gui-packages
+          mkdir -p out-gui && cp "$dir"/out/gui/* out-gui/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gui-packages-${{ matrix.copy }}
+          path: out-gui/
+          if-no-files-found: error
+
+  gui-packages:
+    needs: [gui-changes, gui-packages-build]
+    if: needs.gui-changes.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gui-packages-*
+          path: ${{ runner.temp }}/gui
+      - name: Both builds gave the same packages
+        run: |
+          a=$RUNNER_TEMP/gui/gui-packages-a b=$RUNNER_TEMP/gui/gui-packages-b
+          cat "$a/SHA256SUMS"
+          diff -u "$a/SHA256SUMS" "$b/SHA256SUMS"
+          test "$(wc -l <"$a/SHA256SUMS")" -eq 4
+      - name: Install each package on a fresh system of its kind
+        env:
+          CI: "true"
+        run: |
+          dir=$RUNNER_TEMP/gui/gui-packages-a
+          version=$(git describe --tags --always --abbrev=12)
+          from() { sed -n 's/^FROM //p' "test/packages/$1.Dockerfile"; }
+          fedora=$(sed -n 's/^FEDORA_IMAGE=//p' packaging/gui/build.sh)
+          run() { # IMAGE FORMAT FILE [SETUP]
+            docker run --rm -e CI -v "$dir:/pkg:ro" -v "$PWD/test/packages/gui.sh:/gui.sh:ro" "$1" \
+              bash -c "${4:-true} && bash /gui.sh $2 /pkg/$3 $version"
+          }
+          deb=$(cd "$dir" && ls ./*.deb) fc=$(cd "$dir" && ls ./*.fc*.rpm) el=$(cd "$dir" && ls ./*.el9.*.rpm)
+          arch=$(cd "$dir" && ls ./*.pkg.tar.zst)
+          run "$(from debian-12)" deb "$deb"
+          run "$(from debian-13)" deb "$deb"
+          run "$fedora" rpm "$fc"
+          # EPEL as its documentation sets it up on Rocky: with CRB.
+          run "$(from el9)" rpm "$el" 'dnf -q -y install dnf-plugins-core epel-release && dnf config-manager --set-enabled crb'
+          run "$(from arch)" archlinux "$arch" 'pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinux >/dev/null 2>&1'
+          # Ubuntu 24.04, whose Qt packages are named libqt6core6t64 and
+          # so on: the runner itself.
+          sudo -E bash test/packages/gui.sh deb "$dir/$deb" "$version"
+
   # The only required status check: matrix jobs report as "test (…)",
   # so branch protection cannot require them by a stable name.
   ci-ok:
     if: always()
-    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln, gui]
+    needs: [lint, test, min-go, interop, systemd, coverage, ssh-audit, fuzz-smoke, goreleaser-check, reproducible, docker, packages, vuln, gui, gui-changes, gui-packages-build, gui-packages]
     runs-on: ubuntu-24.04
     permissions:
       actions: read # the jobs of this run

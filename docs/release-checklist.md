@@ -53,6 +53,7 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    | syft | `syft-version:` in `release.yml` and `ci.yml` |
    | BuildKit | `image=moby/buildkit:VERSION@sha256:DIGEST` in the `driver-opts:` of `release.yml` and `ci.yml` |
    | SBOM scanner | `generator=docker.io/docker/buildkit-syft-scanner:VERSION@sha256:DIGEST` in the `flags` of `dockers_v2` in `.goreleaser.yaml`, and its copy in ADR 0012 |
+   | The GUI's Linux packages | `packaging/gui/build.sh` (ADR 0013): the build images `library/debian`, `library/fedora` and `rockylinux/rockylinux` by digest; `DEBIAN_SNAPSHOT` `20261119T000000Z` and `DEBIAN_QT` `6.4.2+dfsg-10` (Debian 12's Qt as of that snapshot); `FEDORA_RELEASE` `44` and its Qt, `FEDORA_QT` `6.10.2-2.fc44`; `ROCKY_RELEASE` `9.8` and, until Rocky 9.9 ships, its toolchain: `EL9_GCC` `11.5.0-14.el9`, `EL9_BINUTILS` `2.35.2-72.el9`, `EL9_KERNEL_HEADERS` `5.14.0-687.10.1.el9_8.0.1`; `EPEL_QT` `6.10.3-1.el9` with the digests of its four rpms in `EPEL_QT_SHA256`; `NFPM` `v2.48.0` |
 
    Update one in a pull request of its own, with `goreleaser-check` green,
    before the release rather than with it: a new GoReleaser or cosign
@@ -60,9 +61,12 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    SBOM scanner by the digest of their multi-platform index, which `docker
    buildx imagetools inspect IMAGE:VERSION` prints (`moby/buildkit`,
    `docker/buildkit-syft-scanner`). A test (`TestChecklistPins` in
-   `test/release`) fails when a workflow or `.goreleaser.yaml` pins
-   GoReleaser, cosign, syft or an image by digest that this table does not
+   `test/release`) fails when a workflow, `.goreleaser.yaml` or
+   `packaging/gui/build.sh` pins GoReleaser, cosign, syft, an image by
+   digest or one of the GUI packages' versions that this table does not
    name; it does not see the other versions the workflows set by hand.
+   After a change to `packaging/gui/build.sh`'s pins, run `make
+   gui-packages` and install the packages as CI does.
 
 ## Tag and build
 

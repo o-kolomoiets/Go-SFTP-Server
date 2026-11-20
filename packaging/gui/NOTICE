@@ -1,0 +1,18 @@
+gosftpd-gui and the gosftpd it carries are licensed under the Apache
+License, Version 2.0 (LICENSE).
+
+gosftpd-gui uses the Qt libraries (Qt Core, Qt Gui, Qt Widgets and Qt
+DBus) under the GNU Lesser General Public License, version 3 (LGPL-3.0,
+which builds on GPL-3.0; both texts are next to this file, and on Debian
+and Ubuntu also in /usr/share/common-licenses). It links them
+dynamically and does not change them: they are the distribution's own
+packages, whose source the distribution provides, and any compatible
+version of them can take their place. The binary also contains code from
+Qt's header files (inline functions and templates). Qt is a trademark of
+The Qt Company Ltd.
+
+THIRD_PARTY_LICENSES lists the Go modules in gosftpd-gui, among them
+miqt (MIT), the Qt binding; THIRD_PARTY_LICENSES.gosftpd those in
+gosftpd.
+
+Source: https://github.com/o-kolomoiets/go-sftp-server

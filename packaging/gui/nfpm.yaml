@@ -1,0 +1,79 @@
+# The Linux packages of gosftpd-gui, made by packaging/gui/build.sh (make
+# gui-packages) with nfpm; GoReleaser makes none of them (ADR 0013). The
+# script sets GUI_VERSION, GUI_RELEASE, GUI_BINARY, GOSFTPD and PKG, and
+# SOURCE_DATE_EPOCH, which dates every file.
+name: gosftpd-gui
+arch: amd64
+platform: linux
+version: ${GUI_VERSION}
+version_schema: semver
+release: ${GUI_RELEASE}
+maintainer: gosftpd maintainers # no email address (ADR 0012)
+vendor: gosftpd
+homepage: https://github.com/o-kolomoiets/go-sftp-server
+license: Apache-2.0 AND LGPL-3.0-only
+section: net
+description: |-
+  Share folders over SFTP from a window
+  gosftpd-gui shares folders on this computer with people you choose, over
+  SFTP: choose the folders, add the people who may upload, start and stop
+  sharing, copy the connection details and see who uploaded what. It runs
+  the gosftpd it carries, and changes its configuration only through
+  gosftpd's commands.
+contents:
+  - { src: "${GUI_BINARY}", dst: /usr/bin/gosftpd-gui, expand: true, file_info: { mode: 0755 } }
+  # The gosftpd the GUI runs, never one found in PATH (ADR 0013, "Which
+  # gosftpd"): /usr/libexec on Debian, Fedora and EL, /usr/lib on Arch.
+  - { src: "${GOSFTPD}", dst: /usr/libexec/gosftpd-gui/gosftpd, expand: true, packager: deb, file_info: { mode: 0755 } }
+  - { src: "${GOSFTPD}", dst: /usr/libexec/gosftpd-gui/gosftpd, expand: true, packager: rpm, file_info: { mode: 0755 } }
+  - { src: "${GOSFTPD}", dst: /usr/lib/gosftpd-gui/gosftpd, expand: true, packager: archlinux, file_info: { mode: 0755 } }
+  - { dst: /usr/libexec/gosftpd-gui, type: dir, packager: deb, file_info: { mode: 0755 } }
+  - { dst: /usr/libexec/gosftpd-gui, type: dir, packager: rpm, file_info: { mode: 0755 } }
+  - { dst: /usr/lib/gosftpd-gui, type: dir, packager: archlinux, file_info: { mode: 0755 } }
+  - { src: packaging/gui/gosftpd-gui.desktop, dst: /usr/share/applications/gosftpd-gui.desktop, file_info: { mode: 0644 } }
+  - { src: packaging/gui/gosftpd-gui.svg, dst: /usr/share/icons/hicolor/scalable/apps/gosftpd-gui.svg, file_info: { mode: 0644 } }
+  # The notices of ADR 0013, "LGPLv3", in DOCDIR: /usr/share/doc/gosftpd-gui,
+  # and on Arch /usr/share/licenses/gosftpd-gui, the place Arch gives them,
+  # which its image does not drop (its pacman.conf leaves out
+  # /usr/share/doc).
+  - { dst: "${DOCDIR}", type: dir, expand: true, file_info: { mode: 0755 } }
+  - { src: packaging/gui/NOTICE, dst: "${DOCDIR}/NOTICE", expand: true, file_info: { mode: 0644 } }
+  # Debian's place for it, which a minimized system keeps (Debian Policy
+  # 12.5); the LGPL-3 text is in /usr/share/common-licenses there too.
+  - { src: packaging/gui/NOTICE, dst: /usr/share/doc/gosftpd-gui/copyright, packager: deb, file_info: { mode: 0644 } }
+  - { src: packaging/gui/licenses/LGPL-3.0, dst: "${DOCDIR}/LGPL-3.0", expand: true, file_info: { mode: 0644 } }
+  - { src: packaging/gui/licenses/GPL-3.0, dst: "${DOCDIR}/GPL-3.0", expand: true, file_info: { mode: 0644 } }
+  - { src: "${PKG}/LICENSE", dst: "${DOCDIR}/LICENSE", expand: true, file_info: { mode: 0644 } }
+  - { src: "${PKG}/THIRD_PARTY_LICENSES", dst: "${DOCDIR}/THIRD_PARTY_LICENSES", expand: true, file_info: { mode: 0644 } }
+  - { src: "${PKG}/THIRD_PARTY_LICENSES.gosftpd", dst: "${DOCDIR}/THIRD_PARTY_LICENSES.gosftpd", expand: true, file_info: { mode: 0644 } }
+rpm:
+  buildhost: gosftpd # nfpm takes the host name otherwise
+archlinux:
+  packager: gosftpd maintainers
+overrides:
+  deb:
+    # The libraries the binary names (glibc 2.34 is the newest symbol
+    # version it uses), with Qt 6.4 or later, as Debian 12 has it. On Ubuntu
+    # 24.04 and Debian 13 libqt6core6t64 provides libqt6core6 with its
+    # version. Debian only recommends the X11 platform plugins, without
+    # which the GUI does not start.
+    depends:
+      - libc6 (>= 2.34)
+      - libstdc++6
+      - libqt6core6 (>= 6.4)
+      - libqt6gui6 (>= 6.4)
+      - libqt6widgets6 (>= 6.4)
+      - qt6-qpa-plugins (>= 6.4)
+  rpm:
+    # The same names on Fedora and in EPEL; the binaries are compiled
+    # against each one's Qt, 6.10.
+    depends:
+      - qt6-qtbase >= 6.10
+      - qt6-qtbase-gui >= 6.10
+  archlinux:
+    depends:
+      - qt6-base
+# For the Arch package only, which nfpm's overrides cannot do, build.sh
+# adds epoch: "0" (nfpm puts a pre-release into an Arch pkgver only with an
+# epoch; see .goreleaser.yaml) and keeps the description's first line, as
+# pkgdesc is one line.

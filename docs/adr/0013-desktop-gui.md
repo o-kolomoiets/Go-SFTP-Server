@@ -599,7 +599,9 @@ In all four:
   default, and the GUI does not modify Qt.
   - **Linux:** the binary contains code from Qt's headers (inline
     functions and templates), so each package installs, in
-    `/usr/share/doc/gosftpd-gui/`:
+    `/usr/share/doc/gosftpd-gui/` (on Arch `/usr/share/licenses/gosftpd-gui/`,
+    Arch's place for them, which its container image keeps; the deb also
+    has the notice as Debian's `copyright` file):
     - a notice that the GUI uses Qt under the LGPLv3;
     - the GPLv3 and LGPLv3 texts;
     - the project's LICENSE;
@@ -708,27 +710,48 @@ In all four:
   - The GUI binary for the deb and Arch packages is compiled in a Debian
     12 container (Qt 6.4.2, glibc 2.36). A binary compiled on Ubuntu
     24.04 needs glibc 2.35 (`hypotf@GLIBC_2.35`, from Qt's headers) and
-    would not start on EL 9 (glibc 2.34).
-  - The deb depends on `libqt6core6`, `libqt6gui6`, `libqt6widgets6`
-    (6.4 or newer) and `qt6-qpa-plugins`. Debian lists the X11 plugin
-    package only as a recommendation, so without this dependency the GUI
-    would not start.
-  - The rpm's GUI binary is compiled in EL 9's container against EL 9's
-    own Qt 6; it then also runs on current Fedora. If EL 9's Qt is older
-    than miqt needs, it is compiled on Fedora and EL 9 is left out.
-    M5b-07 checks this first.
-  - The images are pinned by digest, and their Qt packages by version
-    from snapshot.debian.org and the EL 9 vault, so a rebuild can fetch
-    them. Both are written once, in the script that `make gui-packages`
-    runs.
-    - That command builds the Linux GUI binaries, gosftpd and the
-      packages in those images with `docker run`. The images install git,
-      so the build has the `.git` directory.
+    would not start on EL 9 (glibc 2.34); the Debian 12 one needs 2.34.
+  - The deb depends on the libraries the binary names, `libc6` (2.34 or
+    newer), `libstdc++6`, `libqt6core6`, `libqt6gui6` and
+    `libqt6widgets6` (6.4 or newer), and on `qt6-qpa-plugins`. Debian
+    lists the X11 plugin package only as a recommendation, so without
+    this dependency the GUI would not start.
+  - EL 9 has no Qt 6 of its own: Qt 6 is in EPEL only (M5b-07 found it,
+    at 6.10.3). So there are two rpms (Q5), each GUI binary compiled
+    against its distribution's Qt; both depend on `qt6-qtbase` and
+    `qt6-qtbase-gui` 6.10 or newer:
+    - `….fc44.x86_64.rpm`, in Fedora 44's container against Fedora 44's
+      Qt (6.10.2): Fedora 44 and later;
+    - `….el9.x86_64.rpm`, in EL 9's container against EPEL's Qt (6.10.3):
+      EL 9 with EPEL enabled (`dnf install epel-release`).
+    miqt v0.15.0 builds against both, with GCC 16 and 11.
+  - The images are pinned by digest, and so a rebuild can fetch the same
+    packages:
+    - Debian's come from snapshot.debian.org at a fixed time;
+    - Fedora's from the release repository of Fedora 44, which never
+      changes after the release (after its end of life, from the
+      archive's copy, which the repository file names too);
+    - EL 9's from the Rocky vault's copy of 9.8. It takes 9.8's updates
+      until 9.9 ships, so the compiler, its C++ library, the linker and
+      the kernel's headers are pinned by version, and glibc's headers to
+      the image's glibc; the vault keeps every build of the minor
+      release;
+    - EPEL's Qt from Koji by version and digest (EPEL keeps only its
+      latest build).
+
+    They are written once, in the script that `make gui-packages` runs,
+    packaging/gui/build.sh.
+    - That command builds, from a clean clone of the commit, the Linux GUI
+      binaries in those images with `docker run`, and gosftpd, with
+      GoReleaser's flags, and the packages, with nfpm, on the host. The
+      images install git, so the build has the `.git` directory.
     - The release's Linux GUI job runs it on the `ubuntu-24.04` runner,
       after the release guard, which needs the runner's `gh`.
-    - The `reproducible` job runs it twice, cold, and docs/install.md
-      documents it. So the release, the CI check and a person's rebuild
-      all run the same command.
+    - The CI job `gui-packages-build` runs it twice, cold, from two
+      checkouts, and `gui-packages` compares the two; `goreleaser-check`
+      compares the gosftpd it builds with GoReleaser's on every change.
+      docs/install.md is to document it with the release. So the release,
+      the CI check and a person's rebuild all run the same command.
   - CI starts each package's GUI under Xvfb in the debian-12, debian-13,
     el9 and arch containers of `test/packages` and checks the
     accessibility tree.
@@ -850,6 +873,12 @@ On 2026-11-12 the owner decided:
     planned after v0.6.0.
   - If it is planned before 1.0, it leaves that table for a milestone of
     its own.
+
+On 2026-11-19, when M5b-07 found that EL 9 has Qt 6 only in EPEL:
+
+- **Q5, the rpm:** both an rpm for Fedora and one for EL 9 with EPEL (the
+  alternatives were Fedora only, as this record planned for an EL 9
+  without the Qt miqt needs, or EL 9 with EPEL only).
 
 ### Definition of Done (amended)
 
