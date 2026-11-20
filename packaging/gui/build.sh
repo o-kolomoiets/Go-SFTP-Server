@@ -25,7 +25,8 @@
 # VERSION overrides the version (default: the tag of REF, or git describe
 # --abbrev=12). The release passes the tag it builds, GORELEASER_CURRENT_TAG,
 # which is also gosftpd's version in dist/. GOSFTPD_ONLY=1 builds only
-# gosftpd, into out/gui/gosftpd: CI compares it with GoReleaser's.
+# gosftpd, into out/gui/gosftpd, and runs no third-party code: CI compares
+# it with GoReleaser's, and the release's gui-check job with the packages'.
 set -euo pipefail
 
 # Pins. Dependabot does not see them: the release checklist lists them, and
@@ -69,7 +70,9 @@ commit_date=$(TZ=UTC0 git -C "$src" log -1 --date=format-local:%Y-%m-%dT%H:%M:%S
 
 goroot=$(go env GOROOT)
 gomod=$(go env GOMODCACHE)
-for m in . gui tools; do
+modules=". gui tools"
+[ -z "${GOSFTPD_ONLY:-}" ] || modules=. # gosftpd needs only its own
+for m in $modules; do
 	(cd "$src/$m" && go mod download)
 done
 

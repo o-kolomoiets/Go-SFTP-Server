@@ -215,7 +215,7 @@ o-kolomoiets/Go-SFTP-Server: vA.B.C is", met a tag made while it ran: by
 Tag release, whose Release run then waited for this one, or by hand. Its
 draft and image are complete: "The documented verification" passed, and
 only `latest` did not move. Do not re-run it: the release guard fails
-every re-run of this tag, in both jobs, before anything is built. Check
+every re-run of this tag, in every job, before anything is built. Check
 the draft and publish it (steps 8 to 10). Where `latest` ends up depends
 on the newer tag:
 

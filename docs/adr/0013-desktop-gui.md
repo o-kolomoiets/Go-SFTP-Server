@@ -645,10 +645,12 @@ In all four:
 ### Packaging and signing
 
 - **One Go for a release.** `generate` gives the Go version it resolved
-  (`go env GOVERSION`) as a job output. The GUI jobs and the `release` job
-  set up exactly that version (`check-latest: false`), so every gosftpd
-  in a release is built with one Go. That holds also when the `release`
-  job is re-run alone.
+  (`go env GOVERSION`, with its patch release) as a job output, read right
+  after setup-go, before any third-party code runs there. The GUI jobs,
+  `gui-check` and the `release` job set up exactly that version
+  (`check-latest: false`) and check `go env GOVERSION` against it, so
+  every gosftpd in a release is built with one Go. That holds also when
+  the `release` job is re-run alone.
 - **The GUI jobs** in `release.yml` (the Linux one is `gui-linux`)
   follow the rules of `generate` (ADR 0012):
   - the release guard runs first;
@@ -674,25 +676,43 @@ In all four:
   It uploads them as an artifact.
 - **The `release` job checks the GUI artifacts**, with
   `.github/scripts/release-gui.sh` (`check`, `gosftpd` and `checksums`
-  for the Linux packages). CI's `gui-packages` job runs the same checks
-  on its own build, with the runner image's tools.
+  for the Linux packages), and so does a job between them, `gui-check`.
+  CI's `gui-packages` job runs the same checks on its own build, with the
+  runner image's tools.
+  - Every job downloads an artifact by the id its job gave as an output
+    (`artifact-ids`), never by name, `generate`'s `out` included. A job
+    with the hosted runner's sudo can read the run's artifact token and
+    delete and upload again an artifact under the same name, which then
+    has another id.
   - It downloads each one into `$RUNNER_TEMP`, never into the checkout,
     and fails unless it holds only regular files with exactly the
     expected names, as `release-out.sh` does for `generate`'s artifact.
     Code that runs in a GUI job controls that job's upload step, so only
-    the `release` job can check it.
-  - After GoReleaser it takes gosftpd out of each GUI package and out of
-    the app as they are shipped, and compares it with the same target's
-    binary in `dist/`, byte for byte. It uses tools of the runner image:
-    `dpkg-deb --fsys-tarfile` for the deb, `tar` for the Arch package,
-    `rpm2cpio` and `cpio` for the rpm, and 7-Zip for the `.dmg`. A loose
-    copy in the artifact would prove nothing about the packaged one,
-    since the GUI job writes both.
+    a later job can check it.
+  - `gui-check` (`contents: read`, the guard first) takes gosftpd out of
+    each GUI package and out of the app as they are shipped, and compares
+    it, byte for byte, with gosftpd built there as GoReleaser builds it
+    (`packaging/gui/build.sh` with `GOSFTPD_ONLY`, which runs no
+    third-party code; `goreleaser-check` compares the two builds in CI).
+    It uses tools of the runner image: `dpkg-deb --fsys-tarfile` for the
+    deb, `tar` for the Arch package, `rpm2cpio` and `cpio` for the rpm,
+    and 7-Zip for the `.dmg`. They parse files that a GUI job wrote, so
+    they never run in the `release` job, which holds the signing identity;
+    and they run before GoReleaser signs or uploads anything, so a
+    mismatch stops the run before the draft exists. A loose copy in the
+    artifact would prove nothing about the packaged one, since the GUI job
+    writes both. It gives the SHA-256 of its gosftpd as an output.
+  - After GoReleaser the `release` job compares that SHA-256 with the same
+    target's binary in `dist/`.
   - GoReleaser lists the GUI files and their SBOMs with
     `checksum.extra_files` and uploads them with `release.extra_files`.
     A glob that matches nothing passes silently, so a release step fails
-    unless `checksums.txt` names every expected GUI file.
+    unless `checksums.txt` names every expected GUI file, and unless the
+    draft holds exactly these files (`gh release download` of
+    `gosftpd-gui*`, compared by SHA-256).
   - The existing attestation step covers them through `checksums.txt`.
+  - Not checked, by design: gosftpd-gui itself, the packages' other files
+    and the SBOMs come from the GUI job as it wrote them.
 - **Linux.** deb, rpm and Arch packages `gosftpd-gui`, for amd64 only in
   v0.6.0. arm64 follows when someone asks for it, built on the
   `ubuntu-24.04-arm` runner in the arm64 variants of the same images.

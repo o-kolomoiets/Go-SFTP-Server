@@ -31,6 +31,10 @@ jobs:
       # The Go that every gosftpd of the release is built with: the other
       # jobs set up exactly this version, also when re-run alone (ADR 0013).
       go-version: ${{ steps.go.outputs.version }}
+      # The artifact by its id, which the release job downloads: an artifact
+      # that another job of the run deleted and uploaded again under its
+      # name has another id.
+      out-artifact-id: ${{ steps.out.outputs.artifact-id }}
     steps:
       # Pinned to commits, as everywhere; Dependabot updates them.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,17 +51,20 @@ jobs:
           go-version: stable
           check-latest: true
           cache: false
-      - name: make generate
-        run: go mod tidy -diff && make generate
+      # Before any third-party code runs: the version setup-go resolved,
+      # with its patch release (setup-go would read 1.27 as a range).
       - id: go
         name: The Go version
         run: |
           version=$(go env GOVERSION)
           version=${version#go}
-          if ! [[ $version =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then echo "::error::go env GOVERSION: $version"; exit 1; fi
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::go env GOVERSION: $version"; exit 1; fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
+      - name: make generate
+        run: go mod tidy -diff && make generate
       # Their common root, out/, is the artifact's root.
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - id: out
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: out
           path: |
@@ -71,14 +78,16 @@ jobs:
   # The GUI's Linux packages, built as make gui-packages builds them, and
   # their SBOMs (ADR 0013): cold, with generate's Go, and under the rules
   # of generate, since the build runs third-party code (miqt's C++, nfpm,
-  # syft, the build images): the guard first, no credentials. The release
-  # job checks what it uploads.
+  # syft, the build images): the guard first, no credentials. gui-check
+  # and the release job check what it uploads.
   gui-linux:
     needs: generate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
+    outputs:
+      artifact-id: ${{ steps.gui.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,6 +102,10 @@ jobs:
           go-version: ${{ needs.generate.outputs.go-version }}
           check-latest: false
           cache: false
+      - name: Go is generate's
+        env:
+          GO_VERSION: ${{ needs.generate.outputs.go-version }}
+        run: test "$(go env GOVERSION)" = "go$GO_VERSION"
       - id: syft
         uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
@@ -106,7 +119,8 @@ jobs:
         run: |
           make gui-packages
           packaging/gui/sboms.sh out/gui "$VERSION"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - id: gui
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gui-linux
           path: |
@@ -118,8 +132,55 @@ jobs:
           overwrite: true # Re-run all jobs uploads it again
           retention-days: 7
 
-  release:
+  # Takes gosftpd out of each GUI package, as the package installs it, and
+  # compares it with gosftpd built here as GoReleaser builds it, byte for
+  # byte (ADR 0013). It parses the packages, which gui-linux wrote, with
+  # dpkg-deb, rpm2cpio, cpio, tar and zstd: never in the release job, which
+  # holds the signing identity, and before GoReleaser signs or uploads
+  # anything. The release job compares dist's binary with this one's
+  # SHA-256. It runs no third-party code: build.sh with GOSFTPD_ONLY builds
+  # gosftpd alone, from a clean clone, after go mod download.
+  gui-check:
     needs: [generate, gui-linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      gosftpd-sha256: ${{ steps.gosftpd.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Release guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/release-guard.sh
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ needs.generate.outputs.go-version }}
+          check-latest: false
+          cache: false
+      - name: Go is generate's
+        env:
+          GO_VERSION: ${{ needs.generate.outputs.go-version }}
+        run: test "$(go env GOVERSION)" = "go$GO_VERSION"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.gui-linux.outputs.artifact-id }}
+          path: ${{ runner.temp }}/gui-linux
+      - id: gosftpd
+        name: The GUI's packages carry gosftpd as GoReleaser builds it
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          .github/scripts/release-gui.sh check "$RUNNER_TEMP/gui-linux" "$RUNNER_TEMP/gui" "$GITHUB_REF_NAME"
+          GOSFTPD_ONLY=1 packaging/gui/build.sh
+          .github/scripts/release-gui.sh gosftpd "$RUNNER_TEMP/gui" out/gui/gosftpd
+          echo "sha256=$(sha256sum <out/gui/gosftpd | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+
+  release:
+    needs: [generate, gui-linux, gui-check]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # the draft release and its assets
@@ -141,10 +202,14 @@ jobs:
           go-version: ${{ needs.generate.outputs.go-version }}
           check-latest: false
           cache: false
+      - name: Go is generate's
+        env:
+          GO_VERSION: ${{ needs.generate.outputs.go-version }}
+        run: test "$(go env GOVERSION)" = "go$GO_VERSION"
       # Never into the checkout: release-out.sh checks the files first.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: out
+          artifact-ids: ${{ needs.generate.outputs.out-artifact-id }}
           path: ${{ runner.temp }}/generated
       # The generated files, checked against the exact list, in a new out/
       # with the image's empty directories made here; the modules as go.sum
@@ -158,12 +223,14 @@ jobs:
           changed="$(git status --porcelain)"
           if [ -n "$changed" ]; then echo "::error::the tree is not clean"; echo "$changed"; exit 1; fi
           .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
-      # The GUI's packages and SBOMs, checked against the exact list of the
-      # tag, in a new directory that GoReleaser lists in checksums.txt and
-      # uploads (GUI_DIR, .goreleaser.yaml's extra_files).
+      # The GUI's packages and SBOMs that gui-check checked (by the
+      # artifact's id), checked against the exact list of the tag, in a new
+      # directory that GoReleaser lists in checksums.txt and uploads
+      # (GUI_DIR, .goreleaser.yaml's extra_files). Their names only: the
+      # packages are never parsed here.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: gui-linux
+          artifact-ids: ${{ needs.gui-linux.outputs.artifact-id }}
           path: ${{ runner.temp }}/gui-linux
       - name: The GUI's files
         run: .github/scripts/release-gui.sh check "$RUNNER_TEMP/gui-linux" "$RUNNER_TEMP/gui" "$GITHUB_REF_NAME"
@@ -202,14 +269,21 @@ jobs:
         run: |
           built="$(jq -r .tag dist/metadata.json)"
           if [ "$built" != "$GITHUB_REF_NAME" ]; then echo "::error::GoReleaser built $built, not $GITHUB_REF_NAME"; exit 1; fi
-      # Also before the attestations: the gosftpd in each GUI package, as
-      # the package installs it, is dist's Linux amd64 binary byte for
-      # byte, and checksums.txt lists every GUI file (an extra_files glob
-      # that matches nothing passes).
-      - name: The GUI's packages carry dist's gosftpd, and checksums.txt lists them
+      # Also before the attestations: dist's Linux amd64 gosftpd is the one
+      # gui-check found in each GUI package, checksums.txt lists every GUI
+      # file (an extra_files glob that matches nothing passes), and the
+      # draft holds exactly these GUI files.
+      - name: The GUI's packages carry dist's gosftpd, and checksums.txt and the draft list them
+        env:
+          GOSFTPD_SHA256: ${{ needs.gui-check.outputs.gosftpd-sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          .github/scripts/release-gui.sh gosftpd "$RUNNER_TEMP/gui" dist/gosftpd_linux_amd64_v1/gosftpd
+          dist=$(sha256sum <dist/gosftpd_linux_amd64_v1/gosftpd | cut -d' ' -f1)
+          if [ "$dist" != "$GOSFTPD_SHA256" ]; then echo "::error::dist's gosftpd is $dist, the GUI packages' $GOSFTPD_SHA256"; exit 1; fi
           .github/scripts/release-gui.sh checksums "$RUNNER_TEMP/gui" dist/checksums.txt
+          gh release download "$GITHUB_REF_NAME" -p 'gosftpd-gui*' -D "$RUNNER_TEMP/draft-gui"
+          diff <(cd "$RUNNER_TEMP/gui" && sha256sum -- *) <(cd "$RUNNER_TEMP/draft-gui" && sha256sum -- *)
       # SLSA build provenance, in two steps: the action takes one subject
       # input. No storage records: they need push-to-registry and an
       # organization (ADR 0012).

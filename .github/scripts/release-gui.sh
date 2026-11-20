@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# The release job's checks of the GUI's Linux packages (ADR 0013,
+# The release workflow's checks of the GUI's Linux packages (ADR 0013,
 # "Packaging and signing"). Code that runs in the gui-linux job controls
-# what it uploads; only these checks stand between that and the signed
-# checksums.txt.
+# what it uploads. These checks hold the artifact to its file names and
+# the gosftpd that each package carries to the release's own; they do not
+# check gosftpd-gui itself, the packages' other contents or the SBOMs,
+# which come from that job as they are.
 #
 # release-gui.sh check DOWNLOADED OUT TAG
-#   DOWNLOADED, where the release job downloaded the gui-linux artifact,
-#   must hold exactly the four packages of TAG that make gui-packages
-#   builds and the SBOM of each (NAME.sbom.json), as regular files and
-#   nothing else. They are copied into OUT, a new directory, for
-#   GoReleaser's extra_files (GUI_DIR).
+#   DOWNLOADED, where a job downloaded the gui-linux artifact, must hold
+#   exactly the four packages of TAG that make gui-packages builds and the
+#   SBOM of each (NAME.sbom.json), as regular files and nothing else. They
+#   are copied into OUT, a new directory (the release job's GUI_DIR, for
+#   GoReleaser's extra_files). It reads names only.
 # release-gui.sh gosftpd DIR GOSFTPD
 #   The gosftpd in each package in DIR, as the package installs it, must be
-#   GOSFTPD (dist's Linux amd64 binary) byte for byte. A loose copy in the
-#   artifact would prove nothing about the packaged one.
+#   GOSFTPD byte for byte: gui-check's, built as GoReleaser builds it. A
+#   loose copy in the artifact would prove nothing about the packaged one.
+#   It parses the packages, with dpkg-deb, rpm2cpio, cpio, tar and zstd: a
+#   job that holds no credentials runs it.
 # release-gui.sh checksums DIR CHECKSUMS
 #   CHECKSUMS (dist/checksums.txt, which cosign signs and the attestation
 #   covers) must list every file in DIR with its SHA-256: GoReleaser passes

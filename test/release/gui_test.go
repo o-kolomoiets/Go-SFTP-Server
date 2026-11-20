@@ -22,8 +22,8 @@ import (
 // job does.
 func releaseGUI(t *testing.T, args ...string) result {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the release workflow runs the script on Linux")
+	if runtime.GOOS != "linux" {
+		t.Skip("the release workflow runs the script on Ubuntu, with its tools")
 	}
 	cmd := exec.CommandContext(t.Context(), "bash", append([]string{".github/scripts/release-gui.sh"}, args...)...)
 	cmd.Dir = root
