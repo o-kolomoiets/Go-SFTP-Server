@@ -649,8 +649,8 @@ In all four:
   set up exactly that version (`check-latest: false`), so every gosftpd
   in a release is built with one Go. That holds also when the `release`
   job is re-run alone.
-- **The GUI jobs** in `release.yml` follow the rules of `generate`
-  (ADR 0012):
+- **The GUI jobs** in `release.yml` (the Linux one is `gui-linux`)
+  follow the rules of `generate` (ADR 0012):
   - the release guard runs first;
   - `contents: read`, no `id-token`;
   - setup-go with `cache: false`, and no Actions cache restored. A
@@ -667,10 +667,15 @@ In all four:
   - the packages or the app (below);
   - an SBOM of each GUI binary with syft (the version `release.yml`
     pins). The SBOM names the Go modules; Qt is named in the notices,
-    not in the SBOM.
+    not in the SBOM. On Linux it is an SBOM of each package, written from
+    the files the package installs (`packaging/gui/sboms.sh`): it names
+    the modules of gosftpd-gui and of the gosftpd it carries.
 
   It uploads them as an artifact.
-- **The `release` job checks the GUI artifacts.**
+- **The `release` job checks the GUI artifacts**, with
+  `.github/scripts/release-gui.sh` (`check`, `gosftpd` and `checksums`
+  for the Linux packages). CI's `gui-packages` job runs the same checks
+  on its own build, with the runner image's tools.
   - It downloads each one into `$RUNNER_TEMP`, never into the checkout,
     and fails unless it holds only regular files with exactly the
     expected names, as `release-out.sh` does for `generate`'s artifact.
@@ -680,9 +685,9 @@ In all four:
     the app as they are shipped, and compares it with the same target's
     binary in `dist/`, byte for byte. It uses tools of the runner image:
     `dpkg-deb --fsys-tarfile` for the deb, `tar` for the Arch package,
-    and `rpm2cpio` or 7-Zip for the rpm and the `.dmg`. A loose copy in
-    the artifact would prove nothing about the packaged one, since the
-    GUI job writes both.
+    `rpm2cpio` and `cpio` for the rpm, and 7-Zip for the `.dmg`. A loose
+    copy in the artifact would prove nothing about the packaged one,
+    since the GUI job writes both.
   - GoReleaser lists the GUI files and their SBOMs with
     `checksum.extra_files` and uploads them with `release.extra_files`.
     A glob that matches nothing passes silently, so a release step fails

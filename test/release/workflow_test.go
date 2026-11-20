@@ -334,3 +334,119 @@ func TestCIOK(t *testing.T) {
 		})
 	}
 }
+
+// jobBlock returns a job of .github/workflows/FILE as written, from its
+// name to the next job.
+func jobBlock(t *testing.T, file, job string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	in := false
+	for line := range strings.Lines(string(data)) {
+		top := strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.HasSuffix(line, ":\n")
+		switch {
+		case line == "  "+job+":\n":
+			in = true
+		case in && top:
+			return b.String()
+		}
+		if in {
+			b.WriteString(line)
+		}
+	}
+	if !in {
+		t.Fatalf("%s has no job %s", file, job)
+	}
+	return b.String()
+}
+
+// TestReleaseOneGo checks that every gosftpd of a release is built with
+// one Go (ADR 0013): generate gives the Go it resolved, and the jobs that
+// build, gui-linux and release, set up exactly that one, with no newer
+// patch release and no Actions cache.
+func TestReleaseOneGo(t *testing.T) {
+	t.Parallel()
+	if gen := jobBlock(t, "release.yml", "generate"); !strings.Contains(gen, "\n    outputs:\n") ||
+		!strings.Contains(gen, "      go-version: ${{ steps.go.outputs.version }}\n") || !strings.Contains(gen, "\n      - id: go\n") {
+		t.Errorf("generate gives no go-version output from its step go:\n%s", gen)
+	}
+	for _, job := range []string{"gui-linux", "release"} {
+		var found []string
+		for _, s := range workflowSteps(t, "release.yml", job) {
+			if strings.Contains(s, "uses: actions/setup-go@") {
+				found = append(found, s)
+			}
+		}
+		if len(found) != 1 {
+			t.Errorf("%s has %d setup-go steps, want 1", job, len(found))
+			continue
+		}
+		with := stepMap(found[0], "with")
+		want := map[string]string{"go-version": "${{ needs.generate.outputs.go-version }}", "check-latest": "false", "cache": "false"}
+		for k, v := range want {
+			if with[k] != v {
+				t.Errorf("%s sets up Go with %s: %q, want %q", job, k, with[k], v)
+			}
+		}
+	}
+}
+
+// TestReleaseGUILinux checks that gui-linux, which runs third-party code
+// (miqt's C++, nfpm, syft, the build images), follows the rules of
+// generate (ADR 0012, 0013): no permission but contents: read, no
+// secret, and the guard right after the checkout.
+func TestReleaseGUILinux(t *testing.T) {
+	t.Parallel()
+	job := jobBlock(t, "release.yml", "gui-linux")
+	if !strings.Contains(job, "\n    permissions:\n      contents: read\n    steps:\n") {
+		t.Errorf("gui-linux has permissions other than contents: read:\n%s", job)
+	}
+	if strings.Contains(job, "secrets.") {
+		t.Errorf("gui-linux uses a secret:\n%s", job)
+	}
+	steps := workflowSteps(t, "release.yml", "gui-linux")
+	if len(steps) < 2 || !strings.Contains(steps[0], "uses: actions/checkout@") ||
+		!strings.Contains(steps[1], "name: Release guard\n") || !strings.Contains(steps[1], "run: .github/scripts/release-guard.sh\n") {
+		t.Errorf("gui-linux does not run the guard right after the checkout:\n%s", strings.Join(steps, ""))
+	}
+	if !strings.Contains(stepNamed(t, steps, "make gui-packages, and the SBOMs"), "VERSION: ${{ github.ref_name }}\n") {
+		t.Error("gui-linux does not build the packages with the tag as VERSION, the version GoReleaser gives gosftpd")
+	}
+}
+
+// TestReleaseGUIFiles checks the order of the release job's GUI steps:
+// the artifact checked into GUI_DIR before GoReleaser lists and uploads
+// it, and, after GoReleaser and before the attestations, the gosftpd in
+// each package compared with dist's and checksums.txt checked.
+func TestReleaseGUIFiles(t *testing.T) {
+	t.Parallel()
+	steps := workflowSteps(t, "release.yml", "release")
+	index := func(match func(string) bool) int {
+		for i, s := range steps {
+			if match(s) {
+				return i
+			}
+		}
+		return -1
+	}
+	check := index(func(s string) bool {
+		return strings.Contains(s, `.github/scripts/release-gui.sh check "$RUNNER_TEMP/gui-linux" "$RUNNER_TEMP/gui" "$GITHUB_REF_NAME"`)
+	})
+	goreleaser := index(func(s string) bool { return strings.Contains(s, "uses: goreleaser/goreleaser-action@") })
+	after := index(func(s string) bool {
+		return strings.Contains(s, `release-gui.sh gosftpd "$RUNNER_TEMP/gui" dist/gosftpd_linux_amd64_v1/gosftpd`) &&
+			strings.Contains(s, `release-gui.sh checksums "$RUNNER_TEMP/gui" dist/checksums.txt`)
+	})
+	attest := index(func(s string) bool { return strings.Contains(s, "uses: actions/attest@") })
+	if check < 0 || goreleaser < 0 || after < 0 || attest < 0 || check >= goreleaser || goreleaser >= after || after >= attest {
+		t.Errorf("the release job's GUI steps: check %d, GoReleaser %d, gosftpd and checksums %d, attest %d; want them in that order", check, goreleaser, after, attest)
+	}
+	if goreleaser >= 0 {
+		if got := stepMap(steps[goreleaser], "env")["GUI_DIR"]; got != "${{ runner.temp }}/gui" {
+			t.Errorf("the GoReleaser step sets GUI_DIR to %q, want the checked directory, ${{ runner.temp }}/gui", got)
+		}
+	}
+}

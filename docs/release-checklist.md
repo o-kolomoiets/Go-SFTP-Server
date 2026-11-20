@@ -98,9 +98,11 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    - its tag and title `vX.Y.Z`, marked as a pre-release for `-alpha`,
      `-beta` and `-rc`;
    - its notes, the CHANGELOG section of step 3;
-   - its 22 assets: 6 archives (`linux`, `darwin` and `freebsd`, each
+   - its 30 assets: 6 archives (`linux`, `darwin` and `freebsd`, each
      `amd64` and `arm64`), 6 packages (`.deb`, `.rpm` and `.pkg.tar.zst`,
-     each for both), 6 SBOMs (`.sbom.json`), `checksums.txt`,
+     each for both), 6 SBOMs (`.sbom.json`), the GUI's 4 packages
+     (`gosftpd-gui…`: a deb, an rpm for Fedora, an rpm for EL 9 and an Arch
+     package, all amd64) and their 4 SBOMs, `checksums.txt`,
      `checksums.txt.sigstore.json`, `digests.txt` and
      `gosftpd_X.Y.Z.intoto.jsonl`;
    - the image `ghcr.io/o-kolomoiets/gosftpd:vX.Y.Z` on the package's page,
