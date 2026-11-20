@@ -775,3 +775,24 @@ needs no token. Not `--snapshot`: it names every file
 image are not reproducible and are left out. `GORELEASER_CURRENT_TAG`
 makes GoReleaser build that tag and no other on the same commit, such as
 the final of an rc you rebuild.
+
+### The GUI's packages
+
+From v0.6.0 the release also carries the Linux packages of the desktop
+GUI, `gosftpd-gui` (a deb, an rpm for Fedora, an rpm for EL 9 with EPEL
+and an Arch package, all amd64), and an SBOM of each. `make gui-packages`
+builds them, in containers pinned by digest whose packages come from
+snapshot.debian.org, Fedora's release repository, Rocky Linux's vault and
+EPEL's Qt from Koji by digest, so it needs Docker and access to those
+hosts. In `gosftpd-$V`, after the rebuild above and with the same
+`GOTOOLCHAIN`:
+
+```sh
+VERSION="v$V" make gui-packages
+cd out/gui && sha256sum --check --ignore-missing ../../../checksums.txt
+```
+
+Each of the 4 packages must print `OK`; their SBOMs are not reproducible.
+The gosftpd each package carries is the release's Linux amd64 binary, byte
+for byte, which the release workflow checks before the release is
+published.

@@ -78,7 +78,16 @@ archives:
       - { src: "out/man/*.1.gz", dst: man, strip_parent: true, info: *info }
       - { src: "out/completions/*", dst: completions, strip_parent: true, info: *info }
 
-checksum: { name_template: checksums.txt, algorithm: sha256 }
+# The GUI's Linux packages and their SBOMs (ADR 0013): release.yml's
+# gui-linux job builds them, and the release job checks them and sets
+# GUI_DIR. Without GUI_DIR the glob is empty and GoReleaser passes over it,
+# so a local run and goreleaser-check build the server alone; a literal
+# path that does not exist, or .Env.GUI_DIR unset, would fail the run.
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+  extra_files:
+    - glob: '{{ if isEnvSet "GUI_DIR" }}{{ .Env.GUI_DIR }}/*{{ end }}'
 
 # One SPDX JSON per archive, written by syft with GoReleaser's default
 # arguments (--enrich all goes online); checksums.txt lists them.
@@ -218,6 +227,8 @@ git: { prerelease_suffix: "-" }
 # with --release-notes: .github/scripts/release-notes.sh VERSION writes it.
 release:
   draft: true
+  extra_files:
+    - glob: '{{ if isEnvSet "GUI_DIR" }}{{ .Env.GUI_DIR }}/*{{ end }}' # as in checksum
   replace_existing_draft: true # a re-run replaces its own draft
   prerelease: auto
   preflight: { fail_on_error: true } # an immutable release stops the run before the build

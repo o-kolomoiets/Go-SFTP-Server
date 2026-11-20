@@ -815,7 +815,7 @@ jobs:
         run: |
           build=true
           if [ -n "$BASE" ] && ! git diff --name-only "$BASE" HEAD |
-            grep -qE '^(gui/|packaging/(gui/|third_party_licenses\.tpl$)|test/packages/(gui\.sh|[^/]+\.Dockerfile)$|internal/version/|\.github/workflows/ci\.yml$|Makefile$|(tools/)?go\.(mod|sum)$)'; then
+            grep -qE '^(gui/|packaging/(gui/|third_party_licenses\.tpl$)|test/packages/(gui\.sh|[^/]+\.Dockerfile)$|internal/version/|\.github/(workflows/ci\.yml|scripts/release-gui\.sh)$|Makefile$|(tools/)?go\.(mod|sum)$)'; then
             build=false
           fi
           echo "build=$build" >>"$GITHUB_OUTPUT"
@@ -841,9 +841,15 @@ jobs:
           go-version: stable
           check-latest: true
           cache: false
-      - name: make gui-packages
+      # The SBOMs as release.yml's gui-linux job writes them.
+      - id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.55.0
+      - name: make gui-packages, and the SBOMs
         env:
           COPY: ${{ matrix.copy }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
         run: |
           dir=a
           if [ "$COPY" = b ]; then
@@ -852,7 +858,9 @@ jobs:
             dir=$RUNNER_TEMP/b
           fi
           make -C "$dir" gui-packages
-          mkdir -p out-gui && cp "$dir"/out/gui/* out-gui/
+          (cd "$dir" && packaging/gui/sboms.sh out/gui "$(git describe --tags --always --abbrev=12)")
+          # What the release takes: the packages and their SBOMs.
+          mkdir -p out-gui && cp "$dir"/out/gui/*.deb "$dir"/out/gui/*.rpm "$dir"/out/gui/*.zst "$dir"/out/gui/*.sbom.json out-gui/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gui-packages-${{ matrix.copy }}
@@ -868,16 +876,43 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The Go of the builds, for gosftpd built here as gui-check builds it.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: gui-packages-*
           path: ${{ runner.temp }}/gui
+      # The SBOMs, which syft writes with the time, may differ.
       - name: Both builds gave the same packages
         run: |
           a=$RUNNER_TEMP/gui/gui-packages-a b=$RUNNER_TEMP/gui/gui-packages-b
-          cat "$a/SHA256SUMS"
-          diff -u "$a/SHA256SUMS" "$b/SHA256SUMS"
-          test "$(wc -l <"$a/SHA256SUMS")" -eq 4
+          sums() { (cd "$1" && sha256sum -- *.deb *.rpm *.pkg.tar.zst); }
+          sums "$a" | tee "$RUNNER_TEMP/a.sums"
+          sums "$b" | diff -u "$RUNNER_TEMP/a.sums" -
+          test "$(wc -l <"$RUNNER_TEMP/a.sums")" -eq 4
+      # release.yml's checks of the gui-linux artifact, on this one, as
+      # gui-check and the release job run them: its files and their names;
+      # gosftpd built with GOSFTPD_ONLY (which goreleaser-check compares
+      # with GoReleaser's build) against the one each package installs,
+      # with this runner image's tools (a wrong binary must fail); and the
+      # check of checksums.txt.
+      - name: The release's checks of the GUI files
+        run: |
+          s=.github/scripts/release-gui.sh checked=$RUNNER_TEMP/gui-checked
+          version=$(git describe --tags --always --abbrev=12)
+          $s check "$RUNNER_TEMP/gui/gui-packages-a" "$checked" "$version"
+          VERSION=$version GOSFTPD_ONLY=1 packaging/gui/build.sh
+          $s gosftpd "$checked" out/gui/gosftpd
+          if $s gosftpd "$checked" /usr/bin/true >/dev/null 2>&1; then
+            echo "::error::release-gui.sh gosftpd passed another binary"
+            exit 1
+          fi
+          (cd "$checked" && sha256sum -- *) >"$RUNNER_TEMP/checksums.txt"
+          $s checksums "$checked" "$RUNNER_TEMP/checksums.txt"
       - name: Install each package on a fresh system of its kind
         env:
           CI: "true"

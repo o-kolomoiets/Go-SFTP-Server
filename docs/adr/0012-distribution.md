@@ -106,7 +106,7 @@
 - **Images are public before the release is.** `release.yml` pushes the
   `vX.Y.Z` image while the release is still a draft and, for a stable
   version, points `latest` at it once the verification step has passed
-  (see GoReleaser configuration). A guard in both jobs (Workflows) stops
+  (see GoReleaser configuration). A guard in every job (Workflows) stops
   the run unless the tag is the highest release tag and has no published
   release; otherwise a re-run or a dispatch for a published release would
   push and sign a rebuilt image (images are not reproducible) under its
@@ -315,7 +315,9 @@ release:
   their file's mtime whatever `mtime` said; apk is not built (see
   Packages), so no hook touches them.
 - **Toolchain.** Releases keep `go-version: stable` with `check-latest`,
-  in line with the monthly toolchain refresh of ROADMAP §9.6.
+  in line with the monthly toolchain refresh of ROADMAP §9.6: `generate`
+  resolves it, and from v0.6.0 the jobs that build set up exactly the
+  version it resolved (ADR 0013, "One Go for a release").
   "Reproducible" means: the same tag built with the same Go version, which
   `go version -m gosftpd` prints, and the same GoReleaser version, the
   `version:` input of `.github/workflows/release.yml` at that tag. Archives
@@ -463,7 +465,7 @@ jobs:
       - run: .github/scripts/release-guard.sh   # again: a re-run of this job alone skips generate's
         env: { GH_TOKEN: "${{ github.token }}" }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with: { go-version: stable, check-latest: true, cache: false }   # no Actions cache
+        with: { go-version: stable, check-latest: true, cache: false }   # no Actions cache; from v0.6.0 generate's version, check-latest: false (ADR 0013)
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: out, path: "${{ runner.temp }}/generated" }      # never into the checkout
       - run: ...                 # .github/scripts/release-out.sh "$RUNNER_TEMP/generated" out: the artifact checked against the

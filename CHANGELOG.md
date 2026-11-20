@@ -92,8 +92,11 @@ process and changes the configuration only through its commands
   GUI links dynamically (LGPL-3.0; the notices are in
   `/usr/share/doc/gosftpd-gui`, on Arch in `/usr/share/licenses/gosftpd-gui`).
   The build images and versions are
-  pinned, and two builds of a commit give the same packages. The release
-  ships them from v0.6.0.
+  pinned, and two builds of a commit give the same packages. From v0.6.0
+  the release carries them, with an SBOM of each, in `checksums.txt`,
+  which cosign signs and the build provenance covers; the release
+  workflow checks that the gosftpd in each package is the release's own,
+  byte for byte. docs/install.md says how to rebuild them.
 
 ### Changed
 

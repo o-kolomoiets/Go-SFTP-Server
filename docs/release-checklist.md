@@ -98,9 +98,11 @@ CHANGELOG. A pre-release is `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`.
    - its tag and title `vX.Y.Z`, marked as a pre-release for `-alpha`,
      `-beta` and `-rc`;
    - its notes, the CHANGELOG section of step 3;
-   - its 22 assets: 6 archives (`linux`, `darwin` and `freebsd`, each
+   - its 30 assets: 6 archives (`linux`, `darwin` and `freebsd`, each
      `amd64` and `arm64`), 6 packages (`.deb`, `.rpm` and `.pkg.tar.zst`,
-     each for both), 6 SBOMs (`.sbom.json`), `checksums.txt`,
+     each for both), 6 SBOMs (`.sbom.json`), the GUI's 4 packages
+     (`gosftpd-gui…`: a deb, an rpm for Fedora, an rpm for EL 9 and an Arch
+     package, all amd64) and their 4 SBOMs, `checksums.txt`,
      `checksums.txt.sigstore.json`, `digests.txt` and
      `gosftpd_X.Y.Z.intoto.jsonl`;
    - the image `ghcr.io/o-kolomoiets/gosftpd:vX.Y.Z` on the package's page,
@@ -213,7 +215,7 @@ o-kolomoiets/Go-SFTP-Server: vA.B.C is", met a tag made while it ran: by
 Tag release, whose Release run then waited for this one, or by hand. Its
 draft and image are complete: "The documented verification" passed, and
 only `latest` did not move. Do not re-run it: the release guard fails
-every re-run of this tag, in both jobs, before anything is built. Check
+every re-run of this tag, in every job, before anything is built. Check
 the draft and publish it (steps 8 to 10). Where `latest` ends up depends
 on the newer tag:
 
