@@ -65,12 +65,10 @@ check() {
 		echo "$me: $out exists: the files go into a new directory" >&2
 		exit 1
 	fi
-	local list
-	list=$(names "$tag")
-	local -A want=()
-	while IFS= read -r name; do
-		want[$name]=1
-	done <<<"$list"
+	# The expected names, one per line. No associative array: macOS's bash
+	# 3.2 runs the tests too.
+	local want
+	want=$(names "$tag")
 	while IFS= read -r -d '' name; do
 		name=${name#./}
 		local path=$downloaded/$name
@@ -83,26 +81,33 @@ check() {
 		elif ! [ -f "$path" ]; then
 			echo "$me: $name: neither a regular file nor a directory" >&2
 			status=1
-		elif [ -z "${want[$name]:-}" ]; then
-			echo "$me: $name: an unexpected file" >&2
-			status=1
+		else
+			case $'\n'"$want"$'\n' in
+			*$'\n'"$name"$'\n'*) ;;
+			*)
+				echo "$me: $name: an unexpected file" >&2
+				status=1
+				;;
+			esac
 		fi
 	done < <(cd "$downloaded" && find . -mindepth 1 -print0)
-	for name in "${!want[@]}"; do
+	while IFS= read -r name; do
 		if ! [ -f "$downloaded/$name" ] || [ -L "$downloaded/$name" ]; then
 			echo "$me: $name is missing" >&2
 			status=1
 		fi
-	done
+	done <<<"$want"
 	if [ "$status" -ne 0 ]; then
 		echo "$me: $downloaded does not hold exactly the GUI packages of $tag and their SBOMs" >&2
 		exit 1
 	fi
 	mkdir -p "$out"
-	for name in "${!want[@]}"; do
+	local count=0
+	while IFS= read -r name; do
 		cp "$downloaded/$name" "$out/$name"
-	done
-	echo "$me: $out holds the ${#want[@]} GUI files of $tag from $downloaded"
+		count=$((count + 1))
+	done <<<"$want"
+	echo "$me: $out holds the $count GUI files of $tag from $downloaded"
 }
 
 # packaged FILE: the gosftpd that the package FILE installs, on stdout.
