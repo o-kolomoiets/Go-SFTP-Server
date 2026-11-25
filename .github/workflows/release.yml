@@ -46,7 +46,7 @@ jobs:
         run: .github/scripts/release-guard.sh
       # No Actions cache where a release is built: a cache written by a CI
       # job on main would be built into the release (ADR 0012).
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           check-latest: true
@@ -97,7 +97,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/release-guard.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ needs.generate.outputs.go-version }}
           check-latest: false
@@ -156,7 +156,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/release-guard.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ needs.generate.outputs.go-version }}
           check-latest: false
@@ -197,7 +197,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/release-guard.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ needs.generate.outputs.go-version }}
           check-latest: false
